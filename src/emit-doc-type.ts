@@ -11,7 +11,7 @@ export function emitDocType(
 	program: Program,
 	projection: ResolvedProjection,
 ): EmittedDocTypeFile {
-	const fileName = `${toKebabCase(projection.projectionModel.name)}-search-doc.ts`;
+	const fileName = toDocTypeFileName(projection.projectionModel.name);
 	const body = renderInterfaceBody(
 		program,
 		projection.fields.map((x) => ({
@@ -143,10 +143,19 @@ export function toKebabCase(name: string): string {
 		.toLowerCase();
 }
 
+export function toDocTypeFileName(projectionModelName: string): string {
+	const kebab = toKebabCase(projectionModelName);
+	const base = kebab.endsWith("-search-doc")
+		? kebab.slice(0, -"-search-doc".length)
+		: kebab;
+	return `${base}-search-doc.ts`;
+}
+
 export const __test = {
 	renderModel,
 	renderScalar,
 	renderType,
 	renderUnion,
+	toDocTypeFileName,
 	toKebabCase,
 };

@@ -46,7 +46,7 @@ describe("doc type emitter", () => {
 		assert.ok(resolved);
 
 		const emitted = emitDocType(runner.program, resolved);
-		assert.equal(emitted.fileName, "product-search-doc-search-doc.ts");
+		assert.equal(emitted.fileName, "product-search-doc.ts");
 		assert.equal(
 			emitted.content.includes("export interface ProductSearchDoc"),
 			true,

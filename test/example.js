@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
 import test from "node:test";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 test("emits resolved search projections", async () => {
 	const content = await readFile(
@@ -37,7 +41,7 @@ test("emits resolved search projections", async () => {
 
 test("emits TypeScript document type", async () => {
 	const content = await readFile(
-		"build/opensearch/product-search-doc-search-doc.ts",
+		"build/opensearch/product-search-doc.ts",
 		"utf8",
 	);
 
@@ -64,12 +68,39 @@ test("emits index.ts barrel", async () => {
 
 	assert.equal(
 		content.includes(
-			'export type { ProductSearchDoc } from "./product-search-doc-search-doc.js";',
+			'export type { ProductSearchDoc } from "./product-search-doc.js";',
 		),
 		true,
 	);
 	assert.equal(
-		content.includes('export const PRODUCT_INDEX_NAME = "products_v1";'),
+		content.includes('export const PRODUCT_SEARCH_DOC_INDEX_NAME = "products_v1";'),
 		true,
 	);
+});
+
+test("generated doc type compiles under tsc --noEmit", async () => {
+	await writeFile(
+		"build/opensearch/tsconfig.json",
+		JSON.stringify(
+			{
+				compilerOptions: {
+					module: "ESNext",
+					moduleResolution: "bundler",
+					target: "ES2020",
+					strict: true,
+					noEmit: true,
+				},
+				include: ["*.ts"],
+			},
+			null,
+			2,
+		),
+	);
+
+	await execFileAsync("npx", [
+		"tsc",
+		"--noEmit",
+		"-p",
+		"build/opensearch/tsconfig.json",
+	]);
 });
