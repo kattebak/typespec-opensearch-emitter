@@ -1,4 +1,4 @@
-import { createTypeSpecLibrary } from "@typespec/compiler";
+import { createTypeSpecLibrary, paramMessage } from "@typespec/compiler";
 
 export interface OpenSearchEmitterOptions {
 	"output-file"?: string;
@@ -6,7 +6,27 @@ export interface OpenSearchEmitterOptions {
 
 export const $lib = createTypeSpecLibrary({
 	name: "@kattebak/typespec-opensearch-emitter",
-	diagnostics: {},
+	diagnostics: {
+		"string-property-required": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Decorator @${"decorator"} can only be applied to string properties.`,
+			},
+		},
+		"nested-array-model-required": {
+			severity: "error",
+			messages: {
+				default:
+					"Decorator @nested can only be applied to array properties whose element type is a model.",
+			},
+		},
+		"positive-boost-required": {
+			severity: "error",
+			messages: {
+				default: "Decorator @boost requires a factor greater than 0.",
+			},
+		},
+	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
 		keyword: { description: "Marks a property as keyword" },
