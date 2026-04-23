@@ -43,22 +43,21 @@ export function getProjectionSourceModel(
 		return undefined;
 	}
 
-	if (projectionModel.sourceModel?.name !== "SearchProjection") {
+	const isSource = projectionModel.sourceModels.find(
+		(x) => x.usage === "is" && x.model.name === "SearchProjection",
+	);
+	if (!isSource?.node) {
 		return undefined;
 	}
 
-	const isExpression =
-		projectionModel.node && "is" in projectionModel.node
-			? (projectionModel.node.is as
-					| { arguments?: readonly unknown[] }
-					| undefined)
-			: undefined;
-	const arg = isExpression?.arguments?.[0];
+	const node = isSource.node as { arguments?: readonly unknown[] };
+	const arg = node.arguments?.[0];
 	if (!arg) {
 		return undefined;
 	}
 
-	const sourceType = program.checker.getTypeForNode(arg as never);
+	type TypeForNodeInput = Parameters<Program["checker"]["getTypeForNode"]>[0];
+	const sourceType = program.checker.getTypeForNode(arg as TypeForNodeInput);
 	return sourceType.kind === "Model" ? sourceType : undefined;
 }
 
