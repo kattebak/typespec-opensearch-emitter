@@ -99,40 +99,39 @@ function mapScalar(
 	scalar: Scalar,
 	override?: { keyword?: boolean; analyzer?: string; boost?: number },
 ): MappingProperty {
-	let base = scalar;
-	while (base.baseScalar) {
-		base = base.baseScalar;
+	let current: Scalar | undefined = scalar;
+	while (current) {
+		switch (current.name) {
+			case "string":
+				return mapString(override);
+			case "int32":
+			case "int64":
+			case "integer":
+			case "safeint":
+			case "uint8":
+			case "uint16":
+			case "uint32":
+			case "uint64":
+			case "int8":
+			case "int16":
+				return { type: "long" };
+			case "float":
+			case "float32":
+			case "float64":
+			case "decimal":
+			case "numeric":
+			case "number":
+				return { type: "double" };
+			case "boolean":
+				return { type: "boolean" };
+			case "utcDateTime":
+			case "plainDate":
+				return { type: "date" };
+		}
+		current = current.baseScalar;
 	}
 
-	switch (base.name) {
-		case "string":
-			return mapString(override);
-		case "int32":
-		case "int64":
-		case "integer":
-		case "safeint":
-		case "uint8":
-		case "uint16":
-		case "uint32":
-		case "uint64":
-		case "int8":
-		case "int16":
-			return { type: "long" };
-		case "float":
-		case "float32":
-		case "float64":
-		case "decimal":
-		case "numeric":
-		case "number":
-			return { type: "double" };
-		case "boolean":
-			return { type: "boolean" };
-		case "utcDateTime":
-		case "plainDate":
-			return { type: "date" };
-		default:
-			return { type: "object" };
-	}
+	return { type: "object" };
 }
 
 function mapModel(
