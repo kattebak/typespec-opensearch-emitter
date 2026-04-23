@@ -20,6 +20,12 @@ export const $lib = createTypeSpecLibrary({
 					"Decorator @nested can only be applied to array properties whose element type is a model.",
 			},
 		},
+		"projection-field-not-on-source": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`Property "${"name"}" on projection model is not a @searchable property on source model ${"sourceModel"} and will be ignored.`,
+			},
+		},
 		"positive-boost-required": {
 			severity: "error",
 			messages: {
