@@ -1,7 +1,14 @@
 import "@kattebak/typespec-opensearch-emitter";
 
-model ProductDocument {
-	id: string;
-	title: string;
-	price: float64;
+using Kattebak.OpenSearch;
+
+model Product {
+	@searchable id: string;
+	@searchable @keyword title: string;
+	internalNotes: string;
+}
+
+@indexName("products_v1")
+model ProductSearchDoc is SearchProjection<Product> {
+	@analyzer("edge_ngram") title: string;
 }
