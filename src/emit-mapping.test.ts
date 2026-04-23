@@ -67,6 +67,10 @@ describe("mapping emitter", () => {
 		assert.deepEqual(Object.keys(parsed.mappings.properties.owner.properties), [
 			"name",
 		]);
+		assert.equal(
+			parsed.mappings.properties.owner.properties.name.type,
+			"keyword",
+		);
 		assert.equal(parsed.mappings.properties.tags.type, "nested");
 		assert.deepEqual(Object.keys(parsed.mappings.properties.tags.properties), [
 			"name",
