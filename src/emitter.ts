@@ -30,12 +30,25 @@ function collectModels(namespace: Namespace, models: string[]): void {
 }
 
 function isUserModel(model: Model): boolean {
-	if (model.name === "Array" || model.name === "Record") {
+	if (
+		model.name === "Array" ||
+		model.name === "Record" ||
+		model.name === "SearchProjection"
+	) {
 		return false;
 	}
 
 	const namespaceName = model.namespace?.name;
 	if (namespaceName === "TypeSpec" || namespaceName === "Reflection") {
+		return false;
+	}
+
+	// Temporary name-based filter for library models.
+	// This will be replaced by explicit SearchProjection<T> resolution in #10/#11.
+	if (
+		namespaceName === "OpenSearch" &&
+		model.namespace?.namespace?.name === "Kattebak"
+	) {
 		return false;
 	}
 
