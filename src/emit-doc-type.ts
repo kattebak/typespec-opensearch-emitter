@@ -13,13 +13,14 @@ export function emitDocType(
 	projection: ResolvedProjection,
 ): EmittedDocTypeFile {
 	const fileName = toDocTypeFileName(projection.projectionModel.name);
-	const body = renderInterfaceBody(
+	const body = renderBlock(
 		program,
 		projection.fields.map((x) => ({
 			name: x.name,
 			type: x.type,
 			optional: x.optional,
 		})),
+		1,
 	);
 
 	return {
@@ -28,29 +29,36 @@ export function emitDocType(
 	};
 }
 
-function renderInterfaceBody(
+/**
+ * Render a `{ ... }` block with fields indented at `depth`.
+ * `depth` always means "indent level of the fields inside this block".
+ */
+function renderBlock(
 	program: Program,
 	fields: ReadonlyArray<{ name: string; type: Type; optional: boolean }>,
+	depth: number,
 ): string {
 	if (fields.length === 0) {
 		return "{}";
 	}
 
+	const indent = "\t".repeat(depth);
+	const closingIndent = "\t".repeat(depth - 1);
 	const lines = fields.map((field) => {
 		const optional = field.optional ? "?" : "";
-		const type = renderType(program, field.type);
-		return `\t${field.name}${optional}: ${type};`;
+		const type = renderType(program, field.type, depth);
+		return `${indent}${field.name}${optional}: ${type};`;
 	});
 
-	return `\n{\n${lines.join("\n")}\n}`;
+	return `{\n${lines.join("\n")}\n${closingIndent}}`;
 }
 
-function renderType(program: Program, type: Type): string {
+function renderType(program: Program, type: Type, depth = 0): string {
 	switch (type.kind) {
 		case "Scalar":
 			return renderScalar(type);
 		case "Model":
-			return renderModel(program, type);
+			return renderModel(program, type, depth);
 		case "String":
 			return "string";
 		case "Number":
@@ -58,7 +66,7 @@ function renderType(program: Program, type: Type): string {
 		case "Boolean":
 			return "boolean";
 		case "Union":
-			return renderUnion(program, type);
+			return renderUnion(program, type, depth);
 		default:
 			return "unknown";
 	}
@@ -99,13 +107,13 @@ function renderScalar(scalar: Scalar): string {
 	}
 }
 
-function renderModel(program: Program, model: Model): string {
+function renderModel(program: Program, model: Model, depth = 0): string {
 	if (model.name === "Array" && model.indexer?.value) {
-		return `${renderType(program, model.indexer.value)}[]`;
+		return `${renderType(program, model.indexer.value, depth)}[]`;
 	}
 
 	if (model.name === "Record" && model.indexer?.value) {
-		return `Record<string, ${renderType(program, model.indexer.value)}>`;
+		return `Record<string, ${renderType(program, model.indexer.value, depth)}>`;
 	}
 
 	const searchableFields = Array.from(model.properties.values())
@@ -116,25 +124,16 @@ function renderModel(program: Program, model: Model): string {
 			optional: prop.optional,
 		}));
 
-	if (searchableFields.length === 0) {
-		return "{}";
-	}
-
-	const lines = searchableFields.map((field) => {
-		const optional = field.optional ? "?" : "";
-		return `\t${field.name}${optional}: ${renderType(program, field.type)};`;
-	});
-
-	return `{\n${lines.join("\n")}\n}`;
+	return renderBlock(program, searchableFields, depth + 1);
 }
 
-function renderUnion(program: Program, union: Union): string {
+function renderUnion(program: Program, union: Union, depth = 0): string {
 	const variants = Array.from(union.variants.values());
 	if (variants.length === 0) {
 		return "never";
 	}
 
-	return variants.map((x) => renderType(program, x.type)).join(" | ");
+	return variants.map((x) => renderType(program, x.type, depth)).join(" | ");
 }
 
 export function toDocTypeFileName(projectionModelName: string): string {
