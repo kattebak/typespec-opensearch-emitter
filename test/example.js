@@ -58,3 +58,18 @@ test("emits OpenSearch mapping JSON", async () => {
 	assert.equal(parsed.mappings.properties.title.type, "keyword");
 	assert.equal(parsed.mappings.properties.title.fields, undefined);
 });
+
+test("emits index.ts barrel", async () => {
+	const content = await readFile("build/opensearch/index.ts", "utf8");
+
+	assert.equal(
+		content.includes(
+			'export type { ProductSearchDoc } from "./product-search-doc-search-doc.js";',
+		),
+		true,
+	);
+	assert.equal(
+		content.includes('export const PRODUCT_INDEX_NAME = "products_v1";'),
+		true,
+	);
+});

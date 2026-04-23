@@ -13,6 +13,7 @@ Implemented so far:
 - Emitter collection of projection models and resolved projection metadata output
 - TypeScript document type emission per projection (`*-search-doc.ts`)
 - OpenSearch mapping JSON emission per projection (`*-search-mapping.json`)
+- Generated index barrel (`index.ts`) with doc type exports and index-name constants
 - CI, linting, unit tests, emitter E2E test
 
 ## Usage
@@ -42,4 +43,4 @@ options:
     output-file: "opensearch-projections.json"
 ```
 
-Current outputs include projection metadata JSON, generated TypeScript document interfaces, and OpenSearch mapping JSON files.
+Current outputs include projection metadata JSON, generated TypeScript document interfaces, OpenSearch mapping JSON files, and `index.ts` re-exports/constants.
