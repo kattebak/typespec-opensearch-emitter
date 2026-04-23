@@ -1,5 +1,11 @@
 import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
-import { isSearchable } from "./decorators.js";
+import {
+	getAnalyzer,
+	getBoost,
+	isKeyword,
+	isNested,
+	isSearchable,
+} from "./decorators.js";
 import type { ResolvedProjection } from "./projection.js";
 
 export interface EmittedMappingFile {
@@ -158,7 +164,15 @@ function mapModelProperties(
 	return Object.fromEntries(
 		Array.from(model.properties.values())
 			.filter((prop) => isSearchable(program, prop))
-			.map((prop) => [prop.name, toMapping(program, prop.type)]),
+			.map((prop) => [
+				prop.name,
+				toMapping(program, prop.type, {
+					keyword: isKeyword(program, prop),
+					nested: isNested(program, prop),
+					analyzer: getAnalyzer(program, prop),
+					boost: getBoost(program, prop),
+				}),
+			]),
 	);
 }
 
