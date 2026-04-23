@@ -30,12 +30,23 @@ function collectModels(namespace: Namespace, models: string[]): void {
 }
 
 function isUserModel(model: Model): boolean {
-	if (model.name === "Array" || model.name === "Record") {
+	if (
+		model.name === "Array" ||
+		model.name === "Record" ||
+		model.name === "SearchProjection"
+	) {
 		return false;
 	}
 
 	const namespaceName = model.namespace?.name;
 	if (namespaceName === "TypeSpec" || namespaceName === "Reflection") {
+		return false;
+	}
+
+	if (
+		namespaceName === "OpenSearch" &&
+		model.namespace?.namespace?.name === "Kattebak"
+	) {
 		return false;
 	}
 
