@@ -73,7 +73,9 @@ test("emits index.ts barrel", async () => {
 		true,
 	);
 	assert.equal(
-		content.includes('export const PRODUCT_SEARCH_DOC_INDEX_NAME = "products_v1";'),
+		content.includes(
+			'export const PRODUCT_SEARCH_DOC_INDEX_NAME = "products_v1";',
+		),
 		true,
 	);
 });

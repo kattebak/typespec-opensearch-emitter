@@ -25,35 +25,69 @@ describe("index emitter", () => {
 		assert.equal(emitted.fileName, "index.ts");
 		assert.equal(
 			emitted.content.includes(
-				'export type { AccountSearchDoc } from "./account-search-doc-search-doc.js";',
+				'export type { AccountSearchDoc } from "./account-search-doc.js";',
 			),
 			true,
 		);
 		assert.equal(
 			emitted.content.includes(
-				'export const ACCOUNT_INDEX_NAME = "accounts_v1";',
+				'export const ACCOUNT_SEARCH_DOC_INDEX_NAME = "accounts_v1";',
 			),
 			true,
 		);
 		assert.equal(
 			emitted.content.includes(
-				'export type { ProductSearchDoc } from "./product-search-doc-search-doc.js";',
+				'export type { ProductSearchDoc } from "./product-search-doc.js";',
 			),
 			true,
 		);
 		assert.equal(
 			emitted.content.includes(
-				'export const PRODUCT_INDEX_NAME = "products_v1";',
+				'export const PRODUCT_SEARCH_DOC_INDEX_NAME = "products_v1";',
 			),
 			true,
 		);
 	});
 
-	it("derives constant names from source model names", () => {
+	it("derives constant names from projection model names", () => {
 		assert.equal(
-			toIndexConstantName("Counterparty"),
-			"COUNTERPARTY_INDEX_NAME",
+			toIndexConstantName("CounterpartySearchDoc"),
+			"COUNTERPARTY_SEARCH_DOC_INDEX_NAME",
 		);
-		assert.equal(toIndexConstantName("PetStore"), "PET_STORE_INDEX_NAME");
+		assert.equal(
+			toIndexConstantName("PetStoreSearchDoc"),
+			"PET_STORE_SEARCH_DOC_INDEX_NAME",
+		);
+	});
+
+	it("avoids collisions for multiple projections of same source model", () => {
+		const projections = [
+			{
+				projectionModel: { name: "AccountSearchDoc" },
+				sourceModel: { name: "Account" },
+				indexName: "accounts_v1",
+				fields: [],
+			},
+			{
+				projectionModel: { name: "AccountSummarySearchDoc" },
+				sourceModel: { name: "Account" },
+				indexName: "accounts_summary_v1",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const emitted = emitIndex(projections);
+		assert.equal(
+			emitted.content.includes(
+				'export const ACCOUNT_SEARCH_DOC_INDEX_NAME = "accounts_v1";',
+			),
+			true,
+		);
+		assert.equal(
+			emitted.content.includes(
+				'export const ACCOUNT_SUMMARY_SEARCH_DOC_INDEX_NAME = "accounts_summary_v1";',
+			),
+			true,
+		);
 	});
 });

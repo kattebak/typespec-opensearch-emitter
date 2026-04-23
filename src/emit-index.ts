@@ -1,4 +1,4 @@
-import { toKebabCase } from "./emit-doc-type.js";
+import { toDocTypeFileName } from "./emit-doc-type.js";
 import type { ResolvedProjection } from "./projection.js";
 
 export interface EmittedIndexFile {
@@ -13,12 +13,14 @@ export function emitIndex(projections: ResolvedProjection[]): EmittedIndexFile {
 
 	const lines: string[] = [];
 	for (const projection of sorted) {
-		const docTypeFile = `${toKebabCase(projection.projectionModel.name)}-search-doc.js`;
+		const docTypeFile = toDocTypeFileName(
+			projection.projectionModel.name,
+		).replace(/\.ts$/, ".js");
 		lines.push(
 			`export type { ${projection.projectionModel.name} } from "./${docTypeFile}";`,
 		);
 		lines.push(
-			`export const ${toIndexConstantName(projection.sourceModel.name)} = "${projection.indexName}";`,
+			`export const ${toIndexConstantName(projection.projectionModel.name)} = "${projection.indexName}";`,
 		);
 	}
 
@@ -28,8 +30,8 @@ export function emitIndex(projections: ResolvedProjection[]): EmittedIndexFile {
 	};
 }
 
-export function toIndexConstantName(sourceModelName: string): string {
-	return `${toSnakeUpper(sourceModelName)}_INDEX_NAME`;
+export function toIndexConstantName(projectionModelName: string): string {
+	return `${toSnakeUpper(projectionModelName)}_INDEX_NAME`;
 }
 
 function toSnakeUpper(value: string): string {
