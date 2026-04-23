@@ -12,6 +12,7 @@ Implemented so far:
 - `SearchProjection<T>` template + projection resolution
 - Emitter collection of projection models and resolved projection metadata output
 - TypeScript document type emission per projection (`*-search-doc.ts`)
+- OpenSearch mapping JSON emission per projection (`*-search-mapping.json`)
 - CI, linting, unit tests, emitter E2E test
 
 ## Usage
@@ -41,4 +42,4 @@ options:
     output-file: "opensearch-projections.json"
 ```
 
-Current outputs include projection metadata JSON and generated TypeScript document interfaces. OpenSearch mapping JSON emission is next.
+Current outputs include projection metadata JSON, generated TypeScript document interfaces, and OpenSearch mapping JSON files.
