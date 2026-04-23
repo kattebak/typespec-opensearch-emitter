@@ -1,0 +1,38 @@
+{
+	"name": "@kattebak/typespec-opensearch-emitter",
+	"version": "1.0.0",
+	"description": "TypeSpec emitter for OpenSearch projections",
+	"type": "module",
+	"main": "dist/index.js",
+	"publishConfig": {
+		"access": "public"
+	},
+	"files": [
+		"dist",
+		"tsp"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js",
+			"typespec": "./tsp/main.tsp"
+		}
+	},
+	"scripts": {
+		"fix": "npx @biomejs/biome check --write",
+		"lint": "npx @biomejs/biome check",
+		"build": "tsc",
+		"watch": "tsc --watch",
+		"test": "npm run build && npm run lint && npm run test:emit && npm run test:example",
+		"test:emit": "tsp compile test/main.tsp --config test/tspconfig.yaml",
+		"test:example": "node --test test/example.js",
+		"prepublishOnly": "tsc"
+	},
+	"dependencies": {
+		"@typespec/compiler": "^1.4.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.3.7",
+		"typescript": "^5.9.3"
+	}
+}

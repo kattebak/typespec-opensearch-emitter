@@ -1,0 +1,6 @@
+emit:
+  - "@kattebak/typespec-opensearch-emitter"
+options:
+  "@kattebak/typespec-opensearch-emitter":
+    output-file: "opensearch-projections.json"
+    emitter-output-dir: "{cwd}/build/opensearch"
