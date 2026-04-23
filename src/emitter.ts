@@ -6,6 +6,7 @@ import type {
 } from "@typespec/compiler";
 import { emitFile, resolvePath } from "@typespec/compiler";
 import { emitDocType } from "./emit-doc-type.js";
+import { emitIndex } from "./emit-index.js";
 import { emitMapping } from "./emit-mapping.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
 import {
@@ -45,6 +46,12 @@ export async function $onEmit(
 			content: mappingFile.content,
 		});
 	}
+
+	const indexFile = emitIndex(resolved);
+	await emitFile(context.program, {
+		path: resolvePath(context.emitterOutputDir, indexFile.fileName),
+		content: indexFile.content,
+	});
 
 	await emitFile(context.program, {
 		path: resolvePath(context.emitterOutputDir, outputFile),

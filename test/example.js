@@ -63,6 +63,23 @@ test("emits OpenSearch mapping JSON", async () => {
 	assert.equal(parsed.mappings.properties.title.fields, undefined);
 });
 
+test("emits index.ts barrel", async () => {
+	const content = await readFile("build/opensearch/index.ts", "utf8");
+
+	assert.equal(
+		content.includes(
+			'export type { ProductSearchDoc } from "./product-search-doc.js";',
+		),
+		true,
+	);
+	assert.equal(
+		content.includes(
+			'export const PRODUCT_SEARCH_DOC_INDEX_NAME = "products_v1";',
+		),
+		true,
+	);
+});
+
 test("generated doc type compiles under tsc --noEmit", async () => {
 	await writeFile(
 		"build/opensearch/tsconfig.json",
