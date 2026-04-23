@@ -173,6 +173,7 @@ describe("decorators", () => {
 	});
 
 	it("emits diagnostic for negative boost", async () => {
+		// Negative factors are invalid and should produce a diagnostic.
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
       model Product {
