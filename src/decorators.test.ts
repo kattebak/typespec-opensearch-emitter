@@ -29,6 +29,7 @@ describe("decorators", () => {
 		const diagnostics = await runner.diagnose(`
       model Product {
         @searchable name: string;
+        description: string;
       }
     `);
 
@@ -42,6 +43,10 @@ describe("decorators", () => {
 		const name = product.properties.get("name");
 		assert.ok(name);
 		assert.equal(isSearchable(runner.program, name), true);
+
+		const description = product.properties.get("description");
+		assert.ok(description);
+		assert.equal(isSearchable(runner.program, description), false);
 	});
 
 	it("stores values for all decorator state accessors", async () => {
