@@ -160,11 +160,23 @@ describe("decorators", () => {
 		assert.equal(hasDiagnosticCode(codes, "nested-array-model-required"), true);
 	});
 
-	it("emits diagnostic for non-positive boost", async () => {
+	it("emits diagnostic for zero boost", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
       model Product {
         @boost(0) name: string;
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "positive-boost-required"), true);
+	});
+
+	it("emits diagnostic for negative boost", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @boost(-1) name: string;
       }
     `);
 
