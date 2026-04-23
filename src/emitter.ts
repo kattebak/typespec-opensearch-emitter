@@ -73,15 +73,6 @@ function isCandidateModel(model: Model): boolean {
 		return false;
 	}
 
-	// Temporary name-based filter for library models.
-	// This will be replaced by explicit SearchProjection<T> resolution in #10/#11.
-	if (
-		namespaceName === "OpenSearch" &&
-		model.namespace?.namespace?.name === "Kattebak"
-	) {
-		return false;
-	}
-
 	return !!model.name;
 }
 
