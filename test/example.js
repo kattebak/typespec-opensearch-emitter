@@ -34,3 +34,15 @@ test("emits resolved search projections", async () => {
 		],
 	});
 });
+
+test("emits TypeScript document type", async () => {
+	const content = await readFile(
+		"build/opensearch/product-search-doc-search-doc.ts",
+		"utf8",
+	);
+
+	assert.equal(content.includes("export interface ProductSearchDoc"), true);
+	assert.equal(content.includes("\tid: string;"), true);
+	assert.equal(content.includes("\ttitle: string;"), true);
+	assert.equal(content.includes("internalNotes"), false);
+});

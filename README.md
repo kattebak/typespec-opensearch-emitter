@@ -11,6 +11,7 @@ Implemented so far:
 - Decorator validation diagnostics
 - `SearchProjection<T>` template + projection resolution
 - Emitter collection of projection models and resolved projection metadata output
+- TypeScript document type emission per projection (`*-search-doc.ts`)
 - CI, linting, unit tests, emitter E2E test
 
 ## Usage
@@ -40,4 +41,4 @@ options:
     output-file: "opensearch-projections.json"
 ```
 
-Current emitted file is projection metadata JSON and is an intermediate step toward document type and mapping emitters.
+Current outputs include projection metadata JSON and generated TypeScript document interfaces. OpenSearch mapping JSON emission is next.

@@ -5,6 +5,7 @@ import type {
 	Program,
 } from "@typespec/compiler";
 import { emitFile, resolvePath } from "@typespec/compiler";
+import { emitDocType } from "./emit-doc-type.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
 import {
 	isSearchProjectionModel,
@@ -29,6 +30,14 @@ export async function $onEmit(
 	const resolved = projectionModels
 		.map((model) => resolveProjectionModel(context.program, model))
 		.filter((x): x is ResolvedProjection => x !== undefined);
+
+	for (const projection of resolved) {
+		const docTypeFile = emitDocType(context.program, projection);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, docTypeFile.fileName),
+			content: docTypeFile.content,
+		});
+	}
 
 	await emitFile(context.program, {
 		path: resolvePath(context.emitterOutputDir, outputFile),
