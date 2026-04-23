@@ -46,3 +46,15 @@ test("emits TypeScript document type", async () => {
 	assert.equal(content.includes("\ttitle: string;"), true);
 	assert.equal(content.includes("internalNotes"), false);
 });
+
+test("emits OpenSearch mapping JSON", async () => {
+	const content = await readFile(
+		"build/opensearch/product-search-doc-search-mapping.json",
+		"utf8",
+	);
+	const parsed = JSON.parse(content);
+
+	assert.equal(parsed.mappings.properties.id.type, "text");
+	assert.equal(parsed.mappings.properties.title.type, "keyword");
+	assert.equal(parsed.mappings.properties.title.fields, undefined);
+});
