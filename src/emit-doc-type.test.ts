@@ -447,4 +447,32 @@ describe("doc type emitter", () => {
 		assert.ok(!emitted.content.includes("givenName"));
 		assert.ok(emitted.content.includes("age: number;"));
 	});
+
+	it("TypeScript interface includes spread fields", async () => {
+		const emitted = await emitFor(
+			`
+			model Counterparty {
+				@searchable @keyword name: string;
+				@searchable email: string;
+				hidden: string;
+			}
+
+			model Wrapper {
+				counterparty: Counterparty;
+				@searchable score: float64;
+			}
+
+			model WrapperSearchDoc is SearchProjection<Wrapper> {
+				...Counterparty;
+				score: float64;
+			}
+			`,
+			"WrapperSearchDoc",
+		);
+
+		assert.ok(emitted.content.includes("name: string;"));
+		assert.ok(emitted.content.includes("email: string;"));
+		assert.ok(emitted.content.includes("score: number;"));
+		assert.ok(!emitted.content.includes("hidden"));
+	});
 });

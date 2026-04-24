@@ -105,8 +105,51 @@ export function resolveProjectionModel(
 		fields.push(field);
 	}
 
+	// Collect names already resolved from the source model
+	const resolvedFieldNames = new Set(fields.map((f) => f.name));
+
 	for (const projProp of projectionModel.properties.values()) {
 		const sourceProp = sourceModel.properties.get(projProp.name);
+
+		// Check if this property came from a spread of a different model
+		const isSpreadFromOtherModel =
+			projProp.sourceProperty &&
+			projProp.sourceProperty.model &&
+			projProp.sourceProperty.model !== sourceModel &&
+			projProp.sourceProperty.model !== projectionModel;
+
+		if (isSpreadFromOtherModel) {
+			const spreadSourceProp = projProp.sourceProperty!;
+
+			// Only include @searchable fields from the spread source
+			if (!isSearchable(program, spreadSourceProp)) {
+				continue;
+			}
+
+			// Check for collision with already-resolved fields
+			if (resolvedFieldNames.has(projProp.name)) {
+				reportDiagnostic(program, {
+					code: "spread-field-collision",
+					format: { name: projProp.name },
+					target: projProp,
+				});
+				continue;
+			}
+
+			// Resolve the spread field using the spread source property
+			const field = resolveProjectionField(program, spreadSourceProp, projProp);
+
+			// Check for sub-projection on the projection property
+			const subProj = resolveSubProjectionFromType(program, projProp.type);
+			if (subProj) {
+				field.subProjection = subProj;
+			}
+
+			fields.push(field);
+			resolvedFieldNames.add(projProp.name);
+			continue;
+		}
+
 		if (!sourceProp || !isSearchable(program, sourceProp)) {
 			// Allow sub-projection fields that reference a valid source field
 			const subProj = resolveSubProjectionFromType(program, projProp.type);

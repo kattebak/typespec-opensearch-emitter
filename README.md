@@ -206,6 +206,45 @@ In this example:
 - The emitted TypeScript interface references `TagSearchDoc[]` (with an import) instead of an inline object type.
 - Sub-projection interfaces are automatically emitted and exported from the barrel `index.ts`.
 
+## Spread flattening
+
+Source models sometimes wrap entities in describe-style responses:
+
+```typespec
+model Counterparty {
+  @searchable @keyword id: string;
+  @searchable name: string;
+}
+
+model Tag {
+  @searchable @keyword name: string;
+}
+
+model CounterpartyDescribeResult {
+  counterparty: Counterparty;
+  tags: Tag[];
+}
+```
+
+The natural search shape flattens the wrapper so that the counterparty fields live at the top level. Use TypeSpec's `...Model` spread syntax in the projection body to lift `@searchable` fields from another model:
+
+```typespec
+model TagSearchDoc is SearchProjection<Tag> {}
+
+model CounterpartySearchDoc is SearchProjection<CounterpartyDescribeResult> {
+  ...Counterparty;         // lifts id and name to top level
+  tags: TagSearchDoc[];    // sub-projection for tags
+}
+```
+
+In this example:
+
+- `...Counterparty` inlines `id` and `name` into `CounterpartySearchDoc` (both are `@searchable` on `Counterparty`).
+- Non-`@searchable` fields on the spread model are excluded, just like regular source fields.
+- Decorators (`@keyword`, `@analyzer`, `@boost`, etc.) on the spread source properties are inherited.
+- `@searchAs` works on spread fields for renaming.
+- If a spread field name collides with an already-resolved field from the source model, a `spread-field-collision` diagnostic is emitted.
+
 ## Decorator reference
 
 | Decorator | Target | Effect | Example |

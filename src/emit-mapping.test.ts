@@ -486,4 +486,42 @@ describe("mapping emitter", () => {
 		// non-renamed field still uses original name
 		assert.ok(parsed.mappings.properties.status);
 	});
+
+	it("mapping output includes spread fields with correct types", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Counterparty {
+        @searchable @keyword name: string;
+        @searchable @analyzer("edge_ngram") email: string;
+        hidden: string;
+      }
+
+      model Wrapper {
+        counterparty: Counterparty;
+        @searchable score: float64;
+      }
+
+      model WrapperSearchDoc is SearchProjection<Wrapper> {
+        ...Counterparty;
+        score: float64;
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("WrapperSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.equal(parsed.mappings.properties.name.type, "keyword");
+		assert.equal(parsed.mappings.properties.email.type, "text");
+		assert.equal(parsed.mappings.properties.email.analyzer, "edge_ngram");
+		assert.equal(parsed.mappings.properties.score.type, "double");
+		assert.equal(parsed.mappings.properties.hidden, undefined);
+	});
 });
