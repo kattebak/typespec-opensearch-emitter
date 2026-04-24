@@ -37,7 +37,7 @@ export function isSearchProjectionModel(
 }
 
 export function getProjectionSourceModel(
-	program: Program,
+	_program: Program,
 	projectionModel: Model,
 ): Model | undefined {
 	if (projectionModel.name === "SearchProjection") {
@@ -47,19 +47,17 @@ export function getProjectionSourceModel(
 	const isSource = projectionModel.sourceModels.find(
 		(x) => x.usage === "is" && x.model.name === "SearchProjection",
 	);
-	if (!isSource?.node) {
+	if (!isSource) {
 		return undefined;
 	}
 
-	const node = isSource.node as { arguments?: readonly unknown[] };
-	const arg = node.arguments?.[0];
-	if (!arg) {
-		return undefined;
-	}
-
-	type TypeForNodeInput = Parameters<Program["checker"]["getTypeForNode"]>[0];
-	const sourceType = program.checker.getTypeForNode(arg as TypeForNodeInput);
-	return sourceType.kind === "Model" ? sourceType : undefined;
+	// The instantiated SearchProjection<T> model carries a templateMapper
+	// whose first arg is the resolved source model T.
+	const sourceModel = isSource.model as Model & {
+		templateMapper?: { args?: readonly Type[] };
+	};
+	const sourceType = sourceModel.templateMapper?.args?.[0];
+	return sourceType?.kind === "Model" ? sourceType : undefined;
 }
 
 export function resolveProjectionModel(
