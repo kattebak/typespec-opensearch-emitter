@@ -5,6 +5,7 @@ import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
 	getAnalyzer,
 	getBoost,
+	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
 	isKeyword,
@@ -224,5 +225,40 @@ describe("decorators", () => {
 
 		const codes = diagnostics.map((x) => x.code);
 		assert.equal(hasDiagnosticCode(codes, "invalid-index-settings-json"), true);
+	});
+
+	it("stores and retrieves @ignoreAbove value", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @ignoreAbove(512) @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+
+		const name = product.properties.get("name");
+		assert.ok(name);
+		assert.equal(getIgnoreAbove(runner.program, name), 512);
+	});
+
+	it("emits diagnostic for zero ignoreAbove", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @ignoreAbove(0) name: string;
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(
+			hasDiagnosticCode(codes, "positive-ignore-above-required"),
+			true,
+		);
 	});
 });

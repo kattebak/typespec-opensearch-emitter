@@ -1,6 +1,7 @@
 export {
 	$analyzer,
 	$boost,
+	$ignoreAbove,
 	$indexName,
 	$indexSettings,
 	$keyword,
@@ -8,6 +9,7 @@ export {
 	$searchable,
 	getAnalyzer,
 	getBoost,
+	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
 	isKeyword,

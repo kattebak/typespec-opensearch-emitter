@@ -2,6 +2,7 @@ import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
 import {
 	getAnalyzer,
 	getBoost,
+	getIgnoreAbove,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -19,17 +20,24 @@ type MappingProperty = Record<string, unknown>;
 export function emitMapping(
 	program: Program,
 	projection: ResolvedProjection,
+	defaultIgnoreAbove?: number,
 ): EmittedMappingFile {
 	const fileName = `${toKebabCase(projection.projectionModel.name)}-search-mapping.json`;
 	const properties = Object.fromEntries(
 		projection.fields.map((field) => [
 			field.name,
-			toMapping(program, field.type, {
-				keyword: field.keyword,
-				nested: field.nested,
-				analyzer: field.analyzer,
-				boost: field.boost,
-			}),
+			toMapping(
+				program,
+				field.type,
+				{
+					keyword: field.keyword,
+					nested: field.nested,
+					analyzer: field.analyzer,
+					boost: field.boost,
+					ignoreAbove: field.ignoreAbove,
+				},
+				defaultIgnoreAbove,
+			),
 		]),
 	);
 
@@ -53,21 +61,23 @@ function toMapping(
 		nested?: boolean;
 		analyzer?: string;
 		boost?: number;
+		ignoreAbove?: number;
 	},
+	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	switch (type.kind) {
 		case "Scalar":
-			return mapScalar(type, override);
+			return mapScalar(type, override, defaultIgnoreAbove);
 		case "Model":
-			return mapModel(program, type, override);
+			return mapModel(program, type, override, defaultIgnoreAbove);
 		case "String":
-			return mapString(override);
+			return mapString(override, defaultIgnoreAbove);
 		case "Number":
 			return { type: "double" };
 		case "Boolean":
 			return { type: "boolean" };
 		case "Union":
-			return mapUnion(program, type, override);
+			return mapUnion(program, type, override, defaultIgnoreAbove);
 		case "Enum":
 			return { type: "keyword" };
 		default:
@@ -75,21 +85,27 @@ function toMapping(
 	}
 }
 
-function mapString(override?: {
-	keyword?: boolean;
-	analyzer?: string;
-	boost?: number;
-}): MappingProperty {
+function mapString(
+	override?: {
+		keyword?: boolean;
+		analyzer?: string;
+		boost?: number;
+		ignoreAbove?: number;
+	},
+	defaultIgnoreAbove?: number,
+): MappingProperty {
 	if (override?.keyword) {
 		return { type: "keyword" };
 	}
+
+	const ignoreAbove = override?.ignoreAbove ?? defaultIgnoreAbove ?? 256;
 
 	const mapping: MappingProperty = {
 		type: "text",
 		fields: {
 			keyword: {
 				type: "keyword",
-				ignore_above: 256,
+				ignore_above: ignoreAbove,
 			},
 		},
 	};
@@ -106,13 +122,19 @@ function mapString(override?: {
 
 function mapScalar(
 	scalar: Scalar,
-	override?: { keyword?: boolean; analyzer?: string; boost?: number },
+	override?: {
+		keyword?: boolean;
+		analyzer?: string;
+		boost?: number;
+		ignoreAbove?: number;
+	},
+	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	let current: Scalar | undefined = scalar;
 	while (current) {
 		switch (current.name) {
 			case "string":
-				return mapString(override);
+				return mapString(override, defaultIgnoreAbove);
 			case "int32":
 			case "int64":
 			case "integer":
@@ -147,39 +169,51 @@ function mapModel(
 	program: Program,
 	model: Model,
 	override?: { nested?: boolean },
+	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	if (model.name === "Array" && model.indexer?.value) {
 		const elementType = model.indexer.value;
 		if (elementType.kind === "Model") {
 			return {
 				type: override?.nested ? "nested" : "object",
-				properties: mapModelProperties(program, elementType),
+				properties: mapModelProperties(
+					program,
+					elementType,
+					defaultIgnoreAbove,
+				),
 			};
 		}
-		return toMapping(program, elementType);
+		return toMapping(program, elementType, undefined, defaultIgnoreAbove);
 	}
 
 	return {
 		type: "object",
-		properties: mapModelProperties(program, model),
+		properties: mapModelProperties(program, model, defaultIgnoreAbove),
 	};
 }
 
 function mapModelProperties(
 	program: Program,
 	model: Model,
+	defaultIgnoreAbove?: number,
 ): Record<string, MappingProperty> {
 	return Object.fromEntries(
 		Array.from(model.properties.values())
 			.filter((prop) => isSearchable(program, prop))
 			.map((prop) => [
 				prop.name,
-				toMapping(program, prop.type, {
-					keyword: isKeyword(program, prop),
-					nested: isNested(program, prop),
-					analyzer: getAnalyzer(program, prop),
-					boost: getBoost(program, prop),
-				}),
+				toMapping(
+					program,
+					prop.type,
+					{
+						keyword: isKeyword(program, prop),
+						nested: isNested(program, prop),
+						analyzer: getAnalyzer(program, prop),
+						boost: getBoost(program, prop),
+						ignoreAbove: getIgnoreAbove(program, prop),
+					},
+					defaultIgnoreAbove,
+				),
 			]),
 	);
 }
@@ -187,11 +221,17 @@ function mapModelProperties(
 function mapUnion(
 	program: Program,
 	union: Union,
-	override?: { keyword?: boolean; analyzer?: string; boost?: number },
+	override?: {
+		keyword?: boolean;
+		analyzer?: string;
+		boost?: number;
+		ignoreAbove?: number;
+	},
+	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	for (const variant of union.variants.values()) {
 		if (variant.type.kind === "Scalar" || variant.type.kind === "String") {
-			return toMapping(program, variant.type, override);
+			return toMapping(program, variant.type, override, defaultIgnoreAbove);
 		}
 	}
 	return { type: "object" };

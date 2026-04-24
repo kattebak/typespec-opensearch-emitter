@@ -40,7 +40,11 @@ export async function $onEmit(
 			content: docTypeFile.content,
 		});
 
-		const mappingFile = emitMapping(context.program, projection);
+		const mappingFile = emitMapping(
+			context.program,
+			projection,
+			context.options["default-ignore-above"],
+		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, mappingFile.fileName),
 			content: mappingFile.content,

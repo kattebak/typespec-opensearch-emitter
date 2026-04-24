@@ -2,6 +2,7 @@ import { createTypeSpecLibrary, paramMessage } from "@typespec/compiler";
 
 export interface OpenSearchEmitterOptions {
 	"output-file"?: string;
+	"default-ignore-above"?: number;
 }
 
 export const $lib = createTypeSpecLibrary({
@@ -38,6 +39,12 @@ export const $lib = createTypeSpecLibrary({
 				default: "Decorator @boost requires a factor greater than 0.",
 			},
 		},
+		"positive-ignore-above-required": {
+			severity: "error",
+			messages: {
+				default: "Decorator @ignoreAbove requires a limit greater than 0.",
+			},
+		},
 	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
@@ -45,6 +52,7 @@ export const $lib = createTypeSpecLibrary({
 		nested: { description: "Marks a property as nested" },
 		analyzer: { description: "Analyzer override for a property" },
 		boost: { description: "Boost override for a property" },
+		ignoreAbove: { description: "ignore_above override for a property" },
 		indexName: { description: "Index name override for a projection model" },
 		indexSettings: {
 			description: "Index settings JSON for a projection model",
@@ -59,6 +67,11 @@ export const $lib = createTypeSpecLibrary({
 					type: "string",
 					nullable: true,
 					default: "opensearch-projections.json",
+				},
+				"default-ignore-above": {
+					type: "number",
+					nullable: true,
+					default: 256,
 				},
 			},
 			required: [],
