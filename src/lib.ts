@@ -45,6 +45,12 @@ export const $lib = createTypeSpecLibrary({
 				default: "Decorator @ignoreAbove requires a limit greater than 0.",
 			},
 		},
+		"non-empty-search-as-required": {
+			severity: "error",
+			messages: {
+				default: "Decorator @searchAs requires a non-empty name string.",
+			},
+		},
 	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
@@ -56,6 +62,9 @@ export const $lib = createTypeSpecLibrary({
 		indexName: { description: "Index name override for a projection model" },
 		indexSettings: {
 			description: "Index settings JSON for a projection model",
+		},
+		searchAs: {
+			description: "Rename a field in projection output",
 		},
 	},
 	emitter: {

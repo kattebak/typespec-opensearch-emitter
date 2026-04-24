@@ -173,4 +173,81 @@ describe("projection resolution", () => {
 		assert.equal(relevant.length, 1);
 		assert.ok(relevant[0].message.includes("hidden"));
 	});
+
+	it("resolves @searchAs from projection override", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Person {
+        @searchable @searchAs("srcName") givenName: string;
+      }
+
+      model PersonSearchDoc is SearchProjection<Person> {
+        @searchAs("firstName") givenName: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PersonSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const field = resolved.fields.find((x) => x.name === "givenName");
+		assert.ok(field);
+		assert.equal(field.projectedName, "firstName");
+	});
+
+	it("resolves @searchAs from source when projection has none", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Person {
+        @searchable @searchAs("firstName") givenName: string;
+      }
+
+      model PersonSearchDoc is SearchProjection<Person> {}
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PersonSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const field = resolved.fields.find((x) => x.name === "givenName");
+		assert.ok(field);
+		assert.equal(field.projectedName, "firstName");
+	});
+
+	it("uses original name when no @searchAs is present", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Person {
+        @searchable givenName: string;
+      }
+
+      model PersonSearchDoc is SearchProjection<Person> {}
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PersonSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const field = resolved.fields.find((x) => x.name === "givenName");
+		assert.ok(field);
+		assert.equal(field.projectedName, undefined);
+	});
 });
