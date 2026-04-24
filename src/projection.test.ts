@@ -145,6 +145,89 @@ describe("projection resolution", () => {
 		assert.ok(relevant[0].message.includes("phantom"));
 	});
 
+	it("resolves sub-projection field with nested SearchProjection", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @searchable @keyword name: string;
+        @searchable createdAt: utcDateTime;
+        internalId: string;
+      }
+
+      model TagSearchDoc is SearchProjection<Tag> {}
+
+      model Pet {
+        @searchable name: string;
+        @searchable @nested tags: Tag[];
+      }
+
+      @indexName("pets_v1")
+      model PetSearchDoc is SearchProjection<Pet> {
+        tags: TagSearchDoc[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const tagsField = resolved.fields.find((x) => x.name === "tags");
+		assert.ok(tagsField);
+		assert.equal(tagsField.nested, true);
+		assert.ok(tagsField.subProjection);
+		assert.equal(tagsField.subProjection.projectionModel.name, "TagSearchDoc");
+		assert.deepEqual(
+			tagsField.subProjection.fields.map((x) => x.name),
+			["name", "createdAt"],
+		);
+	});
+
+	it("sub-projection excludes non-searchable fields from sub-model", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @searchable @keyword name: string;
+        internalId: string;
+        secret: string;
+      }
+
+      model TagSearchDoc is SearchProjection<Tag> {}
+
+      model Pet {
+        @searchable name: string;
+        @searchable @nested tags: Tag[];
+      }
+
+      @indexName("pets_v1")
+      model PetSearchDoc is SearchProjection<Pet> {
+        tags: TagSearchDoc[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const tagsField = resolved.fields.find((x) => x.name === "tags");
+		assert.ok(tagsField?.subProjection);
+		const subFieldNames = tagsField.subProjection.fields.map((x) => x.name);
+		assert.deepEqual(subFieldNames, ["name"]);
+		assert.ok(!subFieldNames.includes("internalId"));
+		assert.ok(!subFieldNames.includes("secret"));
+	});
+
 	it("emits diagnostic for projection field that exists on source but is not @searchable", async () => {
 		const runner = await createRunner();
 		const _diagnostics = await runner.diagnose(`

@@ -1,4 +1,4 @@
-import { toDocTypeFileName } from "./emit-doc-type.js";
+import { collectSubProjections, toDocTypeFileName } from "./emit-doc-type.js";
 import type { ResolvedProjection } from "./projection.js";
 
 export interface EmittedIndexFile {
@@ -11,7 +11,36 @@ export function emitIndex(projections: ResolvedProjection[]): EmittedIndexFile {
 		a.projectionModel.name.localeCompare(b.projectionModel.name),
 	);
 
+	// Collect all sub-projections that need type exports
+	const topLevelNames = new Set(sorted.map((p) => p.projectionModel.name));
+	const subProjections: ResolvedProjection[] = [];
+	const subNames = new Set<string>();
+	for (const projection of sorted) {
+		for (const sp of collectSubProjections(projection)) {
+			const name = sp.projectionModel.name;
+			if (!topLevelNames.has(name) && !subNames.has(name)) {
+				subNames.add(name);
+				subProjections.push(sp);
+			}
+		}
+	}
+	subProjections.sort((a, b) =>
+		a.projectionModel.name.localeCompare(b.projectionModel.name),
+	);
+
 	const lines: string[] = [];
+
+	// Export sub-projection types first
+	for (const sp of subProjections) {
+		const docTypeFile = toDocTypeFileName(sp.projectionModel.name).replace(
+			/\.ts$/,
+			".js",
+		);
+		lines.push(
+			`export type { ${sp.projectionModel.name} } from "./${docTypeFile}";`,
+		);
+	}
+
 	for (const projection of sorted) {
 		const docTypeFile = toDocTypeFileName(
 			projection.projectionModel.name,
