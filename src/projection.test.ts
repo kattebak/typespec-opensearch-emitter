@@ -114,4 +114,63 @@ describe("projection resolution", () => {
 			["name"],
 		);
 	});
+
+	it("emits diagnostic for projection field not on source model", async () => {
+		const runner = await createRunner();
+		const _diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {
+        name: string;
+        phantom: string;
+      }
+    `);
+
+		// diagnose() only runs the compiler; we must invoke resolveProjectionModel
+		// to trigger projection-level diagnostics.
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+		resolveProjectionModel(runner.program, projection);
+
+		const relevant = runner.program.diagnostics.filter(
+			(d) =>
+				d.code ===
+				"@kattebak/typespec-opensearch-emitter/projection-field-not-on-source",
+		);
+		assert.equal(relevant.length, 1);
+		assert.ok(relevant[0].message.includes("phantom"));
+	});
+
+	it("emits diagnostic for projection field that exists on source but is not @searchable", async () => {
+		const runner = await createRunner();
+		const _diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+        hidden: string;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {
+        name: string;
+        hidden: string;
+      }
+    `);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+		resolveProjectionModel(runner.program, projection);
+
+		const relevant = runner.program.diagnostics.filter(
+			(d) =>
+				d.code ===
+				"@kattebak/typespec-opensearch-emitter/projection-field-not-on-source",
+		);
+		assert.equal(relevant.length, 1);
+		assert.ok(relevant[0].message.includes("hidden"));
+	});
 });

@@ -7,6 +7,7 @@ import {
 	isNested,
 	isSearchable,
 } from "./decorators.js";
+import { reportDiagnostic } from "./lib.js";
 
 export interface ResolvedProjectionField {
 	name: string;
@@ -82,6 +83,17 @@ export function resolveProjectionModel(
 		fields.push(
 			resolveProjectionField(program, sourceProperty, projectionProperty),
 		);
+	}
+
+	for (const projProp of projectionModel.properties.values()) {
+		const sourceProp = sourceModel.properties.get(projProp.name);
+		if (!sourceProp || !isSearchable(program, sourceProp)) {
+			reportDiagnostic(program, {
+				code: "projection-field-not-on-source",
+				format: { name: projProp.name, sourceModel: sourceModel.name },
+				target: projProp,
+			});
+		}
 	}
 
 	return {
