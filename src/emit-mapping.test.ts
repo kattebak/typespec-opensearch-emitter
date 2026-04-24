@@ -524,4 +524,46 @@ describe("mapping emitter", () => {
 		assert.equal(parsed.mappings.properties.score.type, "double");
 		assert.equal(parsed.mappings.properties.hidden, undefined);
 	});
+
+	it("honours @searchAs on nested model properties", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+			model Person {
+				@searchable @searchAs("firstName") givenName: string;
+				@searchable @searchAs("lastName") familyName: string;
+			}
+
+			model Contact {
+				@searchable contactId: string;
+				@searchable person?: Person;
+			}
+
+			model ContactSearchDoc is SearchProjection<Contact> {}
+		`);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ContactSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		const personProps = parsed.mappings.properties.person.properties;
+		assert.ok(personProps.firstName, "should have renamed firstName");
+		assert.ok(personProps.lastName, "should have renamed lastName");
+		assert.equal(
+			personProps.givenName,
+			undefined,
+			"should not have original givenName",
+		);
+		assert.equal(
+			personProps.familyName,
+			undefined,
+			"should not have original familyName",
+		);
+	});
 });

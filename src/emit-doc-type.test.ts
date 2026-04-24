@@ -475,4 +475,40 @@ describe("doc type emitter", () => {
 		assert.ok(emitted.content.includes("score: number;"));
 		assert.ok(!emitted.content.includes("hidden"));
 	});
+
+	it("honours @searchAs on nested model properties", async () => {
+		const emitted = await emitFor(
+			`
+			model Person {
+				@searchable @searchAs("firstName") givenName: string;
+				@searchable @searchAs("lastName") familyName: string;
+			}
+
+			model Contact {
+				@searchable contactId: string;
+				@searchable person?: Person;
+			}
+
+			model ContactSearchDoc is SearchProjection<Contact> {}
+			`,
+			"ContactSearchDoc",
+		);
+
+		assert.ok(
+			emitted.content.includes("firstName"),
+			"should use renamed firstName",
+		);
+		assert.ok(
+			emitted.content.includes("lastName"),
+			"should use renamed lastName",
+		);
+		assert.ok(
+			!emitted.content.includes("givenName"),
+			"should not use original givenName",
+		);
+		assert.ok(
+			!emitted.content.includes("familyName"),
+			"should not use original familyName",
+		);
+	});
 });
