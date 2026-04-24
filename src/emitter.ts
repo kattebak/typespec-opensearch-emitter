@@ -120,6 +120,9 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 			name: projection.projectionModel.name,
 			sourceModel: projection.sourceModel.name,
 			indexName: projection.indexName,
+			...(projection.indexSettings
+				? { indexSettings: projection.indexSettings }
+				: {}),
 			fields: projection.fields.map((field) => ({
 				name: field.name,
 				optional: field.optional,

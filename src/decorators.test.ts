@@ -7,6 +7,7 @@ import {
 	getBoost,
 	getIgnoreAbove,
 	getIndexName,
+	getIndexSettings,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -184,6 +185,46 @@ describe("decorators", () => {
 
 		const codes = diagnostics.map((x) => x.code);
 		assert.equal(hasDiagnosticCode(codes, "positive-boost-required"), true);
+	});
+
+	it("stores and retrieves @indexSettings with valid JSON", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Pet {
+        @searchable name: string;
+      }
+
+      @indexSettings("{\\"analysis\\":{\\"analyzer\\":{\\"my_analyzer\\":{\\"type\\":\\"custom\\"}}}}") 
+      model PetSearchDoc is SearchProjection<Pet> {}
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const model = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(model);
+
+		const settings = getIndexSettings(runner.program, model);
+		assert.ok(settings);
+		assert.deepEqual(settings, {
+			analysis: { analyzer: { my_analyzer: { type: "custom" } } },
+		});
+	});
+
+	it("emits diagnostic for @indexSettings with invalid JSON", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Pet {
+        @searchable name: string;
+      }
+
+      @indexSettings("not valid json")
+      model PetSearchDoc is SearchProjection<Pet> {}
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "invalid-index-settings-json"), true);
 	});
 
 	it("stores and retrieves @ignoreAbove value", async () => {
