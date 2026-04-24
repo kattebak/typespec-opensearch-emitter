@@ -118,6 +118,30 @@ export function getBoost(
 	return program.stateMap(StateKeys.boost).get(target);
 }
 
+export function $ignoreAbove(
+	context: DecoratorContext,
+	target: ModelProperty,
+	limit: number,
+): void {
+	const value = limit;
+	if (!Number.isFinite(value) || value <= 0) {
+		reportDiagnostic(context.program, {
+			code: "positive-ignore-above-required",
+			target: context.getArgumentTarget(0) ?? target,
+		});
+		return;
+	}
+
+	context.program.stateMap(StateKeys.ignoreAbove).set(target, value);
+}
+
+export function getIgnoreAbove(
+	program: Program,
+	target: ModelProperty,
+): number | undefined {
+	return program.stateMap(StateKeys.ignoreAbove).get(target);
+}
+
 export function $indexName(
 	context: DecoratorContext,
 	target: Model,

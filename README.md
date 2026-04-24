@@ -183,6 +183,7 @@ export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
 | `@nested` | `ModelProperty` (Model[]) | Maps an array-of-model field as OpenSearch `nested` instead of `object`. | `@searchable @nested tags: Tag[];` |
 | `@analyzer("name")` | `ModelProperty` (string) | Sets the text analyzer in mapping output. | `@analyzer("edge_ngram") name: string;` |
 | `@boost(n)` | `ModelProperty` | Sets field boost factor in mapping output. Must be > 0. | `@boost(2.0) name: string;` |
+| `@ignoreAbove(n)` | `ModelProperty` (string) | Overrides `ignore_above` on the keyword sub-field. Must be > 0. | `@ignoreAbove(1024) name: string;` |
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 
 ## Type mapping
@@ -216,6 +217,7 @@ export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `output-file` | `string` | `opensearch-projections.json` | Filename for the projection metadata JSON. |
+| `default-ignore-above` | `number` | `256` | Default `ignore_above` value for keyword sub-fields on text-mapped strings. |
 
 The `emitter-output-dir` option is a standard TypeSpec compiler option that controls the output directory.
 

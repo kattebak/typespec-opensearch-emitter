@@ -2,6 +2,7 @@ import type { Model, ModelProperty, Program, Type } from "@typespec/compiler";
 import {
 	getAnalyzer,
 	getBoost,
+	getIgnoreAbove,
 	getIndexName,
 	isKeyword,
 	isNested,
@@ -20,6 +21,7 @@ export interface ResolvedProjectionField {
 	nested: boolean;
 	analyzer?: string;
 	boost?: number;
+	ignoreAbove?: number;
 }
 
 export interface ResolvedProjection {
@@ -113,6 +115,9 @@ function resolveProjectionField(
 	const boost =
 		(projectionProperty && getBoost(program, projectionProperty)) ??
 		getBoost(program, sourceProperty);
+	const ignoreAbove =
+		(projectionProperty && getIgnoreAbove(program, projectionProperty)) ??
+		getIgnoreAbove(program, sourceProperty);
 
 	return {
 		name: sourceProperty.name,
@@ -129,6 +134,7 @@ function resolveProjectionField(
 			isNested(program, sourceProperty),
 		analyzer,
 		boost,
+		ignoreAbove,
 	};
 }
 

@@ -259,4 +259,57 @@ describe("mapping emitter", () => {
 		assert.equal(parsed.mappings.properties.status.type, "keyword");
 		assert.equal(parsed.mappings.properties.status.fields, undefined);
 	});
+
+	it("uses @ignoreAbove value on keyword sub-field", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable @ignoreAbove(1024) name: string;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.equal(parsed.mappings.properties.name.type, "text");
+		assert.deepEqual(parsed.mappings.properties.name.fields, {
+			keyword: { type: "keyword", ignore_above: 1024 },
+		});
+	});
+
+	it("defaults ignore_above to 256 without decorator", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.name.fields, {
+			keyword: { type: "keyword", ignore_above: 256 },
+		});
+	});
 });
