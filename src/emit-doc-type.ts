@@ -1,6 +1,7 @@
 import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
 import { isSearchable } from "./decorators.js";
 import type { ResolvedProjection } from "./projection.js";
+import { toKebabCase } from "./utils.js";
 
 export interface EmittedDocTypeFile {
 	fileName: string;
@@ -134,13 +135,6 @@ function renderUnion(program: Program, union: Union): string {
 	}
 
 	return variants.map((x) => renderType(program, x.type)).join(" | ");
-}
-
-export function toKebabCase(name: string): string {
-	return name
-		.replace(/([a-z0-9])([A-Z])/g, "$1-$2")
-		.replace(/[-\s]+/g, "-")
-		.toLowerCase();
 }
 
 export function toDocTypeFileName(projectionModelName: string): string {
