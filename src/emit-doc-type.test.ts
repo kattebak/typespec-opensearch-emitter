@@ -395,4 +395,24 @@ describe("doc type emitter", () => {
 
 		assert.ok(emitted.content.includes('priority: "low" | "medium" | "high";'));
 	});
+
+	it("uses @searchAs renamed property in TypeScript interface", async () => {
+		const emitted = await emitFor(
+			`
+			model Person {
+				@searchable givenName: string;
+				@searchable age: int32;
+			}
+
+			model PersonSearchDoc is SearchProjection<Person> {
+				@searchAs("firstName") givenName: string;
+			}
+			`,
+			"PersonSearchDoc",
+		);
+
+		assert.ok(emitted.content.includes("firstName: string;"));
+		assert.ok(!emitted.content.includes("givenName"));
+		assert.ok(emitted.content.includes("age: number;"));
+	});
 });

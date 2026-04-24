@@ -125,6 +125,7 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 				: {}),
 			fields: projection.fields.map((field) => ({
 				name: field.name,
+				...(field.projectedName ? { projectedName: field.projectedName } : {}),
 				optional: field.optional,
 				keyword: field.keyword,
 				nested: field.nested,

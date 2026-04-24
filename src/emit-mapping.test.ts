@@ -375,4 +375,37 @@ describe("mapping emitter", () => {
 			keyword: { type: "keyword", ignore_above: 256 },
 		});
 	});
+
+	it("uses @searchAs renamed key in mapping output", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Person {
+        @searchable givenName: string;
+        @searchable @keyword status: string;
+      }
+
+      model PersonSearchDoc is SearchProjection<Person> {
+        @searchAs("firstName") givenName: string;
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PersonSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		// renamed field
+		assert.ok(parsed.mappings.properties.firstName);
+		assert.equal(parsed.mappings.properties.firstName.type, "text");
+		// original name should not appear
+		assert.equal(parsed.mappings.properties.givenName, undefined);
+		// non-renamed field still uses original name
+		assert.ok(parsed.mappings.properties.status);
+	});
 });

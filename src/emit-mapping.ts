@@ -25,7 +25,7 @@ export function emitMapping(
 	const fileName = `${toKebabCase(projection.projectionModel.name)}-search-mapping.json`;
 	const properties = Object.fromEntries(
 		projection.fields.map((field) => [
-			field.name,
+			field.projectedName ?? field.name,
 			toMapping(
 				program,
 				field.type,

@@ -186,6 +186,7 @@ export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
 | `@ignoreAbove(n)` | `ModelProperty` (string) | Overrides `ignore_above` on the keyword sub-field. Must be > 0. | `@ignoreAbove(1024) name: string;` |
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
+| `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
 
 ## Type mapping
 

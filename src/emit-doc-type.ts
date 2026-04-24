@@ -23,7 +23,7 @@ export function emitDocType(
 	const body = renderBlock(
 		program,
 		projection.fields.map((x) => ({
-			name: x.name,
+			name: x.projectedName ?? x.name,
 			type: x.type,
 			optional: x.optional,
 		})),

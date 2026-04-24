@@ -209,6 +209,29 @@ function isArrayOfModelType(type: Type): boolean {
 	return elementType?.kind === "Model";
 }
 
+export function $searchAs(
+	context: DecoratorContext,
+	target: ModelProperty,
+	name: string,
+): void {
+	if (!name) {
+		reportDiagnostic(context.program, {
+			code: "non-empty-search-as-required",
+			target: context.getArgumentTarget(0) ?? target,
+		});
+		return;
+	}
+
+	context.program.stateMap(StateKeys.searchAs).set(target, name);
+}
+
+export function getSearchAs(
+	program: Program,
+	target: ModelProperty,
+): string | undefined {
+	return program.stateMap(StateKeys.searchAs).get(target);
+}
+
 export const __test = {
 	deriveDefaultIndexName,
 	isArrayOfModelType,

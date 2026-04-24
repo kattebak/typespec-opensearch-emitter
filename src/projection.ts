@@ -5,6 +5,7 @@ import {
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
+	getSearchAs,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -13,6 +14,7 @@ import { reportDiagnostic } from "./lib.js";
 
 export interface ResolvedProjectionField {
 	name: string;
+	projectedName?: string;
 	type: Type;
 	optional: boolean;
 	sourceProperty: ModelProperty;
@@ -122,8 +124,13 @@ function resolveProjectionField(
 		(projectionProperty && getIgnoreAbove(program, projectionProperty)) ??
 		getIgnoreAbove(program, sourceProperty);
 
+	const searchAs =
+		(projectionProperty && getSearchAs(program, projectionProperty)) ??
+		getSearchAs(program, sourceProperty);
+
 	return {
 		name: sourceProperty.name,
+		projectedName: searchAs,
 		type: projectionProperty?.type ?? sourceProperty.type,
 		optional: projectionProperty?.optional ?? sourceProperty.optional,
 		sourceProperty,

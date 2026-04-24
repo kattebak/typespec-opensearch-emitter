@@ -8,6 +8,7 @@ import {
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
+	getSearchAs,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -258,6 +259,41 @@ describe("decorators", () => {
 		const codes = diagnostics.map((x) => x.code);
 		assert.equal(
 			hasDiagnosticCode(codes, "positive-ignore-above-required"),
+			true,
+		);
+	});
+
+	it("stores and retrieves @searchAs value", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchAs("firstName") @searchable givenName: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+
+		const givenName = product.properties.get("givenName");
+		assert.ok(givenName);
+		assert.equal(getSearchAs(runner.program, givenName), "firstName");
+	});
+
+	it("emits diagnostic for empty @searchAs", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchAs("") name: string;
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(
+			hasDiagnosticCode(codes, "non-empty-search-as-required"),
 			true,
 		);
 	});
