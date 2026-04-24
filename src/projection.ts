@@ -3,6 +3,7 @@ import {
 	getAnalyzer,
 	getBoost,
 	getIndexName,
+	getIndexSettings,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -26,6 +27,7 @@ export interface ResolvedProjection {
 	projectionModel: Model;
 	sourceModel: Model;
 	indexName: string;
+	indexSettings?: Record<string, unknown>;
 	fields: ResolvedProjectionField[];
 }
 
@@ -98,6 +100,7 @@ export function resolveProjectionModel(
 		projectionModel,
 		sourceModel,
 		indexName: getIndexName(program, projectionModel),
+		indexSettings: getIndexSettings(program, projectionModel),
 		fields,
 	};
 }

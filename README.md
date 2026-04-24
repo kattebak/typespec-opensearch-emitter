@@ -184,6 +184,7 @@ export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
 | `@analyzer("name")` | `ModelProperty` (string) | Sets the text analyzer in mapping output. | `@analyzer("edge_ngram") name: string;` |
 | `@boost(n)` | `ModelProperty` | Sets field boost factor in mapping output. Must be > 0. | `@boost(2.0) name: string;` |
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
+| `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 
 ## Type mapping
 
@@ -218,6 +219,69 @@ export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
 | `output-file` | `string` | `opensearch-projections.json` | Filename for the projection metadata JSON. |
 
 The `emitter-output-dir` option is a standard TypeSpec compiler option that controls the output directory.
+
+## Index settings (analyzers, tokenizers, filters)
+
+Use `@indexSettings` to embed analysis configuration in the mapping output. The value is a JSON string that will be emitted as the `settings` block:
+
+```typespec
+@indexName("pets_v1")
+@indexSettings("""
+{
+  "analysis": {
+    "analyzer": {
+      "edge_ngram_autocomplete": {
+        "type": "custom",
+        "tokenizer": "edge_ngram_tokenizer",
+        "filter": ["lowercase"]
+      }
+    },
+    "tokenizer": {
+      "edge_ngram_tokenizer": {
+        "type": "edge_ngram",
+        "min_gram": 2,
+        "max_gram": 10,
+        "token_chars": ["letter", "digit"]
+      }
+    }
+  }
+}
+""")
+model PetSearchDoc is SearchProjection<Pet> {
+  @analyzer("edge_ngram_autocomplete") @boost(2.0) name: string;
+}
+```
+
+This produces a mapping file with both `settings` and `mappings`:
+
+```json
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "edge_ngram_autocomplete": {
+          "type": "custom",
+          "tokenizer": "edge_ngram_tokenizer",
+          "filter": ["lowercase"]
+        }
+      },
+      "tokenizer": {
+        "edge_ngram_tokenizer": {
+          "type": "edge_ngram",
+          "min_gram": 2,
+          "max_gram": 10,
+          "token_chars": ["letter", "digit"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": { ... }
+  }
+}
+```
+
+When `@indexSettings` is not used, only `mappings` is emitted (backwards compatible).
 
 ## Contributing
 

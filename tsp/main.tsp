@@ -10,5 +10,6 @@ extern dec nested(target: ModelProperty);
 extern dec analyzer(target: ModelProperty, name: valueof string);
 extern dec boost(target: ModelProperty, factor: valueof float64);
 extern dec indexName(target: Model, name: valueof string);
+extern dec indexSettings(target: Model, settings: valueof string);
 
 model SearchProjection<T> {}

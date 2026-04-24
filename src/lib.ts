@@ -26,6 +26,12 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Property "${"name"}" on projection model is not a @searchable property on source model ${"sourceModel"} and will be ignored.`,
 			},
 		},
+		"invalid-index-settings-json": {
+			severity: "error",
+			messages: {
+				default: "@indexSettings value must be valid JSON.",
+			},
+		},
 		"positive-boost-required": {
 			severity: "error",
 			messages: {
@@ -40,6 +46,9 @@ export const $lib = createTypeSpecLibrary({
 		analyzer: { description: "Analyzer override for a property" },
 		boost: { description: "Boost override for a property" },
 		indexName: { description: "Index name override for a projection model" },
+		indexSettings: {
+			description: "Index settings JSON for a projection model",
+		},
 	},
 	emitter: {
 		options: {

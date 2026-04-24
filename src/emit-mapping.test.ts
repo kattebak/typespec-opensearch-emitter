@@ -259,4 +259,67 @@ describe("mapping emitter", () => {
 		assert.equal(parsed.mappings.properties.status.type, "keyword");
 		assert.equal(parsed.mappings.properties.status.fields, undefined);
 	});
+
+	it("includes settings block when @indexSettings is provided", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Pet {
+        @searchable name: string;
+      }
+
+      @indexSettings("{\\"analysis\\":{\\"analyzer\\":{\\"edge_ngram_autocomplete\\":{\\"type\\":\\"custom\\",\\"tokenizer\\":\\"edge_ngram_tokenizer\\",\\"filter\\":[\\"lowercase\\"]}}}}")
+      model PetSearchDoc is SearchProjection<Pet> {
+        @analyzer("edge_ngram_autocomplete") name: string;
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.ok(parsed.settings);
+		assert.ok(parsed.settings.analysis);
+		assert.ok(parsed.settings.analysis.analyzer.edge_ngram_autocomplete);
+		assert.equal(
+			parsed.settings.analysis.analyzer.edge_ngram_autocomplete.type,
+			"custom",
+		);
+		assert.ok(parsed.mappings.properties);
+		assert.equal(
+			parsed.mappings.properties.name.analyzer,
+			"edge_ngram_autocomplete",
+		);
+	});
+
+	it("does not include settings key when @indexSettings is not provided", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Pet {
+        @searchable name: string;
+      }
+
+      model PetSearchDoc is SearchProjection<Pet> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.equal(parsed.settings, undefined);
+		assert.ok(parsed.mappings.properties);
+	});
 });
