@@ -3,6 +3,7 @@ import {
 	getAnalyzer,
 	getBoost,
 	getIgnoreAbove,
+	getSearchAs,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -235,7 +236,7 @@ function mapModelProperties(
 		Array.from(model.properties.values())
 			.filter((prop) => isSearchable(program, prop))
 			.map((prop) => [
-				prop.name,
+				getSearchAs(program, prop) ?? prop.name,
 				toMapping(
 					program,
 					prop.type,

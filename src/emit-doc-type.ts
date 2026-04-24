@@ -6,7 +6,7 @@ import type {
 	Type,
 	Union,
 } from "@typespec/compiler";
-import { isSearchable } from "./decorators.js";
+import { getSearchAs, isSearchable } from "./decorators.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -194,7 +194,7 @@ function renderModel(program: Program, model: Model, depth = 0): string {
 	const searchableFields = Array.from(model.properties.values())
 		.filter((prop) => isSearchable(program, prop))
 		.map((prop) => ({
-			name: prop.name,
+			name: getSearchAs(program, prop) ?? prop.name,
 			type: prop.type,
 			optional: prop.optional,
 		}));
