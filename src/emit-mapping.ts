@@ -33,9 +33,15 @@ export function emitMapping(
 		]),
 	);
 
+	const mappings: Record<string, unknown> = { mappings: { properties } };
+
+	if (projection.indexSettings) {
+		(mappings as Record<string, unknown>).settings = projection.indexSettings;
+	}
+
 	return {
 		fileName,
-		content: `${JSON.stringify({ mappings: { properties } }, null, 2)}\n`,
+		content: `${JSON.stringify(mappings, null, 2)}\n`,
 	};
 }
 

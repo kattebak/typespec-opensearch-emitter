@@ -133,6 +133,32 @@ export function getIndexName(program: Program, target: Model): string {
 	);
 }
 
+export function $indexSettings(
+	context: DecoratorContext,
+	target: Model,
+	settings: string,
+): void {
+	try {
+		JSON.parse(settings);
+	} catch {
+		reportDiagnostic(context.program, {
+			code: "invalid-index-settings-json",
+			target,
+		});
+		return;
+	}
+
+	context.program.stateMap(StateKeys.indexSettings).set(target, settings);
+}
+
+export function getIndexSettings(
+	program: Program,
+	target: Model,
+): Record<string, unknown> | undefined {
+	const raw = program.stateMap(StateKeys.indexSettings).get(target);
+	return raw ? JSON.parse(raw) : undefined;
+}
+
 function isStringType(type: Type): boolean {
 	if (type.kind === "String") {
 		return true;
