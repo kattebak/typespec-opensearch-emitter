@@ -5,7 +5,7 @@ import type {
 	Program,
 } from "@typespec/compiler";
 import { emitFile, resolvePath } from "@typespec/compiler";
-import { emitDocType } from "./emit-doc-type.js";
+import { collectSubProjections, emitDocType } from "./emit-doc-type.js";
 import { emitIndex } from "./emit-index.js";
 import { emitMapping } from "./emit-mapping.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
@@ -39,6 +39,15 @@ export async function $onEmit(
 			path: resolvePath(context.emitterOutputDir, docTypeFile.fileName),
 			content: docTypeFile.content,
 		});
+
+		// Emit sub-projection doc type files
+		for (const subProj of collectSubProjections(projection)) {
+			const subDocTypeFile = emitDocType(context.program, subProj);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, subDocTypeFile.fileName),
+				content: subDocTypeFile.content,
+			});
+		}
 
 		const mappingFile = emitMapping(
 			context.program,

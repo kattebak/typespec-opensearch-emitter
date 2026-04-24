@@ -7,7 +7,10 @@ import type {
 	Union,
 } from "@typespec/compiler";
 import { isSearchable } from "./decorators.js";
-import type { ResolvedProjection } from "./projection.js";
+import type {
+	ResolvedProjection,
+	ResolvedProjectionField,
+} from "./projection.js";
 import { toKebabCase } from "./utils.js";
 
 export interface EmittedDocTypeFile {
@@ -15,24 +18,71 @@ export interface EmittedDocTypeFile {
 	content: string;
 }
 
+/**
+ * Collect all sub-projection models that need their own interface emitted.
+ */
+export function collectSubProjections(
+	projection: ResolvedProjection,
+): ResolvedProjection[] {
+	const result: ResolvedProjection[] = [];
+	const seen = new Set<string>();
+
+	function walk(fields: ResolvedProjectionField[]) {
+		for (const field of fields) {
+			if (field.subProjection) {
+				const name = field.subProjection.projectionModel.name;
+				if (!seen.has(name)) {
+					seen.add(name);
+					result.push(field.subProjection);
+					walk(field.subProjection.fields);
+				}
+			}
+		}
+	}
+
+	walk(projection.fields);
+	return result;
+}
+
 export function emitDocType(
 	program: Program,
 	projection: ResolvedProjection,
 ): EmittedDocTypeFile {
 	const fileName = toDocTypeFileName(projection.projectionModel.name);
+
+	// Collect sub-projection imports needed
+	const subProjections = collectSubProjections(projection);
+	const imports = subProjections
+		.map((sp) => {
+			const subFile = toDocTypeFileName(sp.projectionModel.name).replace(
+				/\.ts$/,
+				".js",
+			);
+			return `import type { ${sp.projectionModel.name} } from "./${subFile}";`;
+		})
+		.join("\n");
+
 	const body = renderBlock(
 		program,
 		projection.fields.map((x) => ({
 			name: x.projectedName ?? x.name,
 			type: x.type,
 			optional: x.optional,
+			subProjection: x.subProjection,
 		})),
 		1,
 	);
 
+	const parts: string[] = [];
+	if (imports) {
+		parts.push(imports);
+		parts.push("");
+	}
+	parts.push(`export interface ${projection.projectionModel.name} ${body}\n`);
+
 	return {
 		fileName,
-		content: `export interface ${projection.projectionModel.name} ${body}\n`,
+		content: parts.join("\n"),
 	};
 }
 
@@ -42,7 +92,12 @@ export function emitDocType(
  */
 function renderBlock(
 	program: Program,
-	fields: ReadonlyArray<{ name: string; type: Type; optional: boolean }>,
+	fields: ReadonlyArray<{
+		name: string;
+		type: Type;
+		optional: boolean;
+		subProjection?: ResolvedProjection;
+	}>,
 	depth: number,
 ): string {
 	if (fields.length === 0) {
@@ -53,7 +108,18 @@ function renderBlock(
 	const closingIndent = "\t".repeat(depth - 1);
 	const lines = fields.map((field) => {
 		const optional = field.optional ? "?" : "";
-		const type = renderType(program, field.type, depth);
+		let type: string;
+		if (field.subProjection) {
+			const subName = field.subProjection.projectionModel.name;
+			// Check if the source type is an array
+			const isArray =
+				field.type.kind === "Model" &&
+				field.type.name === "Array" &&
+				!!field.type.indexer?.value;
+			type = isArray ? `${subName}[]` : subName;
+		} else {
+			type = renderType(program, field.type, depth);
+		}
 		return `${indent}${field.name}${optional}: ${type};`;
 	});
 

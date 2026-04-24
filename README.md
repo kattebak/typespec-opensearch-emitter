@@ -174,6 +174,38 @@ export type { PetSearchDoc } from "./pet-search-doc.js";
 export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
 ```
 
+## Nested sub-projections
+
+By default, sub-model collections (e.g. `tags: Tag[]`) include every `@searchable` field of the sub-model. To whitelist specific fields per projection, create a `SearchProjection` for the sub-model and reference it in the parent projection:
+
+```typespec
+model Tag {
+  @searchable @keyword name: string;
+  @searchable createdAt: utcDateTime;
+  internalId: string;
+}
+
+model TagSearchDoc is SearchProjection<Tag> {}
+
+model Pet {
+  @searchable name: string;
+  @searchable @nested tags: Tag[];
+}
+
+@indexName("pets_v1")
+model PetSearchDoc is SearchProjection<Pet> {
+  tags: TagSearchDoc[];  // only Tag's @searchable fields via TagSearchDoc
+}
+```
+
+In this example:
+
+- `TagSearchDoc` resolves only `name` and `createdAt` from `Tag` (both `@searchable`). `internalId` is excluded.
+- `PetSearchDoc` references `TagSearchDoc[]` for the `tags` field, so the mapping and TypeScript interface use the sub-projection's fields.
+- The `@nested` decorator on the source `tags` field is preserved — the mapping emits `"type": "nested"`.
+- The emitted TypeScript interface references `TagSearchDoc[]` (with an import) instead of an inline object type.
+- Sub-projection interfaces are automatically emitted and exported from the barrel `index.ts`.
+
 ## Decorator reference
 
 | Decorator | Target | Effect | Example |

@@ -350,6 +350,84 @@ describe("mapping emitter", () => {
 		});
 	});
 
+	it("nested field with sub-projection emits only sub-projection fields in properties", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @searchable @keyword name: string;
+        @searchable createdAt: utcDateTime;
+        internalId: string;
+      }
+
+      model TagSearchDoc is SearchProjection<Tag> {}
+
+      model Pet {
+        @searchable name: string;
+        @searchable @nested tags: Tag[];
+      }
+
+      @indexName("pets_v1")
+      model PetSearchDoc is SearchProjection<Pet> {
+        tags: TagSearchDoc[];
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		const tags = parsed.mappings.properties.tags;
+		assert.equal(tags.type, "nested");
+		assert.deepEqual(Object.keys(tags.properties).sort(), [
+			"createdAt",
+			"name",
+		]);
+		assert.equal(tags.properties.name.type, "keyword");
+		assert.equal(tags.properties.createdAt.type, "date");
+		// internalId should NOT appear
+		assert.equal(tags.properties.internalId, undefined);
+	});
+
+	it("@nested is honored on sub-projection fields", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @searchable @keyword name: string;
+      }
+
+      model TagSearchDoc is SearchProjection<Tag> {}
+
+      model Pet {
+        @searchable name: string;
+        @searchable tags: Tag[];
+      }
+
+      model PetSearchDoc is SearchProjection<Pet> {
+        @nested tags: TagSearchDoc[];
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.equal(parsed.mappings.properties.tags.type, "nested");
+	});
+
 	it("defaults ignore_above to 256 without decorator", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

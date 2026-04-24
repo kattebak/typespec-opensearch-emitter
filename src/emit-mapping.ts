@@ -7,7 +7,10 @@ import {
 	isNested,
 	isSearchable,
 } from "./decorators.js";
-import type { ResolvedProjection } from "./projection.js";
+import type {
+	ResolvedProjection,
+	ResolvedProjectionField,
+} from "./projection.js";
 import { toKebabCase } from "./utils.js";
 
 export interface EmittedMappingFile {
@@ -23,22 +26,10 @@ export function emitMapping(
 	defaultIgnoreAbove?: number,
 ): EmittedMappingFile {
 	const fileName = `${toKebabCase(projection.projectionModel.name)}-search-mapping.json`;
-	const properties = Object.fromEntries(
-		projection.fields.map((field) => [
-			field.projectedName ?? field.name,
-			toMapping(
-				program,
-				field.type,
-				{
-					keyword: field.keyword,
-					nested: field.nested,
-					analyzer: field.analyzer,
-					boost: field.boost,
-					ignoreAbove: field.ignoreAbove,
-				},
-				defaultIgnoreAbove,
-			),
-		]),
+	const properties = buildPropertiesFromFields(
+		program,
+		projection.fields,
+		defaultIgnoreAbove,
 	);
 
 	const mappings: Record<string, unknown> = { mappings: { properties } };
@@ -163,6 +154,49 @@ function mapScalar(
 	}
 
 	return { type: "object" };
+}
+
+function buildPropertiesFromFields(
+	program: Program,
+	fields: ResolvedProjectionField[],
+	defaultIgnoreAbove?: number,
+): Record<string, MappingProperty> {
+	return Object.fromEntries(
+		fields.map((field) => [
+			field.projectedName ?? field.name,
+			field.subProjection
+				? mapSubProjectionField(program, field, defaultIgnoreAbove)
+				: toMapping(
+						program,
+						field.type,
+						{
+							keyword: field.keyword,
+							nested: field.nested,
+							analyzer: field.analyzer,
+							boost: field.boost,
+							ignoreAbove: field.ignoreAbove,
+						},
+						defaultIgnoreAbove,
+					),
+		]),
+	);
+}
+
+function mapSubProjectionField(
+	program: Program,
+	field: ResolvedProjectionField,
+	defaultIgnoreAbove?: number,
+): MappingProperty {
+	const subProjection = field.subProjection!;
+	const properties = buildPropertiesFromFields(
+		program,
+		subProjection.fields,
+		defaultIgnoreAbove,
+	);
+	return {
+		type: field.nested ? "nested" : "object",
+		properties,
+	};
 }
 
 function mapModel(

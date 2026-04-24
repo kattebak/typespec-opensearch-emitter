@@ -360,6 +360,38 @@ describe("doc type emitter", () => {
 		assert.equal(emitted.content, `${expected}\n`);
 	});
 
+	it("renders sub-projection field as named type reference", async () => {
+		const emitted = await emitFor(
+			`
+			model Tag {
+				@searchable @keyword name: string;
+				@searchable createdAt: utcDateTime;
+				internalId: string;
+			}
+
+			model TagSearchDoc is SearchProjection<Tag> {}
+
+			model Pet {
+				@searchable name: string;
+				@searchable @nested tags: Tag[];
+			}
+
+			@indexName("pets_v1")
+			model PetSearchDoc is SearchProjection<Pet> {
+				tags: TagSearchDoc[];
+			}
+			`,
+			"PetSearchDoc",
+		);
+
+		assert.ok(emitted.content.includes("tags: TagSearchDoc[];"));
+		assert.ok(
+			emitted.content.includes(
+				'import type { TagSearchDoc } from "./tag-search-doc.js";',
+			),
+		);
+	});
+
 	it("renders enum field as string literal union", async () => {
 		const emitted = await emitFor(
 			`
