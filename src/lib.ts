@@ -51,6 +51,12 @@ export const $lib = createTypeSpecLibrary({
 				default: "Decorator @searchAs requires a non-empty name string.",
 			},
 		},
+		"spread-field-collision": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Spread field "${"name"}" collides with existing field on projection model.`,
+			},
+		},
 	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
