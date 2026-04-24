@@ -1,4 +1,11 @@
-import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
+import type {
+	Enum,
+	Model,
+	Program,
+	Scalar,
+	Type,
+	Union,
+} from "@typespec/compiler";
 import { isSearchable } from "./decorators.js";
 import type { ResolvedProjection } from "./projection.js";
 import { toKebabCase } from "./utils.js";
@@ -67,6 +74,8 @@ function renderType(program: Program, type: Type, depth = 0): string {
 			return "boolean";
 		case "Union":
 			return renderUnion(program, type, depth);
+		case "Enum":
+			return renderEnum(type);
 		default:
 			return "unknown";
 	}
@@ -127,6 +136,20 @@ function renderModel(program: Program, model: Model, depth = 0): string {
 	return renderBlock(program, searchableFields, depth + 1);
 }
 
+function renderEnum(enumType: Enum): string {
+	const members = Array.from(enumType.members.values());
+	if (members.length === 0) {
+		return "never";
+	}
+
+	return members
+		.map((m) => {
+			const value = m.value !== undefined ? m.value : m.name;
+			return typeof value === "string" ? `"${value}"` : String(value);
+		})
+		.join(" | ");
+}
+
 function renderUnion(program: Program, union: Union, depth = 0): string {
 	const variants = Array.from(union.variants.values());
 	if (variants.length === 0) {
@@ -145,6 +168,7 @@ export function toDocTypeFileName(projectionModelName: string): string {
 }
 
 export const __test = {
+	renderEnum,
 	renderModel,
 	renderScalar,
 	renderType,

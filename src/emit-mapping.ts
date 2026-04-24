@@ -62,6 +62,8 @@ function toMapping(
 			return { type: "boolean" };
 		case "Union":
 			return mapUnion(program, type, override);
+		case "Enum":
+			return { type: "keyword" };
 		default:
 			return { type: "object" };
 	}

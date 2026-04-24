@@ -232,4 +232,31 @@ describe("mapping emitter", () => {
 		assert.equal(addrProps.city.type, "keyword");
 		assert.equal(addrProps.zip.type, "long");
 	});
+
+	it("maps enum field without @keyword as keyword", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      enum Status { Active, Pending, Archived }
+
+      model Product {
+        @searchable status: Status;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.equal(parsed.mappings.properties.status.type, "keyword");
+		assert.equal(parsed.mappings.properties.status.fields, undefined);
+	});
 });

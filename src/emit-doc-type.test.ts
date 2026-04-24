@@ -359,4 +359,40 @@ describe("doc type emitter", () => {
 
 		assert.equal(emitted.content, `${expected}\n`);
 	});
+
+	it("renders enum field as string literal union", async () => {
+		const emitted = await emitFor(
+			`
+			enum Status { Active, Pending, Archived }
+
+			model Product {
+				@searchable status: Status;
+			}
+
+			model ProductSearchDoc is SearchProjection<Product> {}
+			`,
+			"ProductSearchDoc",
+		);
+
+		assert.ok(
+			emitted.content.includes('status: "Active" | "Pending" | "Archived";'),
+		);
+	});
+
+	it("renders enum with explicit values using those values", async () => {
+		const emitted = await emitFor(
+			`
+			enum Priority { Low: "low", Medium: "medium", High: "high" }
+
+			model Task {
+				@searchable priority: Priority;
+			}
+
+			model TaskSearchDoc is SearchProjection<Task> {}
+			`,
+			"TaskSearchDoc",
+		);
+
+		assert.ok(emitted.content.includes('priority: "low" | "medium" | "high";'));
+	});
 });
