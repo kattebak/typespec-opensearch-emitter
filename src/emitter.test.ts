@@ -280,10 +280,12 @@ describe("generateTsConfig", () => {
 			moduleResolution: "NodeNext",
 			target: "ES2020",
 			strict: true,
+			skipLibCheck: true,
 			declaration: true,
 			outDir: ".",
 		});
 		assert.deepEqual(result.include, ["index.ts", "product-search-doc.ts"]);
+		assert.deepEqual(result.exclude, ["node_modules"]);
 	});
 
 	it("sorts include entries alphabetically", () => {
