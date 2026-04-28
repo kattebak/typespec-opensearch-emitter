@@ -3,6 +3,8 @@ import { createTypeSpecLibrary, paramMessage } from "@typespec/compiler";
 export interface OpenSearchEmitterOptions {
 	"output-file"?: string;
 	"default-ignore-above"?: number;
+	"package-name"?: string;
+	"package-version"?: string;
 }
 
 export const $lib = createTypeSpecLibrary({
@@ -88,6 +90,8 @@ export const $lib = createTypeSpecLibrary({
 					nullable: true,
 					default: 256,
 				},
+				"package-name": { type: "string", nullable: true },
+				"package-version": { type: "string", nullable: true },
 			},
 			required: [],
 		},

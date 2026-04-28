@@ -14,6 +14,7 @@ import {
 	type ResolvedProjection,
 	resolveProjectionModel,
 } from "./projection.js";
+import { toKebabCase } from "./utils.js";
 
 export async function $onEmit(
 	context: EmitContext<OpenSearchEmitterOptions>,
@@ -70,6 +71,21 @@ export async function $onEmit(
 		path: resolvePath(context.emitterOutputDir, outputFile),
 		content: `${JSON.stringify(serializeProjections(resolved), null, 2)}\n`,
 	});
+
+	const packageName = context.options["package-name"];
+	const packageVersion = context.options["package-version"];
+
+	if (packageName && packageVersion) {
+		const packageJsonContent = generatePackageJson(
+			packageName,
+			packageVersion,
+			resolved,
+		);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, "package.json"),
+			content: packageJsonContent,
+		});
+	}
 }
 
 function collectProjectionModels(
@@ -150,4 +166,45 @@ export const __test = {
 	isCandidateModel,
 	isTemplateDeclaration,
 	serializeProjections,
+	generatePackageJson,
 };
+
+function generatePackageJson(
+	packageName: string,
+	packageVersion: string,
+	projections: ResolvedProjection[],
+): string {
+	const mappingExports: Record<string, string> = {};
+
+	for (const projection of projections) {
+		const baseName = `${toKebabCase(projection.projectionModel.name)}-search-mapping`;
+		mappingExports[`./${baseName}.json`] = `./${baseName}.json`;
+	}
+
+	const sorted = Object.fromEntries(
+		Object.entries(mappingExports).sort(([a], [b]) => a.localeCompare(b)),
+	);
+
+	const packageJson = {
+		name: packageName,
+		version: packageVersion,
+		type: "module" as const,
+		main: "./index.js",
+		types: "./index.d.ts",
+		exports: {
+			".": {
+				types: "./index.d.ts",
+				default: "./index.js",
+			},
+			...sorted,
+		},
+		scripts: {
+			prepare: "tsc",
+		},
+		devDependencies: {
+			typescript: "^5.0.0",
+		},
+	};
+
+	return `${JSON.stringify(packageJson, null, 2)}\n`;
+}
