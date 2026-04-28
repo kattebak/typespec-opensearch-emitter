@@ -202,10 +202,12 @@ function generateTsConfig(projections: ResolvedProjection[]): string {
 			moduleResolution: "NodeNext",
 			target: "ES2020",
 			strict: true,
+			skipLibCheck: true,
 			declaration: true,
 			outDir: ".",
 		},
 		include: tsFiles,
+		exclude: ["node_modules"],
 	};
 
 	return `${JSON.stringify(tsConfig, null, 2)}\n`;
