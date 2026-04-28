@@ -6,6 +6,8 @@ TypeSpec emitter that generates OpenSearch artifacts from decorated models:
 - **OpenSearch mapping JSON** for index creation
 - **Barrel `index.ts`** with type exports and index name constants
 - **Projection metadata JSON** for tooling integration
+- **GraphQL SDL fragments** for AppSync-over-OpenSearch read APIs (opt-in)
+- **APPSYNC_JS resolver source** per searchable operation (opt-in)
 
 ## Install
 
@@ -291,8 +293,130 @@ In this example:
 | --- | --- | --- | --- |
 | `output-file` | `string` | `opensearch-projections.json` | Filename for the projection metadata JSON. |
 | `default-ignore-above` | `number` | `256` | Default `ignore_above` value for keyword sub-fields on text-mapped strings. |
+| `package-name` | `string` | — | Package name for emitted `package.json`. Requires `package-version`. |
+| `package-version` | `string` | — | Package version for emitted `package.json`. Requires `package-name`. |
+| `graphql.emit` | `boolean` | `false` | Enable GraphQL SDL and resolver emission. |
+| `graphql.default-page-size` | `number` | `20` | Default page size for connection queries. |
+| `graphql.max-page-size` | `number` | `100` | Maximum allowed page size. |
+| `graphql.track-total-hits-up-to` | `number` | `10000` | OpenSearch `track_total_hits` limit. |
 
 The `emitter-output-dir` option is a standard TypeSpec compiler option that controls the output directory.
+
+## GraphQL emit target (AppSync)
+
+Enable with `graphql.emit: true` to generate GraphQL SDL fragments and APPSYNC_JS resolvers alongside the standard OpenSearch artifacts.
+
+### Configuration
+
+```yaml
+emit:
+  - "@kattebak/typespec-opensearch-emitter"
+options:
+  "@kattebak/typespec-opensearch-emitter":
+    emitter-output-dir: "{cwd}/build/opensearch"
+    graphql:
+      emit: true
+      default-page-size: 20
+      max-page-size: 100
+      track-total-hits-up-to: 10000
+```
+
+### Generated files
+
+For each projection, the emitter produces:
+
+```text
+build/opensearch/
+  pet-search-doc.graphql          # GraphQL SDL fragment
+  pet-search-doc-resolver.js      # APPSYNC_JS resolver
+  graphql-resolvers.json           # manifest mapping projections to files
+```
+
+### GraphQL SDL (`.graphql`)
+
+Each fragment contains:
+
+- **Object type** — derived 1:1 from the search-doc TypeScript interface. Field types map from TypeSpec scalars to GraphQL scalars (`string` → `String`, `int32` → `Int`, `float64` → `Float`, `boolean` → `Boolean`).
+- **Filter input** — one optional `String` argument per `@keyword` field for term matching. Omitted if the projection has no keyword fields.
+- **Connection envelope** — `*Connection`, `*Edge`, and `PageInfo` types implementing opaque cursor pagination via `search_after`.
+
+Example output for `PetSearchDoc`:
+
+```graphql
+type PetSearchDoc {
+  id: String!
+  name: String!
+  species: String!
+  breed: String
+  birthDate: String!
+  tags: [TagSearchDoc!]!
+  owner: String!
+}
+
+input PetSearchDocFilter {
+  species: String
+}
+
+type PetSearchDocConnection {
+  edges: [PetSearchDocEdge!]!
+  pageInfo: PageInfo!
+  totalHits: Int!
+}
+
+type PetSearchDocEdge {
+  node: PetSearchDoc!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+```
+
+### APPSYNC_JS resolver (`.js`)
+
+Each resolver file exports `request(ctx)` and `response(ctx)` conforming to APPSYNC_JS runtime constraints:
+
+- **No imports** except `@aws-appsync/utils`
+- **No network I/O** — resolvers are pure request/response transformers
+- `request` builds an OpenSearch `_search` body with:
+  - `multi_match` across all `text` fields when `query` argument is provided
+  - `term` filters for each `@keyword` field present in the `filter` argument
+  - `search_after` cursor pagination (base64-encoded sort values)
+  - Deterministic sort: `[_score desc, _id asc]`
+- `response` projects hits into the Connection shape with edges, cursors, and pageInfo
+
+### Manifest (`graphql-resolvers.json`)
+
+Maps each projection to its resolver file, SDL file, query field name, and index name:
+
+```json
+{
+  "resolvers": [
+    {
+      "projection": "PetSearchDoc",
+      "indexName": "pets_v1",
+      "queryFieldName": "searchPet",
+      "resolverFile": "pet-search-doc-resolver.js",
+      "sdlFile": "pet-search-doc.graphql"
+    }
+  ]
+}
+```
+
+The consuming CDK construct can read this manifest to wire resolvers without hardcoded knowledge.
+
+### Conventions
+
+GraphQL intent is derived from the existing OpenSearch mapping — no additional decorators needed:
+
+| OpenSearch mapping | GraphQL behavior |
+| --- | --- |
+| `@keyword` field | Filterable input argument (term match) |
+| `text` field (no `@keyword`) | Included in `multi_match` field list |
+| All projection fields | Output type fields |
+| Sub-projection (`SearchProjection`) | Nested GraphQL type reference |
 
 ## Index settings (analyzers, tokenizers, filters)
 
