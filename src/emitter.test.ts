@@ -196,6 +196,72 @@ describe("isCandidateModel", () => {
 	});
 });
 
+describe("generatePackageJson", () => {
+	it("generates a minimal package.json with index and mapping exports", () => {
+		const projections = [
+			{
+				projectionModel: { name: "ProductSearchDoc" },
+				sourceModel: { name: "Product" },
+				indexName: "product_search_doc",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const result = JSON.parse(
+			__test.generatePackageJson("@my/pkg", "1.0.0", projections),
+		);
+
+		assert.equal(result.name, "@my/pkg");
+		assert.equal(result.version, "1.0.0");
+		assert.equal(result.type, "module");
+		assert.equal(result.main, "./index.js");
+		assert.equal(result.types, "./index.d.ts");
+		assert.deepEqual(result.exports["."], {
+			types: "./index.d.ts",
+			default: "./index.js",
+		});
+		assert.equal(
+			result.exports["./product-search-doc-search-mapping.json"],
+			"./product-search-doc-search-mapping.json",
+		);
+	});
+
+	it("sorts mapping exports alphabetically", () => {
+		const projections = [
+			{
+				projectionModel: { name: "ZetaSearchDoc" },
+				sourceModel: { name: "Zeta" },
+				indexName: "zeta",
+				fields: [],
+			},
+			{
+				projectionModel: { name: "AlphaSearchDoc" },
+				sourceModel: { name: "Alpha" },
+				indexName: "alpha",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const result = JSON.parse(
+			__test.generatePackageJson("@my/pkg", "2.0.0", projections),
+		);
+		const exportKeys = Object.keys(result.exports);
+
+		assert.equal(exportKeys[0], ".");
+		assert.equal(exportKeys[1], "./alpha-search-doc-search-mapping.json");
+		assert.equal(exportKeys[2], "./zeta-search-doc-search-mapping.json");
+	});
+
+	it("omits package.json when options are not provided", () => {
+		const result = JSON.parse(
+			__test.generatePackageJson("@my/pkg", "1.0.0", []),
+		);
+		const exportKeys = Object.keys(result.exports);
+		assert.equal(exportKeys.length, 1);
+		assert.equal(exportKeys[0], ".");
+	});
+});
+
 describe("isTemplateDeclaration", () => {
 	it("returns true when model node has templateParameters", () => {
 		const model = {
