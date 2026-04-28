@@ -5,7 +5,11 @@ import type {
 	Program,
 } from "@typespec/compiler";
 import { emitFile, resolvePath } from "@typespec/compiler";
-import { collectSubProjections, emitDocType } from "./emit-doc-type.js";
+import {
+	collectSubProjections,
+	emitDocType,
+	toDocTypeFileName,
+} from "./emit-doc-type.js";
 import { emitIndex } from "./emit-index.js";
 import { emitMapping } from "./emit-mapping.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
@@ -84,6 +88,12 @@ export async function $onEmit(
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "package.json"),
 			content: packageJsonContent,
+		});
+
+		const tsConfigContent = generateTsConfig(resolved);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, "tsconfig.json"),
+			content: tsConfigContent,
 		});
 	}
 }
@@ -167,7 +177,39 @@ export const __test = {
 	isTemplateDeclaration,
 	serializeProjections,
 	generatePackageJson,
+	generateTsConfig,
 };
+
+function generateTsConfig(projections: ResolvedProjection[]): string {
+	const tsFiles: string[] = ["index.ts"];
+
+	for (const projection of projections) {
+		tsFiles.push(toDocTypeFileName(projection.projectionModel.name));
+
+		for (const subProj of collectSubProjections(projection)) {
+			const subFileName = toDocTypeFileName(subProj.projectionModel.name);
+			if (!tsFiles.includes(subFileName)) {
+				tsFiles.push(subFileName);
+			}
+		}
+	}
+
+	tsFiles.sort();
+
+	const tsConfig = {
+		compilerOptions: {
+			module: "NodeNext",
+			moduleResolution: "NodeNext",
+			target: "ES2020",
+			strict: true,
+			declaration: true,
+			outDir: ".",
+		},
+		include: tsFiles,
+	};
+
+	return `${JSON.stringify(tsConfig, null, 2)}\n`;
+}
 
 function generatePackageJson(
 	packageName: string,

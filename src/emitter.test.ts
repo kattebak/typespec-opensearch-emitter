@@ -262,6 +262,60 @@ describe("generatePackageJson", () => {
 	});
 });
 
+describe("generateTsConfig", () => {
+	it("generates tsconfig with index.ts and doc-type files", () => {
+		const projections = [
+			{
+				projectionModel: { name: "ProductSearchDoc" },
+				sourceModel: { name: "Product" },
+				indexName: "product_search_doc",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const result = JSON.parse(__test.generateTsConfig(projections));
+
+		assert.deepEqual(result.compilerOptions, {
+			module: "NodeNext",
+			moduleResolution: "NodeNext",
+			target: "ES2020",
+			strict: true,
+			declaration: true,
+			outDir: ".",
+		});
+		assert.deepEqual(result.include, ["index.ts", "product-search-doc.ts"]);
+	});
+
+	it("sorts include entries alphabetically", () => {
+		const projections = [
+			{
+				projectionModel: { name: "ZetaSearchDoc" },
+				sourceModel: { name: "Zeta" },
+				indexName: "zeta",
+				fields: [],
+			},
+			{
+				projectionModel: { name: "AlphaSearchDoc" },
+				sourceModel: { name: "Alpha" },
+				indexName: "alpha",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const result = JSON.parse(__test.generateTsConfig(projections));
+		assert.deepEqual(result.include, [
+			"alpha-search-doc.ts",
+			"index.ts",
+			"zeta-search-doc.ts",
+		]);
+	});
+
+	it("returns tsconfig with only index.ts when no projections", () => {
+		const result = JSON.parse(__test.generateTsConfig([]));
+		assert.deepEqual(result.include, ["index.ts"]);
+	});
+});
+
 describe("isTemplateDeclaration", () => {
 	it("returns true when model node has templateParameters", () => {
 		const model = {
