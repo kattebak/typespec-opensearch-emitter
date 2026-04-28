@@ -1,10 +1,18 @@
 import { createTypeSpecLibrary, paramMessage } from "@typespec/compiler";
 
+export interface GraphQLEmitterOptions {
+	emit?: boolean;
+	"default-page-size"?: number;
+	"max-page-size"?: number;
+	"track-total-hits-up-to"?: number;
+}
+
 export interface OpenSearchEmitterOptions {
 	"output-file"?: string;
 	"default-ignore-above"?: number;
 	"package-name"?: string;
 	"package-version"?: string;
+	graphql?: GraphQLEmitterOptions;
 }
 
 export const $lib = createTypeSpecLibrary({
@@ -92,6 +100,29 @@ export const $lib = createTypeSpecLibrary({
 				},
 				"package-name": { type: "string", nullable: true },
 				"package-version": { type: "string", nullable: true },
+				graphql: {
+					type: "object",
+					nullable: true,
+					properties: {
+						emit: { type: "boolean", nullable: true, default: false },
+						"default-page-size": {
+							type: "number",
+							nullable: true,
+							default: 20,
+						},
+						"max-page-size": {
+							type: "number",
+							nullable: true,
+							default: 100,
+						},
+						"track-total-hits-up-to": {
+							type: "number",
+							nullable: true,
+							default: 10000,
+						},
+					},
+					additionalProperties: false,
+				},
 			},
 			required: [],
 		},
