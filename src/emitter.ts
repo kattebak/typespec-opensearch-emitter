@@ -10,6 +10,11 @@ import {
 	emitDocType,
 	toDocTypeFileName,
 } from "./emit-doc-type.js";
+import {
+	type EmittedResolverFile,
+	emitGraphQLResolver,
+} from "./emit-graphql-resolver.js";
+import { emitGraphQLSdl } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
 import { emitMapping } from "./emit-mapping.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
@@ -96,6 +101,41 @@ export async function $onEmit(
 			content: tsConfigContent,
 		});
 	}
+
+	const graphqlOptions = context.options.graphql;
+	if (graphqlOptions?.emit) {
+		const pageOptions = {
+			defaultPageSize: graphqlOptions["default-page-size"] ?? 20,
+			maxPageSize: graphqlOptions["max-page-size"] ?? 100,
+		};
+		const resolverOptions = {
+			...pageOptions,
+			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
+		};
+
+		const resolverFiles: EmittedResolverFile[] = [];
+
+		for (const projection of resolved) {
+			const sdlFile = emitGraphQLSdl(context.program, projection, pageOptions);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
+				content: sdlFile.content,
+			});
+
+			const resolverFile = emitGraphQLResolver(projection, resolverOptions);
+			resolverFiles.push(resolverFile);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, resolverFile.fileName),
+				content: resolverFile.content,
+			});
+		}
+
+		const manifest = generateGraphQLManifest(resolved, resolverFiles);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
+			content: manifest,
+		});
+	}
 }
 
 function collectProjectionModels(
@@ -171,6 +211,24 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 	};
 }
 
+function generateGraphQLManifest(
+	projections: ResolvedProjection[],
+	resolverFiles: EmittedResolverFile[],
+): string {
+	const resolvers = projections.map((projection, i) => {
+		const resolver = resolverFiles[i];
+		return {
+			projection: projection.projectionModel.name,
+			indexName: projection.indexName,
+			queryFieldName: resolver.queryFieldName,
+			resolverFile: resolver.fileName,
+			sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,
+		};
+	});
+
+	return `${JSON.stringify({ resolvers }, null, 2)}\n`;
+}
+
 export const __test = {
 	collectProjectionModels,
 	isCandidateModel,
@@ -178,6 +236,7 @@ export const __test = {
 	serializeProjections,
 	generatePackageJson,
 	generateTsConfig,
+	generateGraphQLManifest,
 };
 
 function generateTsConfig(projections: ResolvedProjection[]): string {
