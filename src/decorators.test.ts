@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
+	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
 	getIgnoreAbove,
@@ -296,5 +297,80 @@ describe("decorators", () => {
 			hasDiagnosticCode(codes, "non-empty-search-as-required"),
 			true,
 		);
+	});
+
+	it("stores @aggregatable kinds with single argument", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms") @searchable tags: string[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+
+		const tags = product.properties.get("tags");
+		assert.ok(tags);
+		assert.deepEqual(getAggregatableKinds(runner.program, tags), ["terms"]);
+	});
+
+	it("stores @aggregatable kinds with multiple arguments", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms", "cardinality") @searchable locations: string[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+
+		const locations = product.properties.get("locations");
+		assert.ok(locations);
+		assert.deepEqual(getAggregatableKinds(runner.program, locations), [
+			"terms",
+			"cardinality",
+		]);
+	});
+
+	it("returns undefined when @aggregatable not used", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+
+		const name = product.properties.get("name");
+		assert.ok(name);
+		assert.equal(getAggregatableKinds(runner.program, name), undefined);
+	});
+
+	it("emits diagnostic for unknown @aggregatable kind", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("histogram") @searchable tags: string[];
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "invalid-aggregation-kind"), true);
 	});
 });

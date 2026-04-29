@@ -1,5 +1,7 @@
 import type { Model, ModelProperty, Program, Type } from "@typespec/compiler";
 import {
+	type AggregationKind,
+	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
 	getIgnoreAbove,
@@ -25,6 +27,7 @@ export interface ResolvedProjectionField {
 	analyzer?: string;
 	boost?: number;
 	ignoreAbove?: number;
+	aggregations?: AggregationKind[];
 	subProjection?: ResolvedProjection;
 }
 
@@ -191,6 +194,10 @@ function resolveProjectionField(
 		(projectionProperty && getSearchAs(program, projectionProperty)) ??
 		getSearchAs(program, sourceProperty);
 
+	const aggregations =
+		(projectionProperty && getAggregatableKinds(program, projectionProperty)) ??
+		getAggregatableKinds(program, sourceProperty);
+
 	return {
 		name: sourceProperty.name,
 		projectedName: searchAs,
@@ -208,6 +215,7 @@ function resolveProjectionField(
 		analyzer,
 		boost,
 		ignoreAbove,
+		aggregations,
 	};
 }
 

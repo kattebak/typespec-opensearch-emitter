@@ -27,6 +27,7 @@ function makeField(
 		nested: boolean;
 		optional: boolean;
 		type: Type;
+		aggregations: ResolvedProjection["fields"][0]["aggregations"];
 		subProjection: ResolvedProjection;
 	}> = {},
 ) {
@@ -43,6 +44,7 @@ function makeField(
 				kind: "Scalar",
 				name: "string",
 			} as unknown as Type),
+		aggregations: overrides.aggregations,
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
 }
@@ -161,5 +163,114 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(result.content.includes("search_after"));
 		assert.ok(result.content.includes("base64Decode"));
 		assert.ok(result.content.includes("base64Encode"));
+	});
+
+	it("omits aggs block when no aggregations", () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name" })],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(!result.content.includes("aggs:"));
+		assert.ok(!result.content.includes("aggregations:"));
+	});
+
+	it("emits aggs block in request when fields have aggregations", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					aggregations: ["terms"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
+				}),
+				makeField({
+					name: "species",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(result.content.includes("aggs:"));
+		assert.ok(
+			result.content.includes('byTag: { terms: { field: "tags.keyword" } }'),
+		);
+		assert.ok(
+			result.content.includes('bySpecy: { terms: { field: "species" } }'),
+		);
+	});
+
+	it("emits cardinality and missing aggs in request", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "locations",
+					keyword: true,
+					aggregations: ["cardinality"],
+				}),
+				makeField({
+					name: "description",
+					optional: true,
+					aggregations: ["missing"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(
+			result.content.includes(
+				'uniqueLocationCount: { cardinality: { field: "locations" } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				'missingDescriptionCount: { missing: { field: "description.keyword" } }',
+			),
+		);
+	});
+
+	it("emits aggregations mapping in response", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "locations",
+					keyword: true,
+					aggregations: ["cardinality"],
+				}),
+				makeField({
+					name: "description",
+					optional: true,
+					aggregations: ["missing"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(result.content.includes("aggregations: {"));
+		assert.ok(
+			result.content.includes(
+				"byTag: (parsedBody.aggregations?.byTag?.buckets ?? []).map",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"uniqueLocationCount: parsedBody.aggregations?.uniqueLocationCount?.value ?? 0",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"missingDescriptionCount: parsedBody.aggregations?.missingDescriptionCount?.doc_count ?? 0",
+			),
+		);
 	});
 });

@@ -213,6 +213,9 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 				nested: field.nested,
 				analyzer: field.analyzer,
 				boost: field.boost,
+				...(field.aggregations && field.aggregations.length > 0
+					? { aggregations: field.aggregations }
+					: {}),
 			})),
 		})),
 	};

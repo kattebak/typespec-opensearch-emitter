@@ -67,6 +67,19 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Spread field "${"name"}" collides with existing field on projection model.`,
 			},
 		},
+		"invalid-aggregation-kind": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Decorator @aggregatable received unsupported kind "${"kind"}". Allowed kinds: terms, cardinality, missing.`,
+			},
+		},
+		"aggregatable-requires-kind": {
+			severity: "error",
+			messages: {
+				default:
+					"Decorator @aggregatable requires at least one aggregation kind argument.",
+			},
+		},
 	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
@@ -81,6 +94,9 @@ export const $lib = createTypeSpecLibrary({
 		},
 		searchAs: {
 			description: "Rename a field in projection output",
+		},
+		aggregatable: {
+			description: "Declare aggregation kinds (terms, cardinality, missing)",
 		},
 	},
 	emitter: {

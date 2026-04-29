@@ -209,6 +209,56 @@ function isArrayOfModelType(type: Type): boolean {
 	return elementType?.kind === "Model";
 }
 
+export const AGGREGATION_KINDS = ["terms", "cardinality", "missing"] as const;
+export type AggregationKind = (typeof AGGREGATION_KINDS)[number];
+
+function isAggregationKind(value: string): value is AggregationKind {
+	return (AGGREGATION_KINDS as readonly string[]).includes(value);
+}
+
+export function $aggregatable(
+	context: DecoratorContext,
+	target: ModelProperty,
+	...kinds: string[]
+): void {
+	if (kinds.length === 0) {
+		reportDiagnostic(context.program, {
+			code: "aggregatable-requires-kind",
+			target,
+		});
+		return;
+	}
+
+	const validated: AggregationKind[] = [];
+	for (let index = 0; index < kinds.length; index++) {
+		const kind = kinds[index];
+		if (!isAggregationKind(kind)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-aggregation-kind",
+				format: { kind },
+				target: context.getArgumentTarget(index) ?? target,
+			});
+			return;
+		}
+		if (!validated.includes(kind)) {
+			validated.push(kind);
+		}
+	}
+
+	context.program.stateMap(StateKeys.aggregatable).set(target, validated);
+}
+
+export function getAggregatableKinds(
+	program: Program,
+	target: ModelProperty,
+): AggregationKind[] | undefined {
+	const stored = program.stateMap(StateKeys.aggregatable).get(target);
+	if (!stored) {
+		return undefined;
+	}
+	return stored as AggregationKind[];
+}
+
 export function $searchAs(
 	context: DecoratorContext,
 	target: ModelProperty,

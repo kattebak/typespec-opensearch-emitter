@@ -1,4 +1,5 @@
 export {
+	$aggregatable,
 	$analyzer,
 	$boost,
 	$ignoreAbove,
@@ -8,6 +9,7 @@ export {
 	$nested,
 	$searchAs,
 	$searchable,
+	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
 	getIgnoreAbove,

@@ -1,4 +1,10 @@
 import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
+import {
+	type AggregationEntry,
+	aggregationsTypeName,
+	collectAggregations,
+	hasAggregations,
+} from "./aggregations.js";
 import { getSearchAs, isSearchable } from "./decorators.js";
 import type {
 	ResolvedProjection,
@@ -35,7 +41,13 @@ export function emitGraphQLSdl(
 		lines.push("");
 	}
 
-	lines.push(renderConnectionTypes(typeName));
+	const aggEntries = collectAggregations(projection);
+	if (aggEntries.length > 0) {
+		lines.push(renderAggregationTypes(typeName, aggEntries));
+		lines.push("");
+	}
+
+	lines.push(renderConnectionTypes(typeName, hasAggregations(projection)));
 
 	return {
 		fileName,
@@ -74,12 +86,24 @@ function renderFilterInput(projection: ResolvedProjection): string | undefined {
 	return `input ${typeName}Filter {\n${fieldLines.join("\n")}\n}`;
 }
 
-function renderConnectionTypes(typeName: string): string {
-	const lines = [
-		`type ${typeName}Connection {`,
+function renderConnectionTypes(
+	typeName: string,
+	includeAggregations: boolean,
+): string {
+	const aggregationsTypeReference = includeAggregations
+		? `  aggregations: ${aggregationsTypeName(typeName)}!`
+		: undefined;
+
+	const connectionFields = [
 		`  edges: [${typeName}Edge!]!`,
 		"  totalCount: Int!",
+		...(aggregationsTypeReference ? [aggregationsTypeReference] : []),
 		"  pageInfo: PageInfo!",
+	];
+
+	const lines = [
+		`type ${typeName}Connection {`,
+		...connectionFields,
 		"}",
 		"",
 		`type ${typeName}Edge {`,
@@ -90,6 +114,30 @@ function renderConnectionTypes(typeName: string): string {
 		"type PageInfo {",
 		"  hasNextPage: Boolean!",
 		"  endCursor: String",
+		"}",
+	];
+
+	return lines.join("\n");
+}
+
+function renderAggregationTypes(
+	typeName: string,
+	entries: AggregationEntry[],
+): string {
+	const aggregationsType = aggregationsTypeName(typeName);
+	const fieldLines = entries.map((entry) => {
+		const gqlType = entry.kind === "terms" ? "[TermBucket!]!" : "Int!";
+		return `  ${entry.aggName}: ${gqlType}`;
+	});
+
+	const lines = [
+		"type TermBucket {",
+		"  key: String!",
+		"  count: Int!",
+		"}",
+		"",
+		`type ${aggregationsType} {`,
+		...fieldLines,
 		"}",
 	];
 
@@ -190,6 +238,7 @@ export const __test = {
 	renderObjectType,
 	renderFilterInput,
 	renderConnectionTypes,
+	renderAggregationTypes,
 	toGraphQLType,
 	toGraphQLQueryFieldName,
 };

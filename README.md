@@ -260,6 +260,7 @@ In this example:
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
+| `@aggregatable(...kinds)` | `ModelProperty` | Declares OpenSearch aggregations to expose on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`. Multi-arg emits all listed kinds. | `@aggregatable("terms", "cardinality") locations: Location[];` |
 
 ## Type mapping
 
@@ -406,6 +407,30 @@ Maps each projection to its resolver file, SDL file, query field name, and index
 ```
 
 The consuming CDK construct can read this manifest to wire resolvers without hardcoded knowledge.
+
+### Aggregations (`@aggregatable`)
+
+Annotate fields with `@aggregatable("terms" | "cardinality" | "missing", ...)` to expose OpenSearch aggregations on the connection's `aggregations` field. The aggregations run alongside the search query (no separate request).
+
+```typespec
+model Counterparty {
+  @searchable @aggregatable("terms") tags: string[];
+  @searchable @aggregatable("terms", "cardinality") locations: string[];
+  @searchable @aggregatable("missing") description?: string;
+}
+```
+
+Field-name conventions in the generated `*SearchAggregations` type (singular `<Field>`, e.g. `tags` -> `byTag`):
+
+| Aggregation kind | Generated field | GraphQL type |
+| --- | --- | --- |
+| `terms` | `by<Field>` | `[TermBucket!]!` |
+| `cardinality` | `unique<Field>Count` | `Int!` |
+| `missing` | `missing<Field>Count` | `Int!` |
+
+The `.keyword` sub-field is applied automatically when the underlying type is text. Numeric, date, and `@keyword` fields use the bare field name.
+
+When no field on a projection is `@aggregatable`, the `aggregations` connection field and aggregation types are omitted (no empty types emitted).
 
 ### Conventions
 
