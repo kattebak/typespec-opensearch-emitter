@@ -34,6 +34,7 @@ function makeField(
 		analyzer: string;
 		boost: number;
 		type: Type;
+		aggregations: ResolvedProjection["fields"][0]["aggregations"];
 		subProjection: ResolvedProjection;
 	}> = {},
 ) {
@@ -48,6 +49,7 @@ function makeField(
 		boost: overrides.boost,
 		type:
 			overrides.type ?? ({ kind: "Scalar", name: "string" } as unknown as Type),
+		aggregations: overrides.aggregations,
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
 }
@@ -164,6 +166,68 @@ describe("emitGraphQLSdl", () => {
 
 		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
 		assert.ok(result.content.includes("tags: [TagSearchDoc!]!"));
+	});
+});
+
+describe("emitGraphQLSdl aggregations", () => {
+	it("omits aggregations type and connection field when no aggregations", () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name" })],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(!result.content.includes("TermBucket"));
+		assert.ok(!result.content.includes("SearchAggregations"));
+		assert.ok(!result.content.includes("aggregations:"));
+	});
+
+	it("emits TermBucket and aggregations type when fields are aggregatable", () => {
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			fields: [
+				makeField({
+					name: "tags",
+					aggregations: ["terms"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
+				}),
+				makeField({
+					name: "description",
+					optional: true,
+					aggregations: ["missing"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type TermBucket {"));
+		assert.ok(result.content.includes("key: String!"));
+		assert.ok(result.content.includes("count: Int!"));
+		assert.ok(result.content.includes("type CounterpartySearchAggregations {"));
+		assert.ok(result.content.includes("byTag: [TermBucket!]!"));
+		assert.ok(result.content.includes("missingDescriptionCount: Int!"));
+		assert.ok(
+			result.content.includes("aggregations: CounterpartySearchAggregations!"),
+		);
+	});
+
+	it("emits both terms and cardinality aggregation fields", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "locations",
+					keyword: true,
+					aggregations: ["terms", "cardinality"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("byLocation: [TermBucket!]!"));
+		assert.ok(result.content.includes("uniqueLocationCount: Int!"));
 	});
 });
 

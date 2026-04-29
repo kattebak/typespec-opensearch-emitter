@@ -13,5 +13,6 @@ extern dec ignoreAbove(target: ModelProperty, limit: valueof uint32);
 extern dec indexName(target: Model, name: valueof string);
 extern dec indexSettings(target: Model, settings: valueof string);
 extern dec searchAs(target: ModelProperty, name: valueof string);
+extern dec aggregatable(target: ModelProperty, ...kinds: valueof string[]);
 
 model SearchProjection<T> {}

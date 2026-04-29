@@ -90,6 +90,33 @@ test("emits doc types and index constants", async () => {
 	);
 });
 
+test("emits graphql aggregation types and resolver block", async () => {
+	const sdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
+	const resolver = await readFile(
+		`${OUT_DIR}/pet-search-doc-resolver.js`,
+		"utf8",
+	);
+
+	assert.ok(sdl.includes("type TermBucket {"));
+	assert.ok(sdl.includes("type PetSearchAggregations {"));
+	assert.ok(sdl.includes("byAlias: [TermBucket!]!"));
+	assert.ok(sdl.includes("uniqueAliasCount: Int!"));
+	assert.ok(sdl.includes("missingNicknameCount: Int!"));
+	assert.ok(sdl.includes("aggregations: PetSearchAggregations!"));
+
+	assert.ok(resolver.includes("aggs:"));
+	assert.ok(
+		resolver.includes('byAlias: { terms: { field: "aliases.keyword" } }'),
+	);
+	assert.ok(
+		resolver.includes(
+			'uniqueAliasCount: { cardinality: { field: "aliases.keyword" } }',
+		),
+	);
+	assert.ok(resolver.includes("aggregations: {"));
+	assert.ok(resolver.includes("parsedBody.aggregations?.byAlias?.buckets"));
+});
+
 test("generated output compiles and exports constants", async () => {
 	await writeFile(
 		`${OUT_DIR}/tsconfig.json`,

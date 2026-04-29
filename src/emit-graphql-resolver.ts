@@ -1,3 +1,4 @@
+import { type AggregationEntry, collectAggregations } from "./aggregations.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
 import type {
 	ResolvedProjection,
@@ -35,10 +36,13 @@ export function emitGraphQLResolver(
 		.filter((f) => f.keyword)
 		.map((f) => f.projectedName ?? f.name);
 
+	const aggregations = collectAggregations(projection);
+
 	const content = renderResolver(
 		projection.indexName,
 		textFields,
 		keywordFields,
+		aggregations,
 		options,
 	);
 
@@ -66,10 +70,13 @@ function renderResolver(
 	indexName: string,
 	textFields: string[],
 	keywordFields: string[],
+	aggregations: AggregationEntry[],
 	options: ResolverOptions,
 ): string {
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
+	const aggsBlock = renderAggsBlock(aggregations);
+	const responseAggregations = renderResponseAggregations(aggregations);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -84,7 +91,7 @@ export function request(ctx) {
 		size: size + 1,
 		track_total_hits: ${options.trackTotalHitsUpTo},
 		sort: [{ _score: "desc" }, { _id: "asc" }],
-		query,
+		query,${aggsBlock}
 	};
 
 	if (searchAfter) {
@@ -117,7 +124,7 @@ export function response(ctx) {
 
 	return {
 		edges,
-		totalCount: totalHits,
+		totalCount: totalHits,${responseAggregations}
 		pageInfo: {
 			hasNextPage,
 			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
@@ -162,7 +169,56 @@ function buildQuery(queryText, filter) {
 `;
 }
 
+function renderAggsBlock(aggregations: AggregationEntry[]): string {
+	if (aggregations.length === 0) {
+		return "";
+	}
+
+	const lines = aggregations.map((entry) => {
+		const aggType = osAggType(entry.kind);
+		return `\t\t${entry.aggName}: { ${aggType}: { field: ${JSON.stringify(entry.openSearchField)} } },`;
+	});
+
+	return `\n\t\taggs: {\n${lines.join("\n")}\n\t\t},`;
+}
+
+function renderResponseAggregations(aggregations: AggregationEntry[]): string {
+	if (aggregations.length === 0) {
+		return "";
+	}
+
+	const lines = aggregations.map((entry) =>
+		renderResponseAggregationLine(entry),
+	);
+
+	return `\n\t\taggregations: {\n${lines.join("\n")}\n\t\t},`;
+}
+
+function renderResponseAggregationLine(entry: AggregationEntry): string {
+	switch (entry.kind) {
+		case "terms":
+			return `\t\t\t${entry.aggName}: (parsedBody.aggregations?.${entry.aggName}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
+		case "cardinality":
+			return `\t\t\t${entry.aggName}: parsedBody.aggregations?.${entry.aggName}?.value ?? 0,`;
+		case "missing":
+			return `\t\t\t${entry.aggName}: parsedBody.aggregations?.${entry.aggName}?.doc_count ?? 0,`;
+	}
+}
+
+function osAggType(kind: AggregationEntry["kind"]): string {
+	switch (kind) {
+		case "terms":
+			return "terms";
+		case "cardinality":
+			return "cardinality";
+		case "missing":
+			return "missing";
+	}
+}
+
 export const __test = {
 	hasTextType,
 	renderResolver,
+	renderAggsBlock,
+	renderResponseAggregations,
 };

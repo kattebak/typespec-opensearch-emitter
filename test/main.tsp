@@ -15,13 +15,14 @@ model Tag {
 model Pet {
 	@searchable id: string;
 	@searchable name: string;
-	@searchable @keyword species: string;
+	@searchable @keyword @aggregatable("terms") species: string;
 	@searchable breed?: string;
 	@searchable birthDate: plainDate;
 	@searchable createdAt: utcDateTime;
 	@searchable @nested tags: Tag[];
 	@searchable owner: Owner;
-	@searchable aliases: string[];
+	@searchable @aggregatable("terms", "cardinality") aliases: string[];
+	@searchable @aggregatable("missing") nickname?: string;
 	@searchable rank: int32;
 	@searchable stock: int64;
 	@searchable score: float64;
