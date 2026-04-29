@@ -234,6 +234,97 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
+	it("wraps aggs inside @nested sub-projection in nested+inner block", () => {
+		const subProjection = {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					aggregations: ["terms", "cardinality"],
+				}),
+				makeField({
+					name: "note",
+					optional: true,
+					aggregations: ["missing"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(
+			result.content.includes(
+				'byTagName: { nested: { path: "tags" }, aggs: { inner: { terms: { field: "tags.name" } } } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				'uniqueTagNameCount: { nested: { path: "tags" }, aggs: { inner: { cardinality: { field: "tags.name" } } } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				'missingTagNoteCount: { nested: { path: "tags" }, aggs: { inner: { missing: { field: "tags.note.keyword" } } } }',
+			),
+		);
+
+		assert.ok(
+			result.content.includes(
+				"byTagName: (parsedBody.aggregations?.byTagName?.inner?.buckets ?? []).map",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"uniqueTagNameCount: parsedBody.aggregations?.uniqueTagNameCount?.inner?.value ?? 0",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"missingTagNoteCount: parsedBody.aggregations?.missingTagNoteCount?.inner?.doc_count ?? 0",
+			),
+		);
+	});
+
+	it("does not wrap top-level aggregations in nested block", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					aggregations: ["terms"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(
+			result.content.includes('byTag: { terms: { field: "tags.keyword" } }'),
+		);
+		assert.ok(!result.content.includes("nested: { path:"));
+	});
+
 	it("emits aggregations mapping in response", () => {
 		const projection = makeProjection({
 			fields: [

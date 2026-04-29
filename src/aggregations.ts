@@ -10,42 +10,73 @@ export interface AggregationEntry {
 	aggName: string;
 	openSearchField: string;
 	useTextType: boolean;
+	nestedPath?: string;
 }
+
+/**
+ * Inner agg name used when wrapping in `{ nested: { path }, aggs: { <innerName>: {...} } }`.
+ * Kept stable so the response handler can unwrap symmetrically.
+ */
+export const NESTED_INNER_AGG_NAME = "inner";
 
 export function collectAggregations(
 	projection: ResolvedProjection,
 ): AggregationEntry[] {
+	return collectAggregationsRecursive(projection, undefined);
+}
+
+function collectAggregationsRecursive(
+	projection: ResolvedProjection,
+	nestedPath: string | undefined,
+): AggregationEntry[] {
 	const entries: AggregationEntry[] = [];
 
+	if (!projection.fields) {
+		return entries;
+	}
+
 	for (const field of projection.fields) {
-		if (!field.aggregations || field.aggregations.length === 0) {
-			continue;
+		if (field.aggregations && field.aggregations.length > 0) {
+			const projectedName = field.projectedName ?? field.name;
+			const useTextType = isTextField(field);
+			const fieldPart = useTextType
+				? `${projectedName}.keyword`
+				: projectedName;
+			const openSearchField = nestedPath
+				? `${nestedPath}.${fieldPart}`
+				: fieldPart;
+
+			for (const kind of field.aggregations) {
+				entries.push({
+					field,
+					kind,
+					aggName: aggregationFieldName(projectedName, kind, nestedPath),
+					openSearchField,
+					useTextType,
+					nestedPath,
+				});
+			}
 		}
 
-		const projectedName = field.projectedName ?? field.name;
-		const useTextType = isTextField(field);
-		const openSearchField = useTextType
-			? `${projectedName}.keyword`
-			: projectedName;
-
-		for (const kind of field.aggregations) {
-			entries.push({
-				field,
-				kind,
-				aggName: aggregationFieldName(projectedName, kind),
-				openSearchField,
-				useTextType,
-			});
+		if (field.subProjection) {
+			const childPath = field.nested
+				? joinNestedPath(nestedPath, field.projectedName ?? field.name)
+				: nestedPath;
+			entries.push(
+				...collectAggregationsRecursive(field.subProjection, childPath),
+			);
 		}
 	}
 
 	return entries;
 }
 
+function joinNestedPath(parent: string | undefined, segment: string): string {
+	return parent ? `${parent}.${segment}` : segment;
+}
+
 export function hasAggregations(projection: ResolvedProjection): boolean {
-	return projection.fields.some(
-		(field) => field.aggregations && field.aggregations.length > 0,
-	);
+	return collectAggregations(projection).length > 0;
 }
 
 export function aggregationsTypeName(projectionName: string): string {
@@ -56,9 +87,11 @@ export function aggregationsTypeName(projectionName: string): string {
 export function aggregationFieldName(
 	fieldName: string,
 	kind: AggregationKind,
+	nestedPath?: string,
 ): string {
-	const singular = singularize(fieldName);
-	const capital = capitalize(singular);
+	const fieldPart = capitalize(singularize(fieldName));
+	const prefix = nestedPath ? nestedPathPrefix(nestedPath) : "";
+	const capital = `${prefix}${fieldPart}`;
 	switch (kind) {
 		case "terms":
 			return `by${capital}`;
@@ -67,6 +100,13 @@ export function aggregationFieldName(
 		case "missing":
 			return `missing${capital}Count`;
 	}
+}
+
+function nestedPathPrefix(nestedPath: string): string {
+	return nestedPath
+		.split(".")
+		.map((segment) => capitalize(singularize(segment)))
+		.join("");
 }
 
 function singularize(name: string): string {

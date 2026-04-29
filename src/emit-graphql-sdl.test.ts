@@ -214,6 +214,42 @@ describe("emitGraphQLSdl aggregations", () => {
 		);
 	});
 
+	it("emits nested-aware aggregation field names from sub-projections", () => {
+		const subProjection = {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					aggregations: ["terms", "cardinality"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type PetSearchAggregations {"));
+		assert.ok(result.content.includes("byTagName: [TermBucket!]!"));
+		assert.ok(result.content.includes("uniqueTagNameCount: Int!"));
+		assert.ok(result.content.includes("aggregations: PetSearchAggregations!"));
+	});
+
 	it("emits both terms and cardinality aggregation fields", () => {
 		const projection = makeProjection({
 			fields: [
