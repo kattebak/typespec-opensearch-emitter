@@ -260,6 +260,63 @@ describe("generatePackageJson", () => {
 		assert.equal(exportKeys.length, 1);
 		assert.equal(exportKeys[0], ".");
 	});
+
+	it("includes graphql artifact exports when graphqlProjections provided", () => {
+		const projections = [
+			{
+				projectionModel: { name: "ProductSearchDoc" },
+				sourceModel: { name: "Product" },
+				indexName: "product_search_doc",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const result = JSON.parse(
+			__test.generatePackageJson("@my/pkg", "1.0.0", projections, projections),
+		);
+
+		assert.equal(
+			result.exports["./graphql-resolvers.json"],
+			"./graphql-resolvers.json",
+		);
+		assert.equal(
+			result.exports["./graphql-resolvers.js"],
+			"./graphql-resolvers.js",
+		);
+		assert.equal(
+			result.exports["./product-search-doc.graphql"],
+			"./product-search-doc.graphql",
+		);
+		assert.equal(
+			result.exports["./product-search-doc-resolver.js"],
+			"./product-search-doc-resolver.js",
+		);
+	});
+
+	it("sorts all exports including graphql artifacts", () => {
+		const projections = [
+			{
+				projectionModel: { name: "ZetaSearchDoc" },
+				sourceModel: { name: "Zeta" },
+				indexName: "zeta",
+				fields: [],
+			},
+			{
+				projectionModel: { name: "AlphaSearchDoc" },
+				sourceModel: { name: "Alpha" },
+				indexName: "alpha",
+				fields: [],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const result = JSON.parse(
+			__test.generatePackageJson("@my/pkg", "2.0.0", projections, projections),
+		);
+		const exportKeys = Object.keys(result.exports).filter((k) => k !== ".");
+
+		const sortedKeys = [...exportKeys].sort();
+		assert.deepEqual(exportKeys, sortedKeys);
+	});
 });
 
 describe("generateTsConfig", () => {
@@ -315,6 +372,17 @@ describe("generateTsConfig", () => {
 	it("returns tsconfig with only index.ts when no projections", () => {
 		const result = JSON.parse(__test.generateTsConfig([]));
 		assert.deepEqual(result.include, ["index.ts"]);
+	});
+});
+
+describe("generateGraphQLEntryPoint", () => {
+	it("generates a JS module that exports manifest and packageDir", () => {
+		const result = __test.generateGraphQLEntryPoint();
+
+		assert.ok(result.includes("export const packageDir"));
+		assert.ok(result.includes("export const manifest"));
+		assert.ok(result.includes("export default manifest"));
+		assert.ok(result.includes("graphql-resolvers.json"));
 	});
 });
 

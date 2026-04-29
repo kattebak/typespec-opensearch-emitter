@@ -83,25 +83,6 @@ export async function $onEmit(
 
 	const packageName = context.options["package-name"];
 	const packageVersion = context.options["package-version"];
-
-	if (packageName && packageVersion) {
-		const packageJsonContent = generatePackageJson(
-			packageName,
-			packageVersion,
-			resolved,
-		);
-		await emitFile(context.program, {
-			path: resolvePath(context.emitterOutputDir, "package.json"),
-			content: packageJsonContent,
-		});
-
-		const tsConfigContent = generateTsConfig(resolved);
-		await emitFile(context.program, {
-			path: resolvePath(context.emitterOutputDir, "tsconfig.json"),
-			content: tsConfigContent,
-		});
-	}
-
 	const graphqlOptions = context.options.graphql;
 	if (graphqlOptions?.emit) {
 		const pageOptions = {
@@ -134,6 +115,32 @@ export async function $onEmit(
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
 			content: manifest,
+		});
+
+		const entryPoint = generateGraphQLEntryPoint();
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.js"),
+			content: entryPoint,
+		});
+	}
+
+	if (packageName && packageVersion) {
+		const graphqlArtifacts = graphqlOptions?.emit ? resolved : undefined;
+		const packageJsonContent = generatePackageJson(
+			packageName,
+			packageVersion,
+			resolved,
+			graphqlArtifacts,
+		);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, "package.json"),
+			content: packageJsonContent,
+		});
+
+		const tsConfigContent = generateTsConfig(resolved);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, "tsconfig.json"),
+			content: tsConfigContent,
 		});
 	}
 }
@@ -237,6 +244,7 @@ export const __test = {
 	generatePackageJson,
 	generateTsConfig,
 	generateGraphQLManifest,
+	generateGraphQLEntryPoint,
 };
 
 function generateTsConfig(projections: ResolvedProjection[]): string {
@@ -272,20 +280,44 @@ function generateTsConfig(projections: ResolvedProjection[]): string {
 	return `${JSON.stringify(tsConfig, null, 2)}\n`;
 }
 
+function generateGraphQLEntryPoint(): string {
+	return `import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const packageDir = dirname(fileURLToPath(import.meta.url));
+export const manifest = JSON.parse(
+  readFileSync(join(packageDir, "graphql-resolvers.json"), "utf-8")
+);
+export default manifest;
+`;
+}
+
 function generatePackageJson(
 	packageName: string,
 	packageVersion: string,
 	projections: ResolvedProjection[],
+	graphqlProjections?: ResolvedProjection[],
 ): string {
-	const mappingExports: Record<string, string> = {};
+	const artifactExports: Record<string, string> = {};
 
 	for (const projection of projections) {
 		const baseName = `${toKebabCase(projection.projectionModel.name)}-search-mapping`;
-		mappingExports[`./${baseName}.json`] = `./${baseName}.json`;
+		artifactExports[`./${baseName}.json`] = `./${baseName}.json`;
+	}
+
+	if (graphqlProjections) {
+		artifactExports["./graphql-resolvers.json"] = "./graphql-resolvers.json";
+		artifactExports["./graphql-resolvers.js"] = "./graphql-resolvers.js";
+		for (const projection of graphqlProjections) {
+			const kebab = toKebabCase(projection.projectionModel.name);
+			artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
+			artifactExports[`./${kebab}-resolver.js`] = `./${kebab}-resolver.js`;
+		}
 	}
 
 	const sorted = Object.fromEntries(
-		Object.entries(mappingExports).sort(([a], [b]) => a.localeCompare(b)),
+		Object.entries(artifactExports).sort(([a], [b]) => a.localeCompare(b)),
 	);
 
 	const packageJson = {
