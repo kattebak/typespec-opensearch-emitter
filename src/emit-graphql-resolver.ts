@@ -103,9 +103,9 @@ export function response(ctx) {
 		return util.error(ctx.error.message, ctx.error.type);
 	}
 
-	const body = JSON.parse(ctx.result.body);
-	const hits = body.hits.hits;
-	const totalHits = body.hits.total.value;
+	const parsedBody = JSON.parse(ctx.result.body);
+	const hits = parsedBody.hits.hits;
+	const totalHits = parsedBody.hits.total.value;
 	const args = ctx.args;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
 
