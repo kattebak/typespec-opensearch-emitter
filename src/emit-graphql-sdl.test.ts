@@ -128,7 +128,7 @@ describe("emitGraphQLSdl", () => {
 		assert.ok(result.content.includes("type PetSearchDocConnection {"));
 		assert.ok(result.content.includes("edges: [PetSearchDocEdge!]!"));
 		assert.ok(result.content.includes("pageInfo: PageInfo!"));
-		assert.ok(result.content.includes("totalHits: Int!"));
+		assert.ok(result.content.includes("totalCount: Int!"));
 		assert.ok(result.content.includes("type PetSearchDocEdge {"));
 		assert.ok(result.content.includes("node: PetSearchDoc!"));
 		assert.ok(result.content.includes("cursor: String!"));

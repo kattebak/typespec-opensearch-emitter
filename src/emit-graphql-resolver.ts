@@ -117,11 +117,11 @@ export function response(ctx) {
 
 	return {
 		edges,
+		totalCount: totalHits,
 		pageInfo: {
 			hasNextPage,
 			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
 		},
-		totalHits,
 	};
 }
 

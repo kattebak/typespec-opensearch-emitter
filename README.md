@@ -359,8 +359,8 @@ input PetSearchDocFilter {
 
 type PetSearchDocConnection {
   edges: [PetSearchDocEdge!]!
+  totalCount: Int!
   pageInfo: PageInfo!
-  totalHits: Int!
 }
 
 type PetSearchDocEdge {
