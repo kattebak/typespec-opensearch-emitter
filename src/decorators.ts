@@ -259,6 +259,61 @@ export function getAggregatableKinds(
 	return stored as AggregationKind[];
 }
 
+export const FILTERABLE_KINDS = [
+	"term",
+	"term_negate",
+	"exists",
+	"range",
+] as const;
+export type FilterableKind = (typeof FILTERABLE_KINDS)[number];
+
+function isFilterableKind(value: string): value is FilterableKind {
+	return (FILTERABLE_KINDS as readonly string[]).includes(value);
+}
+
+export function $filterable(
+	context: DecoratorContext,
+	target: ModelProperty,
+	...kinds: string[]
+): void {
+	if (kinds.length === 0) {
+		reportDiagnostic(context.program, {
+			code: "filterable-requires-kind",
+			target,
+		});
+		return;
+	}
+
+	const validated: FilterableKind[] = [];
+	for (let index = 0; index < kinds.length; index++) {
+		const kind = kinds[index];
+		if (!isFilterableKind(kind)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-filterable-kind",
+				format: { kind },
+				target: context.getArgumentTarget(index) ?? target,
+			});
+			return;
+		}
+		if (!validated.includes(kind)) {
+			validated.push(kind);
+		}
+	}
+
+	context.program.stateMap(StateKeys.filterable).set(target, validated);
+}
+
+export function getFilterableKinds(
+	program: Program,
+	target: ModelProperty,
+): FilterableKind[] | undefined {
+	const stored = program.stateMap(StateKeys.filterable).get(target);
+	if (!stored) {
+		return undefined;
+	}
+	return stored as FilterableKind[];
+}
+
 export function $searchAs(
 	context: DecoratorContext,
 	target: ModelProperty,

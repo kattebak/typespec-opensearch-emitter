@@ -4,6 +4,11 @@ import {
 	NESTED_INNER_AGG_NAME,
 } from "./aggregations.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
+import {
+	buildSearchFilterShape,
+	type FilterSpecNode,
+	type SearchFilterShape,
+} from "./filters.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -41,12 +46,14 @@ export function emitGraphQLResolver(
 		.map((f) => f.projectedName ?? f.name);
 
 	const aggregations = collectAggregations(projection);
+	const searchFilterShape = buildSearchFilterShape(projection);
 
 	const content = renderResolver(
 		projection.indexName,
 		textFields,
 		keywordFields,
 		aggregations,
+		searchFilterShape,
 		options,
 	);
 
@@ -75,21 +82,25 @@ function renderResolver(
 	textFields: string[],
 	keywordFields: string[],
 	aggregations: AggregationEntry[],
+	searchFilterShape: SearchFilterShape | undefined,
 	options: ResolverOptions,
 ): string {
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const aggsBlock = renderAggsBlock(aggregations);
 	const responseAggregations = renderResponseAggregations(aggregations);
+	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 
 	return `import { util } from "@aws-appsync/utils";
+
+const FILTER_SPEC = ${filterSpecLiteral};
 
 export function request(ctx) {
 	const args = ctx.args;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
 	const searchAfter = args.after ? JSON.parse(util.base64Decode(args.after)) : undefined;
 
-	const query = buildQuery(args.query, args.filter);
+	const query = buildQuery(args.query, args.filter, args.searchFilter);
 
 	const body = {
 		size: size + 1,
@@ -136,9 +147,10 @@ export function response(ctx) {
 	};
 }
 
-function buildQuery(queryText, filter) {
+function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
+	const mustNots = [];
 
 	if (queryText) {
 		musts.push({
@@ -159,7 +171,11 @@ function buildQuery(queryText, filter) {
 		}
 	}
 
-	if (musts.length === 0 && filters.length === 0) {
+	if (searchFilter) {
+		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+	}
+
+	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
 		return { match_all: {} };
 	}
 
@@ -167,10 +183,95 @@ function buildQuery(queryText, filter) {
 		bool: {
 			...(musts.length > 0 ? { must: musts } : {}),
 			...(filters.length > 0 ? { filter: filters } : {}),
+			...(mustNots.length > 0 ? { must_not: mustNots } : {}),
 		},
 	};
 }
+
+function applyFilterSpec(spec, input, outFilters, outMustNots) {
+	if (!spec || !input) return;
+	const rangeBuckets = {};
+
+	for (const node of spec) {
+		const value = input[node.inputName];
+		if (node.kind === "nested") {
+			if (value == null) continue;
+			const nestedFilters = [];
+			const nestedMustNots = [];
+			applyFilterSpec(node.children, value, nestedFilters, nestedMustNots);
+			for (const clause of nestedFilters) {
+				outFilters.push({
+					nested: {
+						path: node.path,
+						query: { bool: { filter: [clause] } },
+					},
+				});
+			}
+			for (const clause of nestedMustNots) {
+				outMustNots.push({
+					nested: {
+						path: node.path,
+						query: { bool: { filter: [clause] } },
+					},
+				});
+			}
+			continue;
+		}
+		if (node.kind === "term") {
+			if (value == null) continue;
+			outFilters.push({ term: { [node.field]: value } });
+			continue;
+		}
+		if (node.kind === "term_negate") {
+			if (value == null) continue;
+			outMustNots.push({ term: { [node.field]: value } });
+			continue;
+		}
+		if (node.kind === "exists") {
+			if (value == null) continue;
+			if (value === true) {
+				outFilters.push({ exists: { field: node.field } });
+			} else {
+				outMustNots.push({ exists: { field: node.field } });
+			}
+			continue;
+		}
+		if (node.kind === "range") {
+			if (value == null) continue;
+			const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
+			bucket[node.bound] = value;
+			continue;
+		}
+	}
+
+	for (const field in rangeBuckets) {
+		outFilters.push({ range: { [field]: rangeBuckets[field] } });
+	}
+}
 `;
+}
+
+function renderFilterSpecLiteral(shape: SearchFilterShape | undefined): string {
+	if (!shape) {
+		return "[]";
+	}
+	return stringifySpec(shape.nodes);
+}
+
+function stringifySpec(nodes: FilterSpecNode[]): string {
+	const items = nodes.map((node) => stringifyNode(node));
+	return `[${items.join(", ")}]`;
+}
+
+function stringifyNode(node: FilterSpecNode): string {
+	if (node.kind === "nested") {
+		const children = stringifySpec(node.children ?? []);
+		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "nested", path: ${JSON.stringify(node.path ?? "")}, children: ${children} }`;
+	}
+	if (node.kind === "range") {
+		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "range", field: ${JSON.stringify(node.field ?? "")}, bound: ${JSON.stringify(node.bound ?? "")} }`;
+	}
+	return `{ inputName: ${JSON.stringify(node.inputName)}, kind: ${JSON.stringify(node.kind)}, field: ${JSON.stringify(node.field ?? "")} }`;
 }
 
 function renderAggsBlock(aggregations: AggregationEntry[]): string {

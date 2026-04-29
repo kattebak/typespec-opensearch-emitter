@@ -35,6 +35,7 @@ function makeField(
 		boost: number;
 		type: Type;
 		aggregations: ResolvedProjection["fields"][0]["aggregations"];
+		filterables: ResolvedProjection["fields"][0]["filterables"];
 		subProjection: ResolvedProjection;
 	}> = {},
 ) {
@@ -50,6 +51,7 @@ function makeField(
 		type:
 			overrides.type ?? ({ kind: "Scalar", name: "string" } as unknown as Type),
 		aggregations: overrides.aggregations,
+		filterables: overrides.filterables,
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
 }
@@ -264,6 +266,121 @@ describe("emitGraphQLSdl aggregations", () => {
 		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
 		assert.ok(result.content.includes("byLocation: [TermBucket!]!"));
 		assert.ok(result.content.includes("uniqueLocationCount: Int!"));
+	});
+});
+
+describe("emitGraphQLSdl SearchFilter input", () => {
+	it("omits SearchFilter when no @filterable fields", () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name" })],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(!result.content.includes("SearchFilter"));
+	});
+
+	it("emits term, term_negate, exists, range fields with proper suffixes", () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+				}),
+				makeField({
+					name: "nickname",
+					optional: true,
+					filterables: ["exists"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("input PetSearchFilter {"));
+		assert.ok(result.content.includes("species: String"));
+		assert.ok(result.content.includes("speciesNot: String"));
+		assert.ok(result.content.includes("nicknameExists: Boolean"));
+		assert.ok(result.content.includes("rankGte: Int"));
+		assert.ok(result.content.includes("rankLte: Int"));
+		assert.ok(result.content.includes("rankGt: Int"));
+		assert.ok(result.content.includes("rankLt: Int"));
+	});
+
+	it("emits a separate SearchFilter input for @nested sub-projection", () => {
+		const subProjection = {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("input PetSearchFilter {"));
+		assert.ok(result.content.includes("tags: TagSearchFilter"));
+		assert.ok(result.content.includes("input TagSearchFilter {"));
+		assert.ok(result.content.includes("name: String"));
+		assert.ok(result.content.includes("nameNot: String"));
+	});
+
+	it("uses projectedName for nested input field name", () => {
+		const subProjection = {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					projectedName: "labels",
+					nested: true,
+					subProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("labels: TagSearchFilter"));
 	});
 });
 

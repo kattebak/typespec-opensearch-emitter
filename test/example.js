@@ -117,6 +117,36 @@ test("emits graphql aggregation types and resolver block", async () => {
 	assert.ok(resolver.includes("parsedBody.aggregations?.byAlias?.buckets"));
 });
 
+test("emits SearchFilter input with filterable kinds and nested sub-filter", async () => {
+	const sdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
+	const resolver = await readFile(
+		`${OUT_DIR}/pet-search-doc-resolver.js`,
+		"utf8",
+	);
+
+	assert.ok(sdl.includes("input PetSearchFilter {"));
+	assert.ok(sdl.includes("species: String"));
+	assert.ok(sdl.includes("speciesNot: String"));
+	assert.ok(sdl.includes("birthDateGte: String"));
+	assert.ok(sdl.includes("birthDateLt: String"));
+	assert.ok(sdl.includes("rankGte: Int"));
+	assert.ok(sdl.includes("rankLte: Int"));
+	assert.ok(sdl.includes("nicknameExists: Boolean"));
+	assert.ok(sdl.includes("tags: TagSearchFilter"));
+	assert.ok(sdl.includes("input TagSearchFilter {"));
+	assert.ok(sdl.includes("name: String"));
+	assert.ok(sdl.includes("nameNot: String"));
+	assert.ok(sdl.includes("noteExists: Boolean"));
+
+	assert.ok(resolver.includes("const FILTER_SPEC = ["));
+	assert.ok(resolver.includes("applyFilterSpec(FILTER_SPEC, searchFilter"));
+	assert.ok(resolver.includes('inputName: "tags"'));
+	assert.ok(resolver.includes('kind: "nested"'));
+	assert.ok(resolver.includes('path: "tags"'));
+	assert.ok(resolver.includes('inputName: "rankGte"'));
+	assert.ok(resolver.includes('bound: "gte"'));
+});
+
 test("emits nested-aware aggregations on nested sub-projections", async () => {
 	const sdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
 	const resolver = await readFile(

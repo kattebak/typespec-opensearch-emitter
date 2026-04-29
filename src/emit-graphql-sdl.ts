@@ -6,6 +6,11 @@ import {
 	hasAggregations,
 } from "./aggregations.js";
 import { getSearchAs, isSearchable } from "./decorators.js";
+import {
+	buildSearchFilterShape,
+	type FilterSpecNode,
+	type SearchFilterShape,
+} from "./filters.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -38,6 +43,12 @@ export function emitGraphQLSdl(
 	const filterType = renderFilterInput(projection);
 	if (filterType) {
 		lines.push(filterType);
+		lines.push("");
+	}
+
+	const searchFilterShape = buildSearchFilterShape(projection);
+	if (searchFilterShape) {
+		lines.push(renderSearchFilterInputs(program, searchFilterShape));
 		lines.push("");
 	}
 
@@ -84,6 +95,66 @@ function renderFilterInput(projection: ResolvedProjection): string | undefined {
 	});
 
 	return `input ${typeName}Filter {\n${fieldLines.join("\n")}\n}`;
+}
+
+function renderSearchFilterInputs(
+	program: Program,
+	shape: SearchFilterShape,
+): string {
+	const blocks: string[] = [];
+	renderSearchFilterShapeRecursive(program, shape, blocks);
+	return blocks.join("\n\n");
+}
+
+function renderSearchFilterShapeRecursive(
+	program: Program,
+	shape: SearchFilterShape,
+	out: string[],
+): void {
+	out.push(renderSearchFilterInputBlock(program, shape));
+	for (const sub of shape.nestedShapes) {
+		renderSearchFilterShapeRecursive(program, sub, out);
+	}
+}
+
+function renderSearchFilterInputBlock(
+	program: Program,
+	shape: SearchFilterShape,
+): string {
+	const fieldLines = shape.nodes.map((node) =>
+		renderSearchFilterField(program, node),
+	);
+	return `input ${shape.typeName} {\n${fieldLines.join("\n")}\n}`;
+}
+
+function renderSearchFilterField(
+	program: Program,
+	node: FilterSpecNode,
+): string {
+	if (node.kind === "nested") {
+		return `  ${node.inputName}: ${node.nestedTypeName ?? "String"}`;
+	}
+	if (node.kind === "exists") {
+		return `  ${node.inputName}: Boolean`;
+	}
+	const gqlType = node.sourceField
+		? toGraphQLType(program, node.sourceField.type, node.sourceField)
+		: "String";
+	const baseScalar = stripListWrap(gqlType);
+	return `  ${node.inputName}: ${baseScalar}`;
+}
+
+/**
+ * For input filter scalars we drop list-of-X wrapping: a filter like
+ * `tags: String` matches against any element of the array under the hood,
+ * and `[String]!` would be misleading on an input type.
+ */
+function stripListWrap(gqlType: string): string {
+	const m = gqlType.match(/^\[(.+?)!?\]!?$/);
+	if (m) {
+		return m[1];
+	}
+	return gqlType;
 }
 
 function renderConnectionTypes(

@@ -80,6 +80,19 @@ export const $lib = createTypeSpecLibrary({
 					"Decorator @aggregatable requires at least one aggregation kind argument.",
 			},
 		},
+		"invalid-filterable-kind": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, exists, range.`,
+			},
+		},
+		"filterable-requires-kind": {
+			severity: "error",
+			messages: {
+				default:
+					"Decorator @filterable requires at least one filter kind argument.",
+			},
+		},
 	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
@@ -97,6 +110,9 @@ export const $lib = createTypeSpecLibrary({
 		},
 		aggregatable: {
 			description: "Declare aggregation kinds (terms, cardinality, missing)",
+		},
+		filterable: {
+			description: "Declare filter kinds (term, term_negate, exists, range)",
 		},
 	},
 	emitter: {

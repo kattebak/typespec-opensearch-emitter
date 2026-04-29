@@ -6,6 +6,7 @@ import {
 	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
+	getFilterableKinds,
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
@@ -372,5 +373,73 @@ describe("decorators", () => {
 
 		const codes = diagnostics.map((x) => x.code);
 		assert.equal(hasDiagnosticCode(codes, "invalid-aggregation-kind"), true);
+	});
+
+	it("stores @filterable kinds with single argument", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @filterable("term") @searchable status: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const status = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("status");
+		assert.ok(status);
+		assert.deepEqual(getFilterableKinds(runner.program, status), ["term"]);
+	});
+
+	it("stores @filterable kinds with multiple arguments", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @filterable("term", "term_negate", "exists", "range") @searchable rank: int32;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const rank = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("rank");
+		assert.ok(rank);
+		assert.deepEqual(getFilterableKinds(runner.program, rank), [
+			"term",
+			"term_negate",
+			"exists",
+			"range",
+		]);
+	});
+
+	it("returns undefined when @filterable not used", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const name = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("name");
+		assert.ok(name);
+		assert.equal(getFilterableKinds(runner.program, name), undefined);
+	});
+
+	it("emits diagnostic for unknown @filterable kind", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @filterable("regex") @searchable status: string;
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "invalid-filterable-kind"), true);
 	});
 });

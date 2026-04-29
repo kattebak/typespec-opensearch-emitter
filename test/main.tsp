@@ -9,8 +9,8 @@ model Owner {
 }
 
 model Tag {
-	@searchable @keyword @aggregatable("terms", "cardinality") name: string;
-	@searchable @aggregatable("missing") note?: string;
+	@searchable @keyword @aggregatable("terms", "cardinality") @filterable("term", "term_negate") name: string;
+	@searchable @aggregatable("missing") @filterable("exists") note?: string;
 }
 
 model TagSearchDoc is SearchProjection<Tag> {}
@@ -18,15 +18,15 @@ model TagSearchDoc is SearchProjection<Tag> {}
 model Pet {
 	@searchable id: string;
 	@searchable name: string;
-	@searchable @keyword @aggregatable("terms") species: string;
+	@searchable @keyword @aggregatable("terms") @filterable("term", "term_negate") species: string;
 	@searchable breed?: string;
-	@searchable birthDate: plainDate;
-	@searchable createdAt: utcDateTime;
+	@searchable @filterable("range") birthDate: plainDate;
+	@searchable @filterable("range") createdAt: utcDateTime;
 	@searchable @nested tags: Tag[];
 	@searchable owner: Owner;
 	@searchable @aggregatable("terms", "cardinality") aliases: string[];
-	@searchable @aggregatable("missing") nickname?: string;
-	@searchable rank: int32;
+	@searchable @aggregatable("missing") @filterable("exists") nickname?: string;
+	@searchable @filterable("range") rank: int32;
 	@searchable stock: int64;
 	@searchable score: float64;
 	@searchable active: boolean;

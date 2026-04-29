@@ -28,6 +28,7 @@ function makeField(
 		optional: boolean;
 		type: Type;
 		aggregations: ResolvedProjection["fields"][0]["aggregations"];
+		filterables: ResolvedProjection["fields"][0]["filterables"];
 		subProjection: ResolvedProjection;
 	}> = {},
 ) {
@@ -45,8 +46,32 @@ function makeField(
 				name: "string",
 			} as unknown as Type),
 		aggregations: overrides.aggregations,
+		filterables: overrides.filterables,
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
+}
+
+/**
+ * Loads the buildQuery function from a generated resolver source string.
+ * Strips the `import { util } from "@aws-appsync/utils"` line, swaps `export`
+ * for plain declarations, then evaluates and returns the captured buildQuery.
+ */
+function loadBuildQuery(
+	resolverSource: string,
+): (
+	queryText: string | undefined,
+	filter: unknown,
+	searchFilter: unknown,
+) => unknown {
+	const stripped = resolverSource
+		.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+		.replace(/^export function /gm, "function ");
+	const factory = new Function(`${stripped}\nreturn buildQuery;`) as () => (
+		queryText: string | undefined,
+		filter: unknown,
+		searchFilter: unknown,
+	) => unknown;
+	return factory();
 }
 
 const defaultOptions = {
@@ -363,5 +388,292 @@ describe("emitGraphQLResolver", () => {
 				"missingDescriptionCount: parsedBody.aggregations?.missingDescriptionCount?.doc_count ?? 0",
 			),
 		);
+	});
+});
+
+describe("emitGraphQLResolver search filter DSL", () => {
+	function nestedTagSubProjection() {
+		return {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+				}),
+				makeField({
+					name: "note",
+					optional: true,
+					filterables: ["exists"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+	}
+
+	it("emits a static FILTER_SPEC literal for filterable fields", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(result.content.includes("const FILTER_SPEC = ["));
+		assert.ok(result.content.includes('"species"'));
+		assert.ok(result.content.includes('"speciesNot"'));
+		assert.ok(result.content.includes('"rankGte"'));
+		assert.ok(result.content.includes('"rankLte"'));
+	});
+
+	it("emits an empty FILTER_SPEC when no @filterable fields", () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name" })],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(result.content.includes("const FILTER_SPEC = []"));
+	});
+
+	it("buildQuery returns match_all when no inputs", () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name" })],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		assert.deepEqual(buildQuery(undefined, undefined, undefined), {
+			match_all: {},
+		});
+	});
+
+	it("buildQuery emits flat term filter into bool.filter", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, { species: "cat" });
+		assert.deepEqual(result, {
+			bool: {
+				filter: [{ term: { species: "cat" } }],
+			},
+		});
+	});
+
+	it("buildQuery emits flat term_negate into bool.must_not", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term_negate"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, { speciesNot: "cat" });
+		assert.deepEqual(result, {
+			bool: {
+				must_not: [{ term: { species: "cat" } }],
+			},
+		});
+	});
+
+	it("buildQuery wraps nested term in nested+bool.filter under outer filter", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, {
+			tags: { name: "vip" },
+		});
+		assert.deepEqual(result, {
+			bool: {
+				filter: [
+					{
+						nested: {
+							path: "tags",
+							query: {
+								bool: { filter: [{ term: { "tags.name": "vip" } }] },
+							},
+						},
+					},
+				],
+			},
+		});
+	});
+
+	it("buildQuery wraps nested term_negate inside nested under outer must_not", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, {
+			tags: { nameNot: "blocked" },
+		});
+		assert.deepEqual(result, {
+			bool: {
+				must_not: [
+					{
+						nested: {
+							path: "tags",
+							query: {
+								bool: { filter: [{ term: { "tags.name": "blocked" } }] },
+							},
+						},
+					},
+				],
+			},
+		});
+	});
+
+	it("buildQuery groups range bounds into one range clause", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, {
+			createdAtGte: "2026-01-01",
+			createdAtLt: "2026-02-01",
+		});
+		assert.deepEqual(result, {
+			bool: {
+				filter: [
+					{
+						range: {
+							createdAt: { gte: "2026-01-01", lt: "2026-02-01" },
+						},
+					},
+				],
+			},
+		});
+	});
+
+	it("buildQuery emits exists in filter for true and must_not for false", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "nickname",
+					optional: true,
+					filterables: ["exists"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+
+		assert.deepEqual(
+			buildQuery(undefined, undefined, { nicknameExists: true }),
+			{
+				bool: {
+					filter: [{ exists: { field: "nickname.keyword" } }],
+				},
+			},
+		);
+		assert.deepEqual(
+			buildQuery(undefined, undefined, { nicknameExists: false }),
+			{
+				bool: {
+					must_not: [{ exists: { field: "nickname.keyword" } }],
+				},
+			},
+		);
+	});
+
+	it("buildQuery combines multi_match text search with searchFilter", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery("fluffy", undefined, { species: "cat" }) as {
+			bool: { must: unknown[]; filter: unknown[] };
+		};
+		assert.equal(result.bool.must.length, 1);
+		assert.equal(result.bool.filter.length, 1);
+		assert.deepEqual(result.bool.filter[0], {
+			term: { species: "cat" },
+		});
+	});
+
+	it("buildQuery still honors legacy keyword `filter` argument", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, { species: "cat" }, undefined);
+		assert.deepEqual(result, {
+			bool: {
+				filter: [{ term: { species: "cat" } }],
+			},
+		});
 	});
 });
