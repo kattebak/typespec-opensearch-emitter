@@ -94,7 +94,7 @@ export function request(ctx) {
 	return {
 		operation: "GET",
 		path: \`/${indexName}/_search\`,
-		params: { body: JSON.stringify(body) },
+		params: { body },
 	};
 }
 
