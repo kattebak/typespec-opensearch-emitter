@@ -264,6 +264,145 @@ describe("collectAggregations", () => {
 	});
 });
 
+describe("collectAggregations with nested sub-projections", () => {
+	function makeNestedTagSubProjection() {
+		return {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					aggregations: ["terms", "cardinality"],
+				}),
+				makeField({
+					name: "note",
+					optional: true,
+					aggregations: ["missing"],
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+			],
+		} as unknown as ResolvedProjection;
+	}
+
+	it("threads nestedPath into entries inside @nested sub-projections", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeNestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const entries = collectAggregations(projection);
+
+		assert.equal(entries.length, 3);
+
+		const byTagName = entries.find((e) => e.aggName === "byTagName");
+		assert.ok(byTagName);
+		assert.equal(byTagName.kind, "terms");
+		assert.equal(byTagName.nestedPath, "tags");
+		assert.equal(byTagName.openSearchField, "tags.name");
+
+		const uniqueTagNameCount = entries.find(
+			(e) => e.aggName === "uniqueTagNameCount",
+		);
+		assert.ok(uniqueTagNameCount);
+		assert.equal(uniqueTagNameCount.nestedPath, "tags");
+		assert.equal(uniqueTagNameCount.openSearchField, "tags.name");
+
+		const missingTagNoteCount = entries.find(
+			(e) => e.aggName === "missingTagNoteCount",
+		);
+		assert.ok(missingTagNoteCount);
+		assert.equal(missingTagNoteCount.nestedPath, "tags");
+		assert.equal(missingTagNoteCount.openSearchField, "tags.note.keyword");
+	});
+
+	it("does not set nestedPath on object (non-nested) sub-projections", () => {
+		const ownerSubProjection = {
+			projectionModel: { name: "OwnerSearchDoc" },
+			sourceModel: { name: "Owner" },
+			indexName: "owners",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "owner",
+					nested: false,
+					subProjection: ownerSubProjection,
+					type: { kind: "Model" } as unknown as Type,
+				}),
+			],
+		});
+
+		const entries = collectAggregations(projection);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].nestedPath, undefined);
+		assert.equal(entries[0].openSearchField, "name");
+		assert.equal(entries[0].aggName, "byName");
+	});
+
+	it("hasAggregations returns true when only nested sub-projection has aggs", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeNestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		assert.equal(hasAggregations(projection), true);
+	});
+
+	it("uses projectedName for nestedPath when @searchAs renames the field", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					projectedName: "labels",
+					nested: true,
+					subProjection: makeNestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const entries = collectAggregations(projection);
+		const byTagName = entries.find((e) => e.aggName === "byLabelName");
+		assert.ok(byTagName, "expected nestedPath prefix from projectedName");
+		assert.equal(byTagName.nestedPath, "labels");
+		assert.equal(byTagName.openSearchField, "labels.name");
+	});
+});
+
 describe("isTextField", () => {
 	it("returns false for keyword fields", () => {
 		assert.equal(isTextField(makeField({ keyword: true })), false);

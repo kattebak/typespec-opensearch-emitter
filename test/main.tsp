@@ -9,8 +9,11 @@ model Owner {
 }
 
 model Tag {
-	@searchable @keyword name: string;
+	@searchable @keyword @aggregatable("terms", "cardinality") name: string;
+	@searchable @aggregatable("missing") note?: string;
 }
+
+model TagSearchDoc is SearchProjection<Tag> {}
 
 model Pet {
 	@searchable id: string;
@@ -34,6 +37,8 @@ model Pet {
 model PetSearchDoc is SearchProjection<Pet> {
 	@analyzer("edge_ngram") @boost(2.0)
 	name: string;
+
+	@nested tags: TagSearchDoc[];
 }
 
 model PetPublicSearchDoc is SearchProjection<Pet> {

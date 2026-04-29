@@ -15,10 +15,10 @@ test("emits projection metadata for multiple projections", async () => {
 	);
 	const parsed = JSON.parse(content);
 
-	assert.equal(parsed.projections.length, 2);
 	assert.deepEqual(parsed.projections.map((x) => x.name).sort(), [
 		"PetPublicSearchDoc",
 		"PetSearchDoc",
+		"TagSearchDoc",
 	]);
 
 	const petSearch = parsed.projections.find((x) => x.name === "PetSearchDoc");
@@ -115,6 +115,49 @@ test("emits graphql aggregation types and resolver block", async () => {
 	);
 	assert.ok(resolver.includes("aggregations: {"));
 	assert.ok(resolver.includes("parsedBody.aggregations?.byAlias?.buckets"));
+});
+
+test("emits nested-aware aggregations on nested sub-projections", async () => {
+	const sdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
+	const resolver = await readFile(
+		`${OUT_DIR}/pet-search-doc-resolver.js`,
+		"utf8",
+	);
+
+	assert.ok(sdl.includes("byTagName: [TermBucket!]!"));
+	assert.ok(sdl.includes("uniqueTagNameCount: Int!"));
+	assert.ok(sdl.includes("missingTagNoteCount: Int!"));
+
+	assert.ok(
+		resolver.includes(
+			'byTagName: { nested: { path: "tags" }, aggs: { inner: { terms: { field: "tags.name" } } } }',
+		),
+	);
+	assert.ok(
+		resolver.includes(
+			'uniqueTagNameCount: { nested: { path: "tags" }, aggs: { inner: { cardinality: { field: "tags.name" } } } }',
+		),
+	);
+	assert.ok(
+		resolver.includes(
+			'missingTagNoteCount: { nested: { path: "tags" }, aggs: { inner: { missing: { field: "tags.note.keyword" } } } }',
+		),
+	);
+	assert.ok(
+		resolver.includes(
+			"byTagName: (parsedBody.aggregations?.byTagName?.inner?.buckets ?? []).map",
+		),
+	);
+	assert.ok(
+		resolver.includes(
+			"uniqueTagNameCount: parsedBody.aggregations?.uniqueTagNameCount?.inner?.value ?? 0",
+		),
+	);
+	assert.ok(
+		resolver.includes(
+			"missingTagNoteCount: parsedBody.aggregations?.missingTagNoteCount?.inner?.doc_count ?? 0",
+		),
+	);
 });
 
 test("generated output compiles and exports constants", async () => {

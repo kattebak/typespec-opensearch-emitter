@@ -1,4 +1,8 @@
-import { type AggregationEntry, collectAggregations } from "./aggregations.js";
+import {
+	type AggregationEntry,
+	collectAggregations,
+	NESTED_INNER_AGG_NAME,
+} from "./aggregations.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
 import type {
 	ResolvedProjection,
@@ -174,12 +178,18 @@ function renderAggsBlock(aggregations: AggregationEntry[]): string {
 		return "";
 	}
 
-	const lines = aggregations.map((entry) => {
-		const aggType = osAggType(entry.kind);
-		return `\t\t${entry.aggName}: { ${aggType}: { field: ${JSON.stringify(entry.openSearchField)} } },`;
-	});
+	const lines = aggregations.map((entry) => renderAggLine(entry));
 
 	return `\n\t\taggs: {\n${lines.join("\n")}\n\t\t},`;
+}
+
+function renderAggLine(entry: AggregationEntry): string {
+	const aggType = osAggType(entry.kind);
+	const inner = `{ ${aggType}: { field: ${JSON.stringify(entry.openSearchField)} } }`;
+	if (entry.nestedPath) {
+		return `\t\t${entry.aggName}: { nested: { path: ${JSON.stringify(entry.nestedPath)} }, aggs: { ${NESTED_INNER_AGG_NAME}: ${inner} } },`;
+	}
+	return `\t\t${entry.aggName}: ${inner},`;
 }
 
 function renderResponseAggregations(aggregations: AggregationEntry[]): string {
@@ -195,13 +205,16 @@ function renderResponseAggregations(aggregations: AggregationEntry[]): string {
 }
 
 function renderResponseAggregationLine(entry: AggregationEntry): string {
+	const path = entry.nestedPath
+		? `parsedBody.aggregations?.${entry.aggName}?.${NESTED_INNER_AGG_NAME}`
+		: `parsedBody.aggregations?.${entry.aggName}`;
 	switch (entry.kind) {
 		case "terms":
-			return `\t\t\t${entry.aggName}: (parsedBody.aggregations?.${entry.aggName}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
+			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
 		case "cardinality":
-			return `\t\t\t${entry.aggName}: parsedBody.aggregations?.${entry.aggName}?.value ?? 0,`;
+			return `\t\t\t${entry.aggName}: ${path}?.value ?? 0,`;
 		case "missing":
-			return `\t\t\t${entry.aggName}: parsedBody.aggregations?.${entry.aggName}?.doc_count ?? 0,`;
+			return `\t\t\t${entry.aggName}: ${path}?.doc_count ?? 0,`;
 	}
 }
 
