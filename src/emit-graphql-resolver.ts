@@ -103,7 +103,7 @@ export function response(ctx) {
 		return util.error(ctx.error.message, ctx.error.type);
 	}
 
-	const parsedBody = JSON.parse(ctx.result.body);
+	const parsedBody = ctx.result;
 	const hits = parsedBody.hits.hits;
 	const totalHits = parsedBody.hits.total.value;
 	const args = ctx.args;
