@@ -78,8 +78,8 @@ function renderConnectionTypes(typeName: string): string {
 	const lines = [
 		`type ${typeName}Connection {`,
 		`  edges: [${typeName}Edge!]!`,
+		"  totalCount: Int!",
 		"  pageInfo: PageInfo!",
-		"  totalHits: Int!",
 		"}",
 		"",
 		`type ${typeName}Edge {`,
