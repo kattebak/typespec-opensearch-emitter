@@ -281,15 +281,13 @@ function generateTsConfig(projections: ResolvedProjection[]): string {
 }
 
 function generateGraphQLEntryPoint(): string {
-	return `import { createRequire } from "node:module";
-import { dirname } from "node:path";
+	return `import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const require = createRequire(import.meta.url);
-const manifestPath = require.resolve("./graphql-resolvers.json");
 export const packageDir = dirname(fileURLToPath(import.meta.url));
 export const manifest = JSON.parse(
-  (await import("node:fs")).readFileSync(manifestPath, "utf-8")
+  readFileSync(join(packageDir, "graphql-resolvers.json"), "utf-8")
 );
 export default manifest;
 `;
