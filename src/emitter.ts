@@ -214,7 +214,7 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 				analyzer: field.analyzer,
 				boost: field.boost,
 				...(field.aggregations && field.aggregations.length > 0
-					? { aggregations: field.aggregations }
+					? { aggregations: field.aggregations.map((d) => d.kind) }
 					: {}),
 			})),
 		})),

@@ -367,12 +367,45 @@ function renderAggsBlock(aggregations: AggregationEntry[]): string {
 }
 
 function renderAggLine(entry: AggregationEntry): string {
-	const aggType = osAggType(entry.kind);
-	const inner = `{ ${aggType}: { field: ${JSON.stringify(entry.openSearchField)} } }`;
+	const inner = renderAggInner(entry);
 	if (entry.nestedPath) {
 		return `\t\t${entry.aggName}: { nested: { path: ${JSON.stringify(entry.nestedPath)} }, aggs: { ${NESTED_INNER_AGG_NAME}: ${inner} } },`;
 	}
 	return `\t\t${entry.aggName}: ${inner},`;
+}
+
+function renderAggInner(entry: AggregationEntry): string {
+	const aggType = osAggType(entry.kind);
+	const fieldLit = JSON.stringify(entry.openSearchField);
+
+	if (entry.kind === "date_histogram") {
+		const interval =
+			entry.options && "interval" in entry.options
+				? entry.options.interval
+				: "month";
+		return `{ ${aggType}: { field: ${fieldLit}, calendar_interval: ${JSON.stringify(interval)} } }`;
+	}
+	if (entry.kind === "range") {
+		const ranges =
+			entry.options && "ranges" in entry.options ? entry.options.ranges : [];
+		const rangesLit = JSON.stringify(ranges);
+		return `{ ${aggType}: { field: ${fieldLit}, ranges: ${rangesLit} } }`;
+	}
+	if (entry.kind === "terms" && entry.options && "sub" in entry.options) {
+		const sub = entry.options.sub ?? {};
+		const subEntries = Object.entries(sub);
+		if (subEntries.length === 0) {
+			return `{ ${aggType}: { field: ${fieldLit} } }`;
+		}
+		const subLines = subEntries
+			.map(
+				([name, spec]) =>
+					`${JSON.stringify(name)}: { ${spec.kind}: { field: ${JSON.stringify(spec.field)} } }`,
+			)
+			.join(", ");
+		return `{ ${aggType}: { field: ${fieldLit} }, aggs: { ${subLines} } }`;
+	}
+	return `{ ${aggType}: { field: ${fieldLit} } }`;
 }
 
 function renderResponseAggregations(aggregations: AggregationEntry[]): string {
@@ -392,8 +425,19 @@ function renderResponseAggregationLine(entry: AggregationEntry): string {
 		? `parsedBody.aggregations?.${entry.aggName}?.${NESTED_INNER_AGG_NAME}`
 		: `parsedBody.aggregations?.${entry.aggName}`;
 	switch (entry.kind) {
-		case "terms":
-			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
+		case "terms": {
+			const subEntries =
+				entry.options && "sub" in entry.options && entry.options.sub
+					? Object.entries(entry.options.sub)
+					: [];
+			if (subEntries.length === 0) {
+				return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
+			}
+			const subFields = subEntries
+				.map(([name]) => `, ${name}: b.${name}?.value ?? null`)
+				.join("");
+			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count${subFields} })),`;
+		}
 		case "cardinality":
 			return `\t\t\t${entry.aggName}: ${path}?.value ?? 0,`;
 		case "missing":
@@ -403,6 +447,10 @@ function renderResponseAggregationLine(entry: AggregationEntry): string {
 		case "min":
 		case "max":
 			return `\t\t\t${entry.aggName}: ${path}?.value ?? null,`;
+		case "date_histogram":
+			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key_as_string ?? String(b.key), count: b.doc_count })),`;
+		case "range":
+			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count })),`;
 	}
 }
 
@@ -414,6 +462,10 @@ function osAggType(kind: AggregationEntry["kind"]): string {
 			return "cardinality";
 		case "missing":
 			return "missing";
+		case "date_histogram":
+			return "date_histogram";
+		case "range":
+			return "range";
 		case "sum":
 			return "sum";
 		case "avg":

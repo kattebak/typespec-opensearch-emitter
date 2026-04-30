@@ -202,29 +202,88 @@ function renderAggregationTypes(
 	entries: AggregationEntry[],
 ): string {
 	const aggregationsType = aggregationsTypeName(typeName);
+
+	const sharedBucketTypes = new Set<string>();
+	const customBucketTypes: string[] = [];
+
 	const fieldLines = entries.map((entry) => {
-		const gqlType = aggregationGraphQLType(entry.kind);
+		const gqlType = aggregationGraphQLType(entry, sharedBucketTypes);
+		if (entry.kind === "terms" && entry.options && "sub" in entry.options) {
+			const sub = entry.options.sub ?? {};
+			if (Object.keys(sub).length > 0) {
+				const bucketTypeName = `${capitalizeFirst(entry.aggName)}Bucket`;
+				const subLines = Object.entries(sub).map(
+					([name]) => `  ${name}: Float`,
+				);
+				customBucketTypes.push(
+					[
+						`type ${bucketTypeName} {`,
+						"  key: String!",
+						"  count: Int!",
+						...subLines,
+						"}",
+					].join("\n"),
+				);
+				return `  ${entry.aggName}: [${bucketTypeName}!]!`;
+			}
+		}
 		return `  ${entry.aggName}: ${gqlType}`;
 	});
 
+	const sharedBucketBlocks: string[] = [];
+	if (sharedBucketTypes.has("TermBucket")) {
+		sharedBucketBlocks.push(
+			["type TermBucket {", "  key: String!", "  count: Int!", "}"].join("\n"),
+		);
+	}
+	if (sharedBucketTypes.has("DateHistogramBucket")) {
+		sharedBucketBlocks.push(
+			[
+				"type DateHistogramBucket {",
+				"  key: String!",
+				"  count: Int!",
+				"}",
+			].join("\n"),
+		);
+	}
+	if (sharedBucketTypes.has("RangeBucket")) {
+		sharedBucketBlocks.push(
+			[
+				"type RangeBucket {",
+				"  key: String!",
+				"  from: Float",
+				"  to: Float",
+				"  count: Int!",
+				"}",
+			].join("\n"),
+		);
+	}
+
 	const lines = [
-		"type TermBucket {",
-		"  key: String!",
-		"  count: Int!",
-		"}",
-		"",
+		...sharedBucketBlocks,
+		...customBucketTypes,
 		`type ${aggregationsType} {`,
 		...fieldLines,
 		"}",
 	];
 
-	return lines.join("\n");
+	return lines.join("\n\n").replace(/\n\ntype /g, "\n\ntype ");
 }
 
-function aggregationGraphQLType(kind: AggregationEntry["kind"]): string {
-	switch (kind) {
+function aggregationGraphQLType(
+	entry: AggregationEntry,
+	sharedBucketTypes: Set<string>,
+): string {
+	switch (entry.kind) {
 		case "terms":
+			sharedBucketTypes.add("TermBucket");
 			return "[TermBucket!]!";
+		case "date_histogram":
+			sharedBucketTypes.add("DateHistogramBucket");
+			return "[DateHistogramBucket!]!";
+		case "range":
+			sharedBucketTypes.add("RangeBucket");
+			return "[RangeBucket!]!";
 		case "cardinality":
 		case "missing":
 			return "Int!";
@@ -235,6 +294,11 @@ function aggregationGraphQLType(kind: AggregationEntry["kind"]): string {
 			// Nullable: OpenSearch returns null when no documents match the agg.
 			return "Float";
 	}
+}
+
+function capitalizeFirst(name: string): string {
+	if (name.length === 0) return name;
+	return name[0].toUpperCase() + name.slice(1);
 }
 
 function toGraphQLType(

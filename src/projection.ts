@@ -1,8 +1,8 @@
 import type { Model, ModelProperty, Program, Type } from "@typespec/compiler";
 import {
-	type AggregationKind,
+	type AggregationDirective,
 	type FilterableKind,
-	getAggregatableKinds,
+	getAggregatableDirectives,
 	getAnalyzer,
 	getBoost,
 	getFilterableKinds,
@@ -40,7 +40,7 @@ export interface ResolvedProjectionField {
 	analyzer?: string;
 	boost?: number;
 	ignoreAbove?: number;
-	aggregations?: AggregationKind[];
+	aggregations?: AggregationDirective[];
 	filterables?: FilterableKind[];
 	subProjection?: ResolvedProjection;
 }
@@ -209,8 +209,9 @@ function resolveProjectionField(
 		getSearchAs(program, sourceProperty);
 
 	const aggregations =
-		(projectionProperty && getAggregatableKinds(program, projectionProperty)) ??
-		getAggregatableKinds(program, sourceProperty);
+		(projectionProperty &&
+			getAggregatableDirectives(program, projectionProperty)) ??
+		getAggregatableDirectives(program, sourceProperty);
 
 	const filterables =
 		(projectionProperty && getFilterableKinds(program, projectionProperty)) ??
