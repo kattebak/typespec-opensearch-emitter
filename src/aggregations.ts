@@ -131,6 +131,11 @@ function isTextField(field: ResolvedProjectionField): boolean {
 	if (field.keyword) {
 		return false;
 	}
+	// Non-searchable string fields are mapped directly as keyword (see
+	// emit-mapping.ts), so there is no `.keyword` sub-field to address.
+	if (!field.searchable) {
+		return false;
+	}
 	if (field.subProjection) {
 		return false;
 	}

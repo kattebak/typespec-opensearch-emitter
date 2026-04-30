@@ -71,19 +71,25 @@ function renderObjectType(
 	projection: ResolvedProjection,
 ): string {
 	const typeName = projection.projectionModel.name;
-	const fieldLines = projection.fields.map((field) => {
-		const gqlName = field.projectedName ?? field.name;
-		const gqlType = toGraphQLType(program, field.type, field);
-		const nullable = field.optional ? "" : "!";
-		return `  ${gqlName}: ${gqlType}${nullable}`;
-	});
+	// Filter-only / aggregatable-only fields exist in the OpenSearch index for
+	// query-time use but are not part of the user-facing response shape.
+	const fieldLines = projection.fields
+		.filter((field) => field.searchable)
+		.map((field) => {
+			const gqlName = field.projectedName ?? field.name;
+			const gqlType = toGraphQLType(program, field.type, field);
+			const nullable = field.optional ? "" : "!";
+			return `  ${gqlName}: ${gqlType}${nullable}`;
+		});
 
 	return `type ${typeName} {\n${fieldLines.join("\n")}\n}`;
 }
 
 function renderFilterInput(projection: ResolvedProjection): string | undefined {
 	const typeName = projection.projectionModel.name;
-	const keywordFields = projection.fields.filter((f) => f.keyword);
+	const keywordFields = projection.fields.filter(
+		(f) => f.searchable && f.keyword,
+	);
 
 	if (keywordFields.length === 0) {
 		return undefined;

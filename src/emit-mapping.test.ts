@@ -118,6 +118,45 @@ describe("mapping emitter", () => {
 		assert.equal(result.fields, undefined);
 	});
 
+	it("maps non-searchable filter-only string fields as plain keyword (no text+keyword sub-field)", () => {
+		const projection = {
+			projectionModel: { name: "PetSearchDoc" },
+			sourceModel: { name: "Pet" },
+			indexName: "pets_v1",
+			fields: [
+				{
+					name: "name",
+					searchable: true,
+					keyword: false,
+					nested: false,
+					optional: false,
+					type: { kind: "Scalar", name: "string" },
+				},
+				{
+					name: "counterpartyId",
+					searchable: false,
+					keyword: false,
+					nested: false,
+					optional: false,
+					filterables: ["term"],
+					type: { kind: "Scalar", name: "string" },
+				},
+			],
+		} as never;
+
+		const dummyProgram = {} as never;
+		const emitted = emitMapping(dummyProgram, projection);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.equal(parsed.mappings.properties.name.type, "text");
+		assert.equal(
+			parsed.mappings.properties.counterpartyId.type,
+			"keyword",
+			"filter-only string fields must map directly to keyword (no text analysis)",
+		);
+		assert.equal(parsed.mappings.properties.counterpartyId.fields, undefined);
+	});
+
 	it("maps boolean fields", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

@@ -171,7 +171,9 @@ function buildPropertiesFromFields(
 						program,
 						field.type,
 						{
-							keyword: field.keyword,
+							// A filter-only / agg-only string field has no full-text-search
+							// surface, so map it as plain keyword instead of text+keyword.
+							keyword: field.keyword || !field.searchable,
 							nested: field.nested,
 							analyzer: field.analyzer,
 							boost: field.boost,

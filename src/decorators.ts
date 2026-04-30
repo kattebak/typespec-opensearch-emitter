@@ -259,6 +259,13 @@ export function getAggregatableKinds(
 	return stored as AggregationKind[];
 }
 
+export function hasAggregatable(
+	program: Program,
+	target: ModelProperty,
+): boolean {
+	return program.stateMap(StateKeys.aggregatable).has(target);
+}
+
 export const FILTERABLE_KINDS = [
 	"term",
 	"term_negate",
@@ -312,6 +319,13 @@ export function getFilterableKinds(
 		return undefined;
 	}
 	return stored as FilterableKind[];
+}
+
+export function hasFilterable(
+	program: Program,
+	target: ModelProperty,
+): boolean {
+	return program.stateMap(StateKeys.filterable).has(target);
 }
 
 export function $searchAs(

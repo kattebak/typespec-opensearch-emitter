@@ -29,6 +29,7 @@ function makeField(
 		keyword: boolean;
 		nested: boolean;
 		optional: boolean;
+		searchable: boolean;
 		type: Type;
 		aggregations: ResolvedProjection["fields"][0]["aggregations"];
 		filterables: ResolvedProjection["fields"][0]["filterables"];
@@ -41,7 +42,7 @@ function makeField(
 		keyword: overrides.keyword ?? false,
 		nested: overrides.nested ?? false,
 		optional: overrides.optional ?? false,
-		searchable: true,
+		searchable: overrides.searchable ?? true,
 		type:
 			overrides.type ??
 			({
@@ -138,6 +139,53 @@ describe("emitGraphQLResolver", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(result.content.includes('["name"]'));
+	});
+
+	it("excludes non-searchable filter-only fields from text_fields and keyword_fields but includes them in FILTER_SPEC", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					searchable: false,
+					filterables: ["term"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(
+			result.content.includes('fields: ["name"]'),
+			"counterpartyId is not @searchable so must not appear in multi_match fields",
+		);
+		assert.ok(
+			result.content.includes(
+				'inputName: "counterpartyId", kind: "term", field: "counterpartyId"',
+			),
+			"FILTER_SPEC must carry the term filter for the non-searchable field",
+		);
+	});
+
+	it("excludes non-searchable agg-only fields from text/keyword sets but includes them in aggs", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "type",
+					keyword: true,
+					searchable: false,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(result.content.includes('fields: ["name"]'));
+		assert.ok(
+			result.content.includes("byType:"),
+			"aggregation should still be emitted for non-searchable agg-only field",
+		);
 	});
 
 	it("respects custom page size and track_total_hits options", () => {

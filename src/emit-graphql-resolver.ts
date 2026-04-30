@@ -43,12 +43,17 @@ export function emitGraphQLResolver(
 
 	const textFields = projection.fields
 		.filter(
-			(f) => !f.keyword && !f.nested && !f.subProjection && hasTextType(f),
+			(f) =>
+				f.searchable &&
+				!f.keyword &&
+				!f.nested &&
+				!f.subProjection &&
+				hasTextType(f),
 		)
 		.map((f) => f.projectedName ?? f.name);
 
 	const keywordFields = projection.fields
-		.filter((f) => f.keyword)
+		.filter((f) => f.searchable && f.keyword)
 		.map((f) => f.projectedName ?? f.name);
 
 	const aggregations = collectAggregations(projection);

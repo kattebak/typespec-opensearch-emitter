@@ -31,6 +31,7 @@ function makeField(
 		keyword: boolean;
 		nested: boolean;
 		optional: boolean;
+		searchable: boolean;
 		analyzer: string;
 		boost: number;
 		type: Type;
@@ -45,7 +46,7 @@ function makeField(
 		keyword: overrides.keyword ?? false,
 		nested: overrides.nested ?? false,
 		optional: overrides.optional ?? false,
-		searchable: true,
+		searchable: overrides.searchable ?? true,
 		analyzer: overrides.analyzer,
 		boost: overrides.boost,
 		type:
@@ -123,6 +124,55 @@ describe("emitGraphQLSdl", () => {
 
 		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
 		assert.ok(!result.content.includes("Filter"));
+	});
+
+	it("excludes non-searchable filter-only fields from the response object type", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					searchable: false,
+					filterables: ["term"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		const objectTypeBlock = result.content.split("\n\n")[0];
+		assert.ok(objectTypeBlock.includes("name: String!"));
+		assert.ok(
+			!objectTypeBlock.includes("counterpartyId"),
+			"filter-only field must not appear on the response object type",
+		);
+		// But it should still appear in the SearchFilter input.
+		assert.ok(result.content.includes("counterpartyId: String"));
+	});
+
+	it("excludes non-searchable @keyword fields from the legacy <Type>Filter input", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "species", keyword: true }),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					searchable: false,
+					filterables: ["term"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		const filterBlock = result.content.match(
+			/input PetSearchDocFilter \{[^}]*\}/,
+		)?.[0];
+		assert.ok(filterBlock, "PetSearchDocFilter block should exist");
+		assert.ok(filterBlock.includes("species: String"));
+		assert.ok(
+			!filterBlock.includes("counterpartyId"),
+			"non-searchable @keyword fields must not appear in <Type>Filter",
+		);
 	});
 
 	it("generates connection types", () => {
