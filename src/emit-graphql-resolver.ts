@@ -27,6 +27,12 @@ export interface ResolverOptions {
 	trackTotalHitsUpTo: number;
 }
 
+// Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
+// APPSYNC_JS does not honor self-extending Array iteration, so the emitted
+// resolver pre-allocates this many slots as a literal. Set well above any
+// realistic SearchFilter shape; runtime util.error fires if exceeded.
+const FILTER_WORK_SLOT_COUNT = 256;
+
 export function emitGraphQLResolver(
 	projection: ResolvedProjection,
 	options: ResolverOptions,
@@ -90,6 +96,7 @@ function renderResolver(
 	const aggsBlock = renderAggsBlock(aggregations);
 	const responseAggregations = renderResponseAggregations(aggregations);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
+	const slotsLiteral = `[${"undefined,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -191,106 +198,117 @@ function buildQuery(queryText, filter, searchFilter) {
 function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
-	const stack = [
-		{
-			kind: "process",
-			spec: rootSpec,
-			input: rootInput,
-			outFilters: rootOutFilters,
-			outMustNots: rootOutMustNots,
-		},
-	];
+	// APPSYNC_JS forbids while, continue, C-style for(init;cond;update), and
+	// the increment/decrement unary operators (lint rules @aws-appsync/no-while,
+	// @aws-appsync/no-continue, @aws-appsync/no-for,
+	// @aws-appsync/no-disallowed-unary-operators). It also does not honor the
+	// ECMA spec for Array's @@iterator: items pushed during \`for...of\`
+	// iteration are NOT visited (verified via aws appsync evaluate-code). We
+	// drive iteration with a fixed-length slot pool and a FIFO head/tail
+	// index pair: the \`for...of\` runs exactly slots.length times (its
+	// bound), and the body checks head < tail to act on real work. FIFO
+	// ordering is fine because filter semantics are conjunctive. Each
+	// "nested" node enqueues a "process" item then a "finalize" item; the
+	// child's clauses are populated before finalize wraps them onto the
+	// parent. The slot count is set well above any realistic SearchFilter
+	// shape; exceeding it raises util.error at runtime.
+	const slots = ${slotsLiteral};
+	slots[0] = {
+		kind: "process",
+		spec: rootSpec,
+		input: rootInput,
+		outFilters: rootOutFilters,
+		outMustNots: rootOutMustNots,
+	};
+	let head = 0;
+	let tail = 1;
 
-	// APPSYNC_JS forbids \`while\` and \`continue\` (lint rules
-	// @aws-appsync/no-while, @aws-appsync/no-continue), so we drain the work
-	// stack with a bounded \`for\` and break when empty. The bound is set
-	// generously well above any realistic SearchFilter shape; it is a
-	// runtime-environment requirement, not an algorithmic one.
-	const MAX_FILTER_WORK_ITERATIONS = 256;
-	for (let __i = 0; __i < MAX_FILTER_WORK_ITERATIONS; __i++) {
-		if (stack.length === 0) break;
-		const work = stack.pop();
+	for (const _slot of slots) {
+		if (head < tail) {
+			const item = slots[head];
+			head = head + 1;
+			if (item.kind === "finalize") {
+				for (const clause of item.childFilters) {
+					item.parentFilters.push({
+						nested: {
+							path: item.path,
+							query: { bool: { filter: [clause] } },
+						},
+					});
+				}
+				for (const clause of item.childMustNots) {
+					item.parentMustNots.push({
+						nested: {
+							path: item.path,
+							query: { bool: { filter: [clause] } },
+						},
+					});
+				}
+			} else {
+				const spec = item.spec;
+				const input = item.input;
+				const outFilters = item.outFilters;
+				const outMustNots = item.outMustNots;
+				const rangeBuckets = {};
 
-		if (work.kind === "finalize") {
-			for (const clause of work.childFilters) {
-				work.parentFilters.push({
-					nested: {
-						path: work.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
-			}
-			for (const clause of work.childMustNots) {
-				work.parentMustNots.push({
-					nested: {
-						path: work.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
-			}
-		} else {
-			const spec = work.spec;
-			const input = work.input;
-			const outFilters = work.outFilters;
-			const outMustNots = work.outMustNots;
-			const rangeBuckets = {};
-
-			for (const node of spec) {
-				const value = input[node.inputName];
-				if (node.kind === "nested") {
-					if (value != null) {
-						const childFilters = [];
-						const childMustNots = [];
-						stack.push({
-							kind: "finalize",
-							path: node.path,
-							childFilters,
-							childMustNots,
-							parentFilters: outFilters,
-							parentMustNots: outMustNots,
-						});
-						stack.push({
-							kind: "process",
-							spec: node.children,
-							input: value,
-							outFilters: childFilters,
-							outMustNots: childMustNots,
-						});
-					}
-				} else if (node.kind === "term") {
-					if (value != null) {
-						outFilters.push({ term: { [node.field]: value } });
-					}
-				} else if (node.kind === "term_negate") {
-					if (value != null) {
-						outMustNots.push({ term: { [node.field]: value } });
-					}
-				} else if (node.kind === "exists") {
-					if (value != null) {
-						if (value === true) {
-							outFilters.push({ exists: { field: node.field } });
-						} else {
-							outMustNots.push({ exists: { field: node.field } });
+				for (const node of spec) {
+					const value = input[node.inputName];
+					if (node.kind === "nested") {
+						if (value != null) {
+							const childFilters = [];
+							const childMustNots = [];
+							if (tail + 2 > slots.length) {
+								util.error(
+									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS resolver",
+								);
+							}
+							slots[tail] = {
+								kind: "process",
+								spec: node.children,
+								input: value,
+								outFilters: childFilters,
+								outMustNots: childMustNots,
+							};
+							tail = tail + 1;
+							slots[tail] = {
+								kind: "finalize",
+								path: node.path,
+								childFilters,
+								childMustNots,
+								parentFilters: outFilters,
+								parentMustNots: outMustNots,
+							};
+							tail = tail + 1;
+						}
+					} else if (node.kind === "term") {
+						if (value != null) {
+							outFilters.push({ term: { [node.field]: value } });
+						}
+					} else if (node.kind === "term_negate") {
+						if (value != null) {
+							outMustNots.push({ term: { [node.field]: value } });
+						}
+					} else if (node.kind === "exists") {
+						if (value != null) {
+							if (value === true) {
+								outFilters.push({ exists: { field: node.field } });
+							} else {
+								outMustNots.push({ exists: { field: node.field } });
+							}
+						}
+					} else if (node.kind === "range") {
+						if (value != null) {
+							const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
+							bucket[node.bound] = value;
 						}
 					}
-				} else if (node.kind === "range") {
-					if (value != null) {
-						const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
-						bucket[node.bound] = value;
-					}
+				}
+
+				for (const field in rangeBuckets) {
+					outFilters.push({ range: { [field]: rangeBuckets[field] } });
 				}
 			}
-
-			for (const field in rangeBuckets) {
-				outFilters.push({ range: { [field]: rangeBuckets[field] } });
-			}
 		}
-	}
-
-	if (stack.length > 0) {
-		util.error(
-			"applyFilterSpec exceeded MAX_FILTER_WORK_ITERATIONS bound; SearchFilter shape too deep for APPSYNC_JS resolver",
-		);
 	}
 }
 `;
