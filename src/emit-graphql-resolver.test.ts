@@ -676,4 +676,126 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			},
 		});
 	});
+
+	it("applyFilterSpec body contains no self-recursive call (APPSYNC_JS forbids recursion)", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		const declStart = result.content.indexOf("function applyFilterSpec");
+		assert.ok(
+			declStart >= 0,
+			"expected to find applyFilterSpec function in emitted resolver",
+		);
+		const bodyStart = result.content.indexOf("{", declStart);
+		assert.ok(bodyStart > declStart, "function body opening brace not found");
+
+		let depth = 0;
+		let bodyEnd = -1;
+		for (let i = bodyStart; i < result.content.length; i++) {
+			const ch = result.content[i];
+			if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					bodyEnd = i + 1;
+					break;
+				}
+			}
+		}
+		assert.ok(bodyEnd > bodyStart, "function body closing brace not found");
+		const body = result.content.slice(bodyStart, bodyEnd);
+
+		assert.equal(
+			/\bapplyFilterSpec\s*\(/.test(body),
+			false,
+			`applyFilterSpec body must not call itself; APPSYNC_JS rejects recursive resolver code. Body was:\n${body}`,
+		);
+	});
+
+	it("buildQuery preserves nested-filter semantics for deeply structured input", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, {
+			species: "cat",
+			tags: { name: "vip", noteExists: true },
+		}) as { bool: { filter: unknown[] } };
+
+		assert.ok(
+			result.bool.filter.some(
+				(c) =>
+					JSON.stringify(c) === JSON.stringify({ term: { species: "cat" } }),
+			),
+			"flat term clause missing",
+		);
+		assert.ok(
+			result.bool.filter.some(
+				(c) =>
+					JSON.stringify(c) ===
+					JSON.stringify({
+						nested: {
+							path: "tags",
+							query: {
+								bool: { filter: [{ term: { "tags.name": "vip" } }] },
+							},
+						},
+					}),
+			),
+			"nested term clause missing",
+		);
+		assert.ok(
+			result.bool.filter.some(
+				(c) =>
+					JSON.stringify(c) ===
+					JSON.stringify({
+						nested: {
+							path: "tags",
+							query: {
+								bool: {
+									filter: [{ exists: { field: "tags.note.keyword" } }],
+								},
+							},
+						},
+					}),
+			),
+			"nested exists clause missing",
+		);
+	});
 });
