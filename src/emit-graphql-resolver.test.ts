@@ -730,6 +730,64 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		);
 	});
 
+	it("applyFilterSpec body contains no while or continue (APPSYNC_JS forbids both)", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		const declStart = result.content.indexOf("function applyFilterSpec");
+		assert.ok(
+			declStart >= 0,
+			"expected to find applyFilterSpec function in emitted resolver",
+		);
+		const bodyStart = result.content.indexOf("{", declStart);
+		assert.ok(bodyStart > declStart, "function body opening brace not found");
+
+		let depth = 0;
+		let bodyEnd = -1;
+		for (let i = bodyStart; i < result.content.length; i++) {
+			const ch = result.content[i];
+			if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					bodyEnd = i + 1;
+					break;
+				}
+			}
+		}
+		assert.ok(bodyEnd > bodyStart, "function body closing brace not found");
+		const body = result.content.slice(bodyStart, bodyEnd);
+
+		assert.equal(
+			/\bwhile\s*\(/.test(body),
+			false,
+			`applyFilterSpec body must not contain a while statement; APPSYNC_JS lint rule @aws-appsync/no-while rejects it. Body was:\n${body}`,
+		);
+		assert.equal(
+			/\bcontinue\s*;/.test(body),
+			false,
+			`applyFilterSpec body must not contain a continue statement; APPSYNC_JS lint rule @aws-appsync/no-continue rejects it. Body was:\n${body}`,
+		);
+	});
+
 	it("buildQuery preserves nested-filter semantics for deeply structured input", () => {
 		const projection = makeProjection({
 			fields: [
