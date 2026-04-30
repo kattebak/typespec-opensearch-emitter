@@ -301,6 +301,17 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 								outMustNots.push({ exists: { field: node.field } });
 							}
 						}
+					} else if (node.kind === "nested_exists") {
+						if (value != null) {
+							const nestedClause = {
+								nested: { path: node.path, query: { match_all: {} } },
+							};
+							if (value === true) {
+								outFilters.push(nestedClause);
+							} else {
+								outMustNots.push(nestedClause);
+							}
+						}
 					} else if (node.kind === "range") {
 						if (value != null) {
 							const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
@@ -335,6 +346,9 @@ function stringifyNode(node: FilterSpecNode): string {
 	if (node.kind === "nested") {
 		const children = stringifySpec(node.children ?? []);
 		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "nested", path: ${JSON.stringify(node.path ?? "")}, children: ${children} }`;
+	}
+	if (node.kind === "nested_exists") {
+		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "nested_exists", path: ${JSON.stringify(node.path ?? "")} }`;
 	}
 	if (node.kind === "range") {
 		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "range", field: ${JSON.stringify(node.field ?? "")}, bound: ${JSON.stringify(node.bound ?? "")} }`;
@@ -384,6 +398,11 @@ function renderResponseAggregationLine(entry: AggregationEntry): string {
 			return `\t\t\t${entry.aggName}: ${path}?.value ?? 0,`;
 		case "missing":
 			return `\t\t\t${entry.aggName}: ${path}?.doc_count ?? 0,`;
+		case "sum":
+		case "avg":
+		case "min":
+		case "max":
+			return `\t\t\t${entry.aggName}: ${path}?.value ?? null,`;
 	}
 }
 
@@ -395,6 +414,14 @@ function osAggType(kind: AggregationEntry["kind"]): string {
 			return "cardinality";
 		case "missing":
 			return "missing";
+		case "sum":
+			return "sum";
+		case "avg":
+			return "avg";
+		case "min":
+			return "min";
+		case "max":
+			return "max";
 	}
 }
 

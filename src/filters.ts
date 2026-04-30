@@ -183,12 +183,17 @@ export function searchFilterTypeName(projectionName: string): string {
 export interface FilterSpecNode {
 	/** Local input field name on the parent SearchFilter input. */
 	inputName: string;
-	kind: FilterableKind | "nested";
+	/**
+	 * `nested_exists` is an emit-time kind used when `@filterable("exists")` is
+	 * applied to a `@nested` array field — the resolver translates it as
+	 * `nested + match_all` (true) or `must_not nested + match_all` (false).
+	 */
+	kind: FilterableKind | "nested" | "nested_exists";
 	/** OpenSearch field path (only set on leaf kinds, not `nested`). */
 	field?: string;
 	/** Source projection field (set on leaf kinds only; SDL renders use this for GraphQL type lookup). */
 	sourceField?: ResolvedProjectionField;
-	/** Nested doc path (only set on `nested` kind). */
+	/** Nested doc path (set on `nested` and `nested_exists`). */
 	path?: string;
 	/** Children (only set on `nested` kind). */
 	children?: FilterSpecNode[];
@@ -226,12 +231,19 @@ function buildShapeRecursive(
 			if (field.filterables && field.filterables.length > 0) {
 				const entries = filterableEntriesForField(field, parentPath);
 				for (const entry of entries) {
+					// @filterable("exists") on a @nested array field becomes a
+					// nested-existence check at emit time (see FilterSpecNode.kind).
+					const isNestedPathExists =
+						entry.kind === "exists" && field.nested && !!field.subProjection;
 					nodes.push({
 						inputName: entry.inputFieldName,
-						kind: entry.kind,
+						kind: isNestedPathExists ? "nested_exists" : entry.kind,
 						field: entry.openSearchField,
 						sourceField: entry.field,
 						bound: entry.rangeBound,
+						path: isNestedPathExists
+							? joinNestedPath(parentPath, field.projectedName ?? field.name)
+							: undefined,
 					});
 				}
 			}

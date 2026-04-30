@@ -80,6 +80,24 @@ describe("aggregationFieldName", () => {
 	it("handles -ies plural", () => {
 		assert.equal(aggregationFieldName("categories", "terms"), "byCategory");
 	});
+
+	it("emits <field><Sum|Avg|Min|Max> for numeric metric aggs", () => {
+		assert.equal(aggregationFieldName("notional", "sum"), "notionalSum");
+		assert.equal(aggregationFieldName("notional", "avg"), "notionalAvg");
+		assert.equal(aggregationFieldName("rank", "min"), "rankMin");
+		assert.equal(aggregationFieldName("rank", "max"), "rankMax");
+	});
+
+	it("prefixes nested-path numeric metric aggs with the singularized parent", () => {
+		assert.equal(
+			aggregationFieldName("notional", "sum", "trades"),
+			"tradeNotionalSum",
+		);
+		assert.equal(
+			aggregationFieldName("validTo", "max", "approvals"),
+			"approvalValidToMax",
+		);
+	});
 });
 
 describe("singularize", () => {

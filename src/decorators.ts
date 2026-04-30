@@ -209,7 +209,15 @@ function isArrayOfModelType(type: Type): boolean {
 	return elementType?.kind === "Model";
 }
 
-export const AGGREGATION_KINDS = ["terms", "cardinality", "missing"] as const;
+export const AGGREGATION_KINDS = [
+	"terms",
+	"cardinality",
+	"missing",
+	"sum",
+	"avg",
+	"min",
+	"max",
+] as const;
 export type AggregationKind = (typeof AGGREGATION_KINDS)[number];
 
 function isAggregationKind(value: string): value is AggregationKind {

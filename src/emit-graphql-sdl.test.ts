@@ -266,6 +266,28 @@ describe("emitGraphQLSdl aggregations", () => {
 		);
 	});
 
+	it("emits nullable Float for sum/avg/min/max numeric metric aggs", () => {
+		const projection = makeProjection({
+			name: "TradeSearchDoc",
+			fields: [
+				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type TradeSearchAggregations {"));
+		assert.ok(result.content.includes("notionalSum: Float\n"));
+		assert.ok(result.content.includes("notionalAvg: Float\n"));
+		assert.ok(result.content.includes("notionalMin: Float\n"));
+		assert.ok(result.content.includes("notionalMax: Float"));
+		// Must not be non-null — OpenSearch returns null when no docs match.
+		assert.ok(!result.content.includes("notionalSum: Float!"));
+	});
+
 	it("emits nested-aware aggregation field names from sub-projections", () => {
 		const subProjection = {
 			projectionModel: { name: "TagSearchDoc" },

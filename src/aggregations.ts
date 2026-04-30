@@ -92,6 +92,7 @@ export function aggregationFieldName(
 	const fieldPart = capitalize(singularize(fieldName));
 	const prefix = nestedPath ? nestedPathPrefix(nestedPath) : "";
 	const capital = `${prefix}${fieldPart}`;
+	const camel = lowerFirst(capital);
 	switch (kind) {
 		case "terms":
 			return `by${capital}`;
@@ -99,7 +100,20 @@ export function aggregationFieldName(
 			return `unique${capital}Count`;
 		case "missing":
 			return `missing${capital}Count`;
+		case "sum":
+			return `${camel}Sum`;
+		case "avg":
+			return `${camel}Avg`;
+		case "min":
+			return `${camel}Min`;
+		case "max":
+			return `${camel}Max`;
 	}
+}
+
+function lowerFirst(name: string): string {
+	if (name.length === 0) return name;
+	return name[0].toLowerCase() + name.slice(1);
 }
 
 function nestedPathPrefix(nestedPath: string): string {
