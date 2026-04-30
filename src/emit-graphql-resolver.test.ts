@@ -4,6 +4,44 @@ import type { Type } from "@typespec/compiler";
 import { emitGraphQLResolver } from "./emit-graphql-resolver.js";
 import type { ResolvedProjection } from "./projection.js";
 
+function stripCommentsAndStrings(src: string): string {
+	let out = "";
+	let i = 0;
+	const n = src.length;
+	while (i < n) {
+		const ch = src[i];
+		const next = i + 1 < n ? src[i + 1] : "";
+		if (ch === "/" && next === "/") {
+			const nl = src.indexOf("\n", i);
+			if (nl < 0) return out;
+			i = nl;
+		} else if (ch === "/" && next === "*") {
+			const end = src.indexOf("*/", i + 2);
+			if (end < 0) return out;
+			i = end + 2;
+		} else if (ch === '"' || ch === "'" || ch === "`") {
+			const quote = ch;
+			out += " ";
+			i = i + 1;
+			while (i < n) {
+				const c = src[i];
+				if (c === "\\") {
+					i = i + 2;
+				} else if (c === quote) {
+					i = i + 1;
+					break;
+				} else {
+					i = i + 1;
+				}
+			}
+		} else {
+			out += ch;
+			i = i + 1;
+		}
+	}
+	return out;
+}
+
 function makeProjection(
 	overrides: Partial<{
 		name: string;
@@ -844,6 +882,83 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			false,
 			`applyFilterSpec body must not contain ++ or -- operators; APPSYNC_JS lint rule @aws-appsync/no-disallowed-unary-operators rejects them. Body was:\n${body}`,
 		);
+	});
+
+	it("emitted resolver contains no APPSYNC_JS-forbidden constructs (while, continue, C-style for, ++/--, try/catch)", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["range"],
+				}),
+				makeField({
+					name: "nickname",
+					filterables: ["exists"],
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		// Strip block comments, line comments, and string literals so the
+		// forbidden-token greps below only inspect executable JS code paths.
+		// Template literals are not used in the emitted resolver runtime body.
+		const stripped = stripCommentsAndStrings(result.content);
+
+		const forbidden: { name: string; rule: string; pattern: RegExp }[] = [
+			{
+				name: "while",
+				rule: "@aws-appsync/no-while",
+				pattern: /\bwhile\s*\(/,
+			},
+			{
+				name: "continue",
+				rule: "@aws-appsync/no-continue",
+				pattern: /\bcontinue\s*[;\n}]/,
+			},
+			{
+				name: "C-style for(init;cond;update)",
+				rule: "@aws-appsync/no-for",
+				pattern: /\bfor\s*\([^)]*;[^)]*;[^)]*\)/,
+			},
+			{
+				name: "++ or -- unary operator",
+				rule: "@aws-appsync/no-disallowed-unary-operators",
+				pattern: /\+\+|--/,
+			},
+			{
+				name: "try",
+				rule: "APPSYNC_JS forbids try/catch",
+				pattern: /\btry\s*\{/,
+			},
+			{
+				name: "catch",
+				rule: "APPSYNC_JS forbids try/catch",
+				pattern: /\bcatch\s*[({]/,
+			},
+		];
+
+		for (const { name, rule, pattern } of forbidden) {
+			assert.equal(
+				pattern.test(stripped),
+				false,
+				`emitted resolver must not contain ${name}; ${rule} rejects it.\n--- stripped resolver ---\n${stripped}\n--- end ---`,
+			);
+		}
 	});
 
 	it("buildQuery preserves nested-filter semantics for deeply structured input", () => {
