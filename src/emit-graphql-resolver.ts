@@ -201,7 +201,14 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 		},
 	];
 
-	while (stack.length > 0) {
+	// APPSYNC_JS forbids \`while\` and \`continue\` (lint rules
+	// @aws-appsync/no-while, @aws-appsync/no-continue), so we drain the work
+	// stack with a bounded \`for\` and break when empty. The bound is set
+	// generously well above any realistic SearchFilter shape; it is a
+	// runtime-environment requirement, not an algorithmic one.
+	const MAX_FILTER_WORK_ITERATIONS = 256;
+	for (let __i = 0; __i < MAX_FILTER_WORK_ITERATIONS; __i++) {
+		if (stack.length === 0) break;
 		const work = stack.pop();
 
 		if (work.kind === "finalize") {
@@ -221,68 +228,69 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 					},
 				});
 			}
-			continue;
-		}
+		} else {
+			const spec = work.spec;
+			const input = work.input;
+			const outFilters = work.outFilters;
+			const outMustNots = work.outMustNots;
+			const rangeBuckets = {};
 
-		const spec = work.spec;
-		const input = work.input;
-		const outFilters = work.outFilters;
-		const outMustNots = work.outMustNots;
-		const rangeBuckets = {};
-
-		for (const node of spec) {
-			const value = input[node.inputName];
-			if (node.kind === "nested") {
-				if (value == null) continue;
-				const childFilters = [];
-				const childMustNots = [];
-				stack.push({
-					kind: "finalize",
-					path: node.path,
-					childFilters,
-					childMustNots,
-					parentFilters: outFilters,
-					parentMustNots: outMustNots,
-				});
-				stack.push({
-					kind: "process",
-					spec: node.children,
-					input: value,
-					outFilters: childFilters,
-					outMustNots: childMustNots,
-				});
-				continue;
-			}
-			if (node.kind === "term") {
-				if (value == null) continue;
-				outFilters.push({ term: { [node.field]: value } });
-				continue;
-			}
-			if (node.kind === "term_negate") {
-				if (value == null) continue;
-				outMustNots.push({ term: { [node.field]: value } });
-				continue;
-			}
-			if (node.kind === "exists") {
-				if (value == null) continue;
-				if (value === true) {
-					outFilters.push({ exists: { field: node.field } });
-				} else {
-					outMustNots.push({ exists: { field: node.field } });
+			for (const node of spec) {
+				const value = input[node.inputName];
+				if (node.kind === "nested") {
+					if (value != null) {
+						const childFilters = [];
+						const childMustNots = [];
+						stack.push({
+							kind: "finalize",
+							path: node.path,
+							childFilters,
+							childMustNots,
+							parentFilters: outFilters,
+							parentMustNots: outMustNots,
+						});
+						stack.push({
+							kind: "process",
+							spec: node.children,
+							input: value,
+							outFilters: childFilters,
+							outMustNots: childMustNots,
+						});
+					}
+				} else if (node.kind === "term") {
+					if (value != null) {
+						outFilters.push({ term: { [node.field]: value } });
+					}
+				} else if (node.kind === "term_negate") {
+					if (value != null) {
+						outMustNots.push({ term: { [node.field]: value } });
+					}
+				} else if (node.kind === "exists") {
+					if (value != null) {
+						if (value === true) {
+							outFilters.push({ exists: { field: node.field } });
+						} else {
+							outMustNots.push({ exists: { field: node.field } });
+						}
+					}
+				} else if (node.kind === "range") {
+					if (value != null) {
+						const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
+						bucket[node.bound] = value;
+					}
 				}
-				continue;
 			}
-			if (node.kind === "range") {
-				if (value == null) continue;
-				const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
-				bucket[node.bound] = value;
-				continue;
-			}
-		}
 
-		for (const field in rangeBuckets) {
-			outFilters.push({ range: { [field]: rangeBuckets[field] } });
+			for (const field in rangeBuckets) {
+				outFilters.push({ range: { [field]: rangeBuckets[field] } });
+			}
 		}
+	}
+
+	if (stack.length > 0) {
+		util.error(
+			"applyFilterSpec exceeded MAX_FILTER_WORK_ITERATIONS bound; SearchFilter shape too deep for APPSYNC_JS resolver",
+		);
 	}
 }
 `;
