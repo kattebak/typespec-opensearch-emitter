@@ -29,6 +29,7 @@ function makeField(
 		keyword: boolean;
 		nested: boolean;
 		optional: boolean;
+		searchable: boolean;
 		type: Type;
 		aggregations: ResolvedProjection["fields"][0]["aggregations"];
 		filterables: ResolvedProjection["fields"][0]["filterables"];
@@ -41,7 +42,7 @@ function makeField(
 		keyword: overrides.keyword ?? false,
 		nested: overrides.nested ?? false,
 		optional: overrides.optional ?? false,
-		searchable: true,
+		searchable: overrides.searchable ?? true,
 		type:
 			overrides.type ??
 			({
@@ -138,6 +139,53 @@ describe("emitGraphQLResolver", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(result.content.includes('["name"]'));
+	});
+
+	it("excludes non-searchable filter-only fields from text_fields and keyword_fields but includes them in FILTER_SPEC", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					searchable: false,
+					filterables: ["term"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(
+			result.content.includes('fields: ["name"]'),
+			"counterpartyId is not @searchable so must not appear in multi_match fields",
+		);
+		assert.ok(
+			result.content.includes(
+				'inputName: "counterpartyId", kind: "term", field: "counterpartyId"',
+			),
+			"FILTER_SPEC must carry the term filter for the non-searchable field",
+		);
+	});
+
+	it("excludes non-searchable agg-only fields from text/keyword sets but includes them in aggs", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "type",
+					keyword: true,
+					searchable: false,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(result.content.includes('fields: ["name"]'));
+		assert.ok(
+			result.content.includes("byType:"),
+			"aggregation should still be emitted for non-searchable agg-only field",
+		);
 	});
 
 	it("respects custom page size and track_total_hits options", () => {
@@ -262,6 +310,44 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
+	it("emits sum/avg/min/max numeric metric aggs", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: ["sum", "avg"],
+				}),
+				makeField({
+					name: "rank",
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+					aggregations: ["min", "max"],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(
+			result.content.includes('notionalSum: { sum: { field: "notional" } }'),
+		);
+		assert.ok(
+			result.content.includes('notionalAvg: { avg: { field: "notional" } }'),
+		);
+		assert.ok(result.content.includes('rankMin: { min: { field: "rank" } }'));
+		assert.ok(result.content.includes('rankMax: { max: { field: "rank" } }'));
+
+		assert.ok(
+			result.content.includes(
+				"notionalSum: parsedBody.aggregations?.notionalSum?.value ?? null",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"rankMax: parsedBody.aggregations?.rankMax?.value ?? null",
+			),
+		);
+	});
+
 	it("wraps aggs inside @nested sub-projection in nested+inner block", () => {
 		const subProjection = {
 			projectionModel: { name: "TagSearchDoc" },
@@ -350,7 +436,8 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(
 			result.content.includes('byTag: { terms: { field: "tags.keyword" } }'),
 		);
-		assert.ok(!result.content.includes("nested: { path:"));
+		// Aggs for non-@nested fields must not be wrapped in `{ nested: ... }`.
+		assert.ok(!result.content.includes("byTag: { nested:"));
 	});
 
 	it("emits aggregations mapping in response", () => {
@@ -687,6 +774,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 					name: "species",
 					keyword: true,
 					filterables: ["term", "term_negate"],
+					aggregations: ["terms", "cardinality", "missing"],
 				}),
 				makeField({
 					name: "rank",
@@ -698,9 +786,21 @@ describe("emitGraphQLResolver search filter DSL", () => {
 					filterables: ["exists"],
 				}),
 				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					searchable: false,
+					filterables: ["term"],
+				}),
+				makeField({
 					name: "tags",
 					nested: true,
 					subProjection: nestedTagSubProjection(),
+					filterables: ["exists"],
 					type: {
 						kind: "Model",
 						name: "Array",
@@ -770,6 +870,66 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
+	});
+
+	it('emits nested_exists FILTER_SPEC entry for @filterable("exists") on a @nested array field', () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(
+			result.content.includes(
+				'inputName: "tagsExists", kind: "nested_exists", path: "tags"',
+			),
+			"FILTER_SPEC must carry a nested_exists entry with the path",
+		);
+	});
+
+	it("buildQuery translates tagsExists: true into nested+match_all in bool.filter", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: nestedTagSubProjection(),
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+
+		const truthy = buildQuery(undefined, undefined, { tagsExists: true });
+		assert.deepEqual(truthy, {
+			bool: {
+				filter: [{ nested: { path: "tags", query: { match_all: {} } } }],
+			},
+		});
+
+		const falsy = buildQuery(undefined, undefined, { tagsExists: false });
+		assert.deepEqual(falsy, {
+			bool: {
+				must_not: [{ nested: { path: "tags", query: { match_all: {} } } }],
+			},
+		});
 	});
 
 	it("buildQuery preserves nested-filter semantics for deeply structured input", () => {

@@ -25,7 +25,13 @@ The core workflow:
 2. **Create a projection model** — use `model XxxSearchDoc is SearchProjection<SourceModel> {}` to create a search document type. Only `@searchable` fields from the source model are included.
 3. **Override decorators in the projection** — redeclare fields in the projection model to add or override `@keyword`, `@analyzer`, `@boost`, or `@nested`.
 
-Fields **not** marked `@searchable` on the source model are excluded from all projections.
+A field is included in the resolved projection if it carries any of `@searchable`, `@filterable`, or `@aggregatable`. Each role then dictates downstream emission:
+
+- `@searchable` — appears on the SDL response object type, the legacy `<Type>Filter` keyword input, and the OS mapping with text-or-keyword analysis.
+- `@filterable` — contributes to the `<Type>SearchFilter` input and `FILTER_SPEC` in the resolver.
+- `@aggregatable` — contributes to the aggregations type and the `aggs` block in the resolver.
+
+Filter-only / agg-only fields are mapped as `keyword` directly (no `text`+`keyword` sub-field) since there is no full-text-search surface. Fields with none of the three decorators are excluded from all projections.
 
 ### Index name derivation
 
@@ -260,7 +266,8 @@ In this example:
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
-| `@aggregatable(...kinds)` | `ModelProperty` | Declares OpenSearch aggregations to expose on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`. Multi-arg emits all listed kinds. | `@aggregatable("terms", "cardinality") locations: Location[];` |
+| `@aggregatable(...kinds)` | `ModelProperty` | Declares OpenSearch aggregations to expose on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`. Multi-arg emits all listed kinds. Numeric metric kinds (`sum`/`avg`/`min`/`max`) emit a nullable `Float` field on the aggregations type — OpenSearch returns `null` when no documents match. | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("sum", "avg") notional: float64;` |
+| `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"exists"`, `"range"`. On a `@nested` array field, `"exists"` becomes a path-level nested-existence check (`true` matches docs with at least one nested element; `false` matches docs with none). | `@filterable("term", "term_negate") status: string;` / `@filterable("exists") @nested tags: Tag[];` |
 
 ## Type mapping
 

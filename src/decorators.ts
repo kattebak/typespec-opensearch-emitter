@@ -209,7 +209,15 @@ function isArrayOfModelType(type: Type): boolean {
 	return elementType?.kind === "Model";
 }
 
-export const AGGREGATION_KINDS = ["terms", "cardinality", "missing"] as const;
+export const AGGREGATION_KINDS = [
+	"terms",
+	"cardinality",
+	"missing",
+	"sum",
+	"avg",
+	"min",
+	"max",
+] as const;
 export type AggregationKind = (typeof AGGREGATION_KINDS)[number];
 
 function isAggregationKind(value: string): value is AggregationKind {
@@ -257,6 +265,13 @@ export function getAggregatableKinds(
 		return undefined;
 	}
 	return stored as AggregationKind[];
+}
+
+export function hasAggregatable(
+	program: Program,
+	target: ModelProperty,
+): boolean {
+	return program.stateMap(StateKeys.aggregatable).has(target);
 }
 
 export const FILTERABLE_KINDS = [
@@ -312,6 +327,13 @@ export function getFilterableKinds(
 		return undefined;
 	}
 	return stored as FilterableKind[];
+}
+
+export function hasFilterable(
+	program: Program,
+	target: ModelProperty,
+): boolean {
+	return program.stateMap(StateKeys.filterable).has(target);
 }
 
 export function $searchAs(

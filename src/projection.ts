@@ -10,10 +10,21 @@ import {
 	getIndexName,
 	getIndexSettings,
 	getSearchAs,
+	hasAggregatable,
+	hasFilterable,
 	isKeyword,
 	isNested,
 	isSearchable,
 } from "./decorators.js";
+
+function isReachable(program: Program, prop: ModelProperty): boolean {
+	return (
+		isSearchable(program, prop) ||
+		hasFilterable(program, prop) ||
+		hasAggregatable(program, prop)
+	);
+}
+
 import { reportDiagnostic } from "./lib.js";
 
 export interface ResolvedProjectionField {
@@ -84,7 +95,7 @@ export function resolveProjectionModel(
 
 	const fields: ResolvedProjectionField[] = [];
 	for (const sourceProperty of sourceModel.properties.values()) {
-		if (!isSearchable(program, sourceProperty)) {
+		if (!isReachable(program, sourceProperty)) {
 			continue;
 		}
 
@@ -127,8 +138,8 @@ export function resolveProjectionModel(
 		if (isSpreadFromOtherModel) {
 			const spreadSourceProp = projProp.sourceProperty!;
 
-			// Only include @searchable fields from the spread source
-			if (!isSearchable(program, spreadSourceProp)) {
+			// Only include reachable fields from the spread source
+			if (!isReachable(program, spreadSourceProp)) {
 				continue;
 			}
 
@@ -156,7 +167,7 @@ export function resolveProjectionModel(
 			continue;
 		}
 
-		if (!sourceProp || !isSearchable(program, sourceProp)) {
+		if (!sourceProp || !isReachable(program, sourceProp)) {
 			// Allow sub-projection fields that reference a valid source field
 			const subProj = resolveSubProjectionFromType(program, projProp.type);
 			if (!subProj || !sourceProp) {
@@ -212,7 +223,7 @@ function resolveProjectionField(
 		optional: projectionProperty?.optional ?? sourceProperty.optional,
 		sourceProperty,
 		projectionProperty,
-		searchable: true,
+		searchable: isSearchable(program, sourceProperty),
 		keyword:
 			(projectionProperty && isKeyword(program, projectionProperty)) ||
 			isKeyword(program, sourceProperty),
@@ -257,7 +268,7 @@ function resolveSubProjectionModel(
 
 	const fields: ResolvedProjectionField[] = [];
 	for (const sourceProperty of sourceModel.properties.values()) {
-		if (!isSearchable(program, sourceProperty)) {
+		if (!isReachable(program, sourceProperty)) {
 			continue;
 		}
 

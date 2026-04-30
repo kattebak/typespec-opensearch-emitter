@@ -71,19 +71,25 @@ function renderObjectType(
 	projection: ResolvedProjection,
 ): string {
 	const typeName = projection.projectionModel.name;
-	const fieldLines = projection.fields.map((field) => {
-		const gqlName = field.projectedName ?? field.name;
-		const gqlType = toGraphQLType(program, field.type, field);
-		const nullable = field.optional ? "" : "!";
-		return `  ${gqlName}: ${gqlType}${nullable}`;
-	});
+	// Filter-only / aggregatable-only fields exist in the OpenSearch index for
+	// query-time use but are not part of the user-facing response shape.
+	const fieldLines = projection.fields
+		.filter((field) => field.searchable)
+		.map((field) => {
+			const gqlName = field.projectedName ?? field.name;
+			const gqlType = toGraphQLType(program, field.type, field);
+			const nullable = field.optional ? "" : "!";
+			return `  ${gqlName}: ${gqlType}${nullable}`;
+		});
 
 	return `type ${typeName} {\n${fieldLines.join("\n")}\n}`;
 }
 
 function renderFilterInput(projection: ResolvedProjection): string | undefined {
 	const typeName = projection.projectionModel.name;
-	const keywordFields = projection.fields.filter((f) => f.keyword);
+	const keywordFields = projection.fields.filter(
+		(f) => f.searchable && f.keyword,
+	);
 
 	if (keywordFields.length === 0) {
 		return undefined;
@@ -134,7 +140,7 @@ function renderSearchFilterField(
 	if (node.kind === "nested") {
 		return `  ${node.inputName}: ${node.nestedTypeName ?? "String"}`;
 	}
-	if (node.kind === "exists") {
+	if (node.kind === "exists" || node.kind === "nested_exists") {
 		return `  ${node.inputName}: Boolean`;
 	}
 	const gqlType = node.sourceField
@@ -197,7 +203,7 @@ function renderAggregationTypes(
 ): string {
 	const aggregationsType = aggregationsTypeName(typeName);
 	const fieldLines = entries.map((entry) => {
-		const gqlType = entry.kind === "terms" ? "[TermBucket!]!" : "Int!";
+		const gqlType = aggregationGraphQLType(entry.kind);
 		return `  ${entry.aggName}: ${gqlType}`;
 	});
 
@@ -213,6 +219,22 @@ function renderAggregationTypes(
 	];
 
 	return lines.join("\n");
+}
+
+function aggregationGraphQLType(kind: AggregationEntry["kind"]): string {
+	switch (kind) {
+		case "terms":
+			return "[TermBucket!]!";
+		case "cardinality":
+		case "missing":
+			return "Int!";
+		case "sum":
+		case "avg":
+		case "min":
+		case "max":
+			// Nullable: OpenSearch returns null when no documents match the agg.
+			return "Float";
+	}
 }
 
 function toGraphQLType(
