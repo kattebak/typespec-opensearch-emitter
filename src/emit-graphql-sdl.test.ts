@@ -35,7 +35,7 @@ function makeField(
 		analyzer: string;
 		boost: number;
 		type: Type;
-		aggregations: ResolvedProjection["fields"][0]["aggregations"];
+		aggregations: unknown;
 		filterables: ResolvedProjection["fields"][0]["filterables"];
 		subProjection: ResolvedProjection;
 	}> = {},
@@ -51,10 +51,19 @@ function makeField(
 		boost: overrides.boost,
 		type:
 			overrides.type ?? ({ kind: "Scalar", name: "string" } as unknown as Type),
-		aggregations: overrides.aggregations,
+		aggregations: liftAggregations(overrides.aggregations),
 		filterables: overrides.filterables,
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
+}
+
+function liftAggregations(
+	raw: unknown,
+): ResolvedProjection["fields"][0]["aggregations"] {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	return raw.map((entry) =>
+		typeof entry === "string" ? { kind: entry } : entry,
+	) as ResolvedProjection["fields"][0]["aggregations"];
 }
 
 const dummyProgram = {} as never;
@@ -263,6 +272,77 @@ describe("emitGraphQLSdl aggregations", () => {
 		assert.ok(result.content.includes("missingDescriptionCount: Int!"));
 		assert.ok(
 			result.content.includes("aggregations: CounterpartySearchAggregations!"),
+		);
+	});
+
+	it("emits DateHistogramBucket for date_histogram", () => {
+		const projection = makeProjection({
+			name: "TradeSearchDoc",
+			fields: [
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type DateHistogramBucket {"));
+		assert.ok(
+			result.content.includes("byValidFromOverTime: [DateHistogramBucket!]!"),
+		);
+	});
+
+	it("emits RangeBucket for range buckets", () => {
+		const projection = makeProjection({
+			name: "TradeSearchDoc",
+			fields: [
+				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: [
+						{
+							kind: "range",
+							options: {
+								ranges: [{ to: 1000 }, { from: 1000 }],
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type RangeBucket {"));
+		assert.ok(result.content.includes("from: Float"));
+		assert.ok(result.content.includes("to: Float"));
+		assert.ok(result.content.includes("byNotionalRange: [RangeBucket!]!"));
+	});
+
+	it("emits per-agg bucket type when terms has sub-aggregations", () => {
+		const projection = makeProjection({
+			name: "TradeSearchDoc",
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type ByCounterpartyIdBucket {"));
+		assert.ok(result.content.includes("latestValidTo: Float"));
+		assert.ok(
+			result.content.includes("byCounterpartyId: [ByCounterpartyIdBucket!]!"),
 		);
 	});
 

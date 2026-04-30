@@ -33,7 +33,7 @@ function makeField(
 		nested: boolean;
 		optional: boolean;
 		type: Type;
-		aggregations: ResolvedProjection["fields"][0]["aggregations"];
+		aggregations: unknown;
 		subProjection: ResolvedProjection;
 	}> = {},
 ) {
@@ -46,9 +46,18 @@ function makeField(
 		searchable: true,
 		type:
 			overrides.type ?? ({ kind: "Scalar", name: "string" } as unknown as Type),
-		aggregations: overrides.aggregations,
+		aggregations: liftAggregations(overrides.aggregations),
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
+}
+
+function liftAggregations(
+	raw: unknown,
+): ResolvedProjection["fields"][0]["aggregations"] {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	return raw.map((entry) =>
+		typeof entry === "string" ? { kind: entry } : entry,
+	) as ResolvedProjection["fields"][0]["aggregations"];
 }
 
 describe("aggregationFieldName", () => {
@@ -97,6 +106,17 @@ describe("aggregationFieldName", () => {
 			aggregationFieldName("validTo", "max", "approvals"),
 			"approvalValidToMax",
 		);
+	});
+
+	it("emits by<Field>OverTime for date_histogram", () => {
+		assert.equal(
+			aggregationFieldName("validFrom", "date_histogram"),
+			"byValidFromOverTime",
+		);
+	});
+
+	it("emits by<Field>Range for range buckets", () => {
+		assert.equal(aggregationFieldName("notional", "range"), "byNotionalRange");
 	});
 });
 

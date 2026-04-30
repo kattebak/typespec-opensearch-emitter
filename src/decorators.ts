@@ -217,19 +217,215 @@ export const AGGREGATION_KINDS = [
 	"avg",
 	"min",
 	"max",
+	"date_histogram",
+	"range",
 ] as const;
 export type AggregationKind = (typeof AGGREGATION_KINDS)[number];
+
+export const DATE_HISTOGRAM_INTERVALS = [
+	"year",
+	"quarter",
+	"month",
+	"week",
+	"day",
+	"hour",
+] as const;
+export type DateHistogramInterval = (typeof DATE_HISTOGRAM_INTERVALS)[number];
+
+export const SUB_AGG_KINDS = [
+	"sum",
+	"avg",
+	"min",
+	"max",
+	"cardinality",
+] as const;
+export type SubAggKind = (typeof SUB_AGG_KINDS)[number];
+
+export interface SubAggSpec {
+	kind: SubAggKind;
+	field: string;
+}
+
+export interface RangeBucketSpec {
+	key?: string;
+	from?: number;
+	to?: number;
+}
+
+export interface DateHistogramOptions {
+	interval: DateHistogramInterval;
+}
+
+export interface RangeOptions {
+	ranges: RangeBucketSpec[];
+}
+
+export interface TermsOptions {
+	sub?: Record<string, SubAggSpec>;
+}
+
+export type AggregationOptions =
+	| DateHistogramOptions
+	| RangeOptions
+	| TermsOptions;
+
+export interface AggregationDirective {
+	kind: AggregationKind;
+	options?: AggregationOptions;
+}
 
 function isAggregationKind(value: string): value is AggregationKind {
 	return (AGGREGATION_KINDS as readonly string[]).includes(value);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isDateHistogramInterval(
+	value: unknown,
+): value is DateHistogramInterval {
+	return (
+		typeof value === "string" &&
+		(DATE_HISTOGRAM_INTERVALS as readonly string[]).includes(value)
+	);
+}
+
+function isSubAggKind(value: unknown): value is SubAggKind {
+	return (
+		typeof value === "string" &&
+		(SUB_AGG_KINDS as readonly string[]).includes(value)
+	);
+}
+
+function validateOptions(
+	context: DecoratorContext,
+	target: ModelProperty,
+	kind: AggregationKind,
+	raw: unknown,
+): AggregationOptions | undefined {
+	if (kind === "date_histogram") {
+		if (!isPlainObject(raw)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-aggregation-options",
+				format: { kind, reason: "expected an options object" },
+				target,
+			});
+			return undefined;
+		}
+		const interval = raw.interval ?? "month";
+		if (!isDateHistogramInterval(interval)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-aggregation-options",
+				format: {
+					kind,
+					reason: `interval must be one of ${DATE_HISTOGRAM_INTERVALS.join(", ")}`,
+				},
+				target,
+			});
+			return undefined;
+		}
+		return { interval };
+	}
+	if (kind === "range") {
+		if (!isPlainObject(raw) || !Array.isArray(raw.ranges)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-aggregation-options",
+				format: {
+					kind,
+					reason: "expected { ranges: [{ from?, to?, key? }, ...] }",
+				},
+				target,
+			});
+			return undefined;
+		}
+		const ranges: RangeBucketSpec[] = [];
+		for (const entry of raw.ranges) {
+			if (!isPlainObject(entry)) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: { kind, reason: "each range entry must be an object" },
+					target,
+				});
+				return undefined;
+			}
+			const bucket: RangeBucketSpec = {};
+			if (typeof entry.key === "string") bucket.key = entry.key;
+			if (typeof entry.from === "number") bucket.from = entry.from;
+			if (typeof entry.to === "number") bucket.to = entry.to;
+			if (bucket.from === undefined && bucket.to === undefined) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: {
+						kind,
+						reason: "each range entry must set at least one of from / to",
+					},
+					target,
+				});
+				return undefined;
+			}
+			ranges.push(bucket);
+		}
+		return { ranges };
+	}
+	if (kind === "terms") {
+		if (!isPlainObject(raw)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-aggregation-options",
+				format: { kind, reason: "expected { sub: {...} }" },
+				target,
+			});
+			return undefined;
+		}
+		if (raw.sub === undefined) {
+			return {};
+		}
+		if (!isPlainObject(raw.sub)) {
+			reportDiagnostic(context.program, {
+				code: "invalid-aggregation-options",
+				format: {
+					kind,
+					reason: "sub must map sub-agg names to { kind, field }",
+				},
+				target,
+			});
+			return undefined;
+		}
+		const sub: Record<string, SubAggSpec> = {};
+		for (const [name, spec] of Object.entries(raw.sub)) {
+			if (
+				!isPlainObject(spec) ||
+				!isSubAggKind(spec.kind) ||
+				typeof spec.field !== "string"
+			) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: {
+						kind,
+						reason: `sub-agg "${name}" must be { kind: <metric>, field: <string> }`,
+					},
+					target,
+				});
+				return undefined;
+			}
+			sub[name] = { kind: spec.kind, field: spec.field };
+		}
+		return { sub };
+	}
+	reportDiagnostic(context.program, {
+		code: "invalid-aggregation-options",
+		format: { kind, reason: `${kind} does not accept options` },
+		target,
+	});
+	return undefined;
+}
+
 export function $aggregatable(
 	context: DecoratorContext,
 	target: ModelProperty,
-	...kinds: string[]
+	...args: unknown[]
 ): void {
-	if (kinds.length === 0) {
+	if (args.length === 0) {
 		reportDiagnostic(context.program, {
 			code: "aggregatable-requires-kind",
 			target,
@@ -237,34 +433,93 @@ export function $aggregatable(
 		return;
 	}
 
-	const validated: AggregationKind[] = [];
-	for (let index = 0; index < kinds.length; index++) {
-		const kind = kinds[index];
+	const directives: AggregationDirective[] = [];
+
+	if (
+		args.length === 2 &&
+		typeof args[0] === "string" &&
+		isPlainObject(args[1])
+	) {
+		const kind = args[0];
 		if (!isAggregationKind(kind)) {
 			reportDiagnostic(context.program, {
 				code: "invalid-aggregation-kind",
 				format: { kind },
-				target: context.getArgumentTarget(index) ?? target,
+				target: context.getArgumentTarget(0) ?? target,
 			});
 			return;
 		}
-		if (!validated.includes(kind)) {
-			validated.push(kind);
+		const options = validateOptions(context, target, kind, args[1]);
+		if (options === undefined) return;
+		directives.push({ kind, options });
+	} else {
+		for (let index = 0; index < args.length; index++) {
+			const arg = args[index];
+			if (typeof arg !== "string") {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-kind",
+					format: { kind: String(arg) },
+					target: context.getArgumentTarget(index) ?? target,
+				});
+				return;
+			}
+			if (!isAggregationKind(arg)) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-kind",
+					format: { kind: arg },
+					target: context.getArgumentTarget(index) ?? target,
+				});
+				return;
+			}
+			if (arg === "date_histogram" || arg === "range") {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: { kind: arg, reason: `${arg} requires options` },
+					target,
+				});
+				return;
+			}
+			if (!directives.some((d) => d.kind === arg && !d.options)) {
+				directives.push({ kind: arg });
+			}
 		}
 	}
 
-	context.program.stateMap(StateKeys.aggregatable).set(target, validated);
+	const existing =
+		(context.program.stateMap(StateKeys.aggregatable).get(target) as
+			| AggregationDirective[]
+			| undefined) ?? [];
+	const merged = [...existing];
+	for (const next of directives) {
+		const dup = merged.some(
+			(d) =>
+				d.kind === next.kind &&
+				JSON.stringify(d.options ?? null) ===
+					JSON.stringify(next.options ?? null),
+		);
+		if (!dup) merged.push(next);
+	}
+	context.program.stateMap(StateKeys.aggregatable).set(target, merged);
+}
+
+export function getAggregatableDirectives(
+	program: Program,
+	target: ModelProperty,
+): AggregationDirective[] | undefined {
+	const stored = program.stateMap(StateKeys.aggregatable).get(target);
+	if (!stored) {
+		return undefined;
+	}
+	return stored as AggregationDirective[];
 }
 
 export function getAggregatableKinds(
 	program: Program,
 	target: ModelProperty,
 ): AggregationKind[] | undefined {
-	const stored = program.stateMap(StateKeys.aggregatable).get(target);
-	if (!stored) {
-		return undefined;
-	}
-	return stored as AggregationKind[];
+	const directives = getAggregatableDirectives(program, target);
+	if (!directives) return undefined;
+	return directives.map((d) => d.kind);
 }
 
 export function hasAggregatable(

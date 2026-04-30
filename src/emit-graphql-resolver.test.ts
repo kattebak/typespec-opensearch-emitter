@@ -31,7 +31,7 @@ function makeField(
 		optional: boolean;
 		searchable: boolean;
 		type: Type;
-		aggregations: ResolvedProjection["fields"][0]["aggregations"];
+		aggregations: unknown;
 		filterables: ResolvedProjection["fields"][0]["filterables"];
 		subProjection: ResolvedProjection;
 	}> = {},
@@ -49,10 +49,19 @@ function makeField(
 				kind: "Scalar",
 				name: "string",
 			} as unknown as Type),
-		aggregations: overrides.aggregations,
+		aggregations: liftAggregations(overrides.aggregations),
 		filterables: overrides.filterables,
 		subProjection: overrides.subProjection,
 	} as unknown as ResolvedProjection["fields"][0];
+}
+
+function liftAggregations(
+	raw: unknown,
+): ResolvedProjection["fields"][0]["aggregations"] {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	return raw.map((entry) =>
+		typeof entry === "string" ? { kind: entry } : entry,
+	) as ResolvedProjection["fields"][0]["aggregations"];
 }
 
 /**
@@ -306,6 +315,95 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(
 			result.content.includes(
 				'missingDescriptionCount: { missing: { field: "description.keyword" } }',
+			),
+		);
+	});
+
+	it("emits date_histogram with calendar_interval option", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(
+			result.content.includes(
+				'byValidFromOverTime: { date_histogram: { field: "validFrom", calendar_interval: "month" } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"byValidFromOverTime: (parsedBody.aggregations?.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: b.key_as_string ?? String(b.key), count: b.doc_count }))",
+			),
+		);
+	});
+
+	it("emits range buckets with the configured ranges", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: [
+						{
+							kind: "range",
+							options: {
+								ranges: [
+									{ to: 1000 },
+									{ from: 1000, to: 10000 },
+									{ from: 10000 },
+								],
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(
+			result.content.includes(
+				'byNotionalRange: { range: { field: "notional", ranges: [{"to":1000},{"from":1000,"to":10000},{"from":10000}] } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"byNotionalRange: (parsedBody.aggregations?.byNotionalRange?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count }))",
+			),
+		);
+	});
+
+	it("emits terms with sub-aggregations", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(
+			result.content.includes(
+				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				", latestValidTo: b.latestValidTo?.value ?? null",
 			),
 		);
 	});
@@ -788,7 +886,35 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				makeField({
 					name: "notional",
 					type: { kind: "Scalar", name: "float64" } as unknown as Type,
-					aggregations: ["sum", "avg", "min", "max"],
+					aggregations: [
+						"sum",
+						"avg",
+						"min",
+						"max",
+						{
+							kind: "range",
+							options: { ranges: [{ to: 1000 }, { from: 1000 }] },
+						},
+					],
+				}),
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
 				}),
 				makeField({
 					name: "counterpartyId",

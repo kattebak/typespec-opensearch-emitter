@@ -1,4 +1,4 @@
-import type { AggregationKind } from "./decorators.js";
+import type { AggregationKind, AggregationOptions } from "./decorators.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -11,6 +11,7 @@ export interface AggregationEntry {
 	openSearchField: string;
 	useTextType: boolean;
 	nestedPath?: string;
+	options?: AggregationOptions;
 }
 
 /**
@@ -46,14 +47,19 @@ function collectAggregationsRecursive(
 				? `${nestedPath}.${fieldPart}`
 				: fieldPart;
 
-			for (const kind of field.aggregations) {
+			for (const directive of field.aggregations) {
 				entries.push({
 					field,
-					kind,
-					aggName: aggregationFieldName(projectedName, kind, nestedPath),
+					kind: directive.kind,
+					aggName: aggregationFieldName(
+						projectedName,
+						directive.kind,
+						nestedPath,
+					),
 					openSearchField,
 					useTextType,
 					nestedPath,
+					options: directive.options,
 				});
 			}
 		}
@@ -108,6 +114,10 @@ export function aggregationFieldName(
 			return `${camel}Min`;
 		case "max":
 			return `${camel}Max`;
+		case "date_histogram":
+			return `by${capital}OverTime`;
+		case "range":
+			return `by${capital}Range`;
 	}
 }
 

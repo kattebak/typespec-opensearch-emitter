@@ -266,7 +266,7 @@ In this example:
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
-| `@aggregatable(...kinds)` | `ModelProperty` | Declares OpenSearch aggregations to expose on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`. Multi-arg emits all listed kinds. Numeric metric kinds (`sum`/`avg`/`min`/`max`) emit a nullable `Float` field on the aggregations type — OpenSearch returns `null` when no documents match. | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("sum", "avg") notional: float64;` |
+| `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub. See [Aggregations](#aggregations-aggregatable) for the option shapes. | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("date_histogram", #{ interval: "month" }) validFrom: utcDateTime;` |
 | `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"exists"`, `"range"`. On a `@nested` array field, `"exists"` becomes a path-level nested-existence check (`true` matches docs with at least one nested element; `false` matches docs with none). | `@filterable("term", "term_negate") status: string;` / `@filterable("exists") @nested tags: Tag[];` |
 
 ## Type mapping
@@ -417,25 +417,56 @@ The consuming CDK construct can read this manifest to wire resolvers without har
 
 ### Aggregations (`@aggregatable`)
 
-Annotate fields with `@aggregatable("terms" | "cardinality" | "missing", ...)` to expose OpenSearch aggregations on the connection's `aggregations` field. The aggregations run alongside the search query (no separate request).
+Annotate fields with `@aggregatable(kind, ...)` to expose OpenSearch aggregations on the connection's `aggregations` field. The aggregations run alongside the search query (no separate request).
+
+The decorator has two forms:
+
+- **Multi-arg (string kinds, no options):** `@aggregatable("terms", "cardinality", "missing", "sum", "avg", "min", "max")`. Each listed kind is emitted independently for the same field.
+- **Single kind + options (TypeSpec value literal):** `@aggregatable(kind, #{...options})`. Required for `"date_histogram"`, `"range"`, and `"terms"` with sub-aggregations. Use TypeSpec's `#{}` / `#[]` value-literal syntax.
 
 ```typespec
 model Counterparty {
   @searchable @aggregatable("terms") tags: string[];
   @searchable @aggregatable("terms", "cardinality") locations: string[];
   @searchable @aggregatable("missing") description?: string;
+  @searchable @aggregatable("sum", "avg", "min", "max") notional: float64;
+}
+
+model Trade {
+  @searchable
+  @aggregatable("date_histogram", #{ interval: "month" })
+  validFrom: utcDateTime;
+
+  @searchable
+  @aggregatable("range", #{ ranges: #[
+    #{ to: 1000 },
+    #{ from: 1000, to: 10000 },
+    #{ from: 10000 }
+  ]})
+  notional: float64;
+
+  @searchable
+  @aggregatable("terms", #{ sub: #{
+    latestValidTo: #{ kind: "max", field: "validTo" }
+  }})
+  counterpartyId: string;
 }
 ```
 
-Field-name conventions in the generated `*SearchAggregations` type (singular `<Field>`, e.g. `tags` -> `byTag`):
+Field-name conventions in the generated `*SearchAggregations` type (singular form for `<Field>`, e.g. `tags` → `byTag`):
 
 | Aggregation kind | Generated field | GraphQL type |
 | --- | --- | --- |
-| `terms` | `by<Field>` | `[TermBucket!]!` |
+| `terms` | `by<Field>` | `[TermBucket!]!` (or `[By<Field>Bucket!]!` if sub-aggs are configured) |
 | `cardinality` | `unique<Field>Count` | `Int!` |
 | `missing` | `missing<Field>Count` | `Int!` |
+| `sum` / `avg` / `min` / `max` | `<field><Sum\|Avg\|Min\|Max>` | `Float` (nullable — OpenSearch returns `null` with no matching docs) |
+| `date_histogram` | `by<Field>OverTime` | `[DateHistogramBucket!]!` |
+| `range` | `by<Field>Range` | `[RangeBucket!]!` |
 
-The `.keyword` sub-field is applied automatically when the underlying type is text. Numeric, date, and `@keyword` fields use the bare field name.
+`date_histogram` requires `interval` (one of `year`, `quarter`, `month`, `week`, `day`, `hour` — defaults to `month` if omitted). `range` requires `ranges` (array of `{ from?, to?, key? }`; each entry must set at least one of `from` / `to`). `terms` `sub` allows numeric metric sub-aggregations (`sum`/`avg`/`min`/`max`/`cardinality`) keyed by output bucket field name.
+
+The `.keyword` sub-field is applied automatically when the underlying type is text. Numeric, date, and `@keyword` fields use the bare field name. Filter-only / agg-only fields (no `@searchable`) are mapped as plain keyword in OpenSearch — see [Decorator coverage](#searchable-and-searchprojectiont) for what each decorator contributes.
 
 When no field on a projection is `@aggregatable`, the `aggregations` connection field and aggregation types are omitted (no empty types emitted).
 

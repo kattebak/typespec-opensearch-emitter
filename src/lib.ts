@@ -70,7 +70,7 @@ export const $lib = createTypeSpecLibrary({
 		"invalid-aggregation-kind": {
 			severity: "error",
 			messages: {
-				default: paramMessage`Decorator @aggregatable received unsupported kind "${"kind"}". Allowed kinds: terms, cardinality, missing.`,
+				default: paramMessage`Decorator @aggregatable received unsupported kind "${"kind"}". Allowed kinds: terms, cardinality, missing, sum, avg, min, max, date_histogram, range.`,
 			},
 		},
 		"aggregatable-requires-kind": {
@@ -78,6 +78,12 @@ export const $lib = createTypeSpecLibrary({
 			messages: {
 				default:
 					"Decorator @aggregatable requires at least one aggregation kind argument.",
+			},
+		},
+		"invalid-aggregation-options": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Decorator @aggregatable("${"kind"}", ...) options invalid: ${"reason"}.`,
 			},
 		},
 		"invalid-filterable-kind": {
