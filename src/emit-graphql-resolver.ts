@@ -188,64 +188,101 @@ function buildQuery(queryText, filter, searchFilter) {
 	};
 }
 
-function applyFilterSpec(spec, input, outFilters, outMustNots) {
-	if (!spec || !input) return;
-	const rangeBuckets = {};
+function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
+	if (!rootSpec || !rootInput) return;
 
-	for (const node of spec) {
-		const value = input[node.inputName];
-		if (node.kind === "nested") {
-			if (value == null) continue;
-			const nestedFilters = [];
-			const nestedMustNots = [];
-			applyFilterSpec(node.children, value, nestedFilters, nestedMustNots);
-			for (const clause of nestedFilters) {
-				outFilters.push({
+	const stack = [
+		{
+			kind: "process",
+			spec: rootSpec,
+			input: rootInput,
+			outFilters: rootOutFilters,
+			outMustNots: rootOutMustNots,
+		},
+	];
+
+	while (stack.length > 0) {
+		const work = stack.pop();
+
+		if (work.kind === "finalize") {
+			for (const clause of work.childFilters) {
+				work.parentFilters.push({
 					nested: {
-						path: node.path,
+						path: work.path,
 						query: { bool: { filter: [clause] } },
 					},
 				});
 			}
-			for (const clause of nestedMustNots) {
-				outMustNots.push({
+			for (const clause of work.childMustNots) {
+				work.parentMustNots.push({
 					nested: {
-						path: node.path,
+						path: work.path,
 						query: { bool: { filter: [clause] } },
 					},
 				});
 			}
 			continue;
 		}
-		if (node.kind === "term") {
-			if (value == null) continue;
-			outFilters.push({ term: { [node.field]: value } });
-			continue;
-		}
-		if (node.kind === "term_negate") {
-			if (value == null) continue;
-			outMustNots.push({ term: { [node.field]: value } });
-			continue;
-		}
-		if (node.kind === "exists") {
-			if (value == null) continue;
-			if (value === true) {
-				outFilters.push({ exists: { field: node.field } });
-			} else {
-				outMustNots.push({ exists: { field: node.field } });
-			}
-			continue;
-		}
-		if (node.kind === "range") {
-			if (value == null) continue;
-			const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
-			bucket[node.bound] = value;
-			continue;
-		}
-	}
 
-	for (const field in rangeBuckets) {
-		outFilters.push({ range: { [field]: rangeBuckets[field] } });
+		const spec = work.spec;
+		const input = work.input;
+		const outFilters = work.outFilters;
+		const outMustNots = work.outMustNots;
+		const rangeBuckets = {};
+
+		for (const node of spec) {
+			const value = input[node.inputName];
+			if (node.kind === "nested") {
+				if (value == null) continue;
+				const childFilters = [];
+				const childMustNots = [];
+				stack.push({
+					kind: "finalize",
+					path: node.path,
+					childFilters,
+					childMustNots,
+					parentFilters: outFilters,
+					parentMustNots: outMustNots,
+				});
+				stack.push({
+					kind: "process",
+					spec: node.children,
+					input: value,
+					outFilters: childFilters,
+					outMustNots: childMustNots,
+				});
+				continue;
+			}
+			if (node.kind === "term") {
+				if (value == null) continue;
+				outFilters.push({ term: { [node.field]: value } });
+				continue;
+			}
+			if (node.kind === "term_negate") {
+				if (value == null) continue;
+				outMustNots.push({ term: { [node.field]: value } });
+				continue;
+			}
+			if (node.kind === "exists") {
+				if (value == null) continue;
+				if (value === true) {
+					outFilters.push({ exists: { field: node.field } });
+				} else {
+					outMustNots.push({ exists: { field: node.field } });
+				}
+				continue;
+			}
+			if (node.kind === "range") {
+				if (value == null) continue;
+				const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
+				bucket[node.bound] = value;
+				continue;
+			}
+		}
+
+		for (const field in rangeBuckets) {
+			outFilters.push({ range: { [field]: rangeBuckets[field] } });
+		}
 	}
 }
 `;
