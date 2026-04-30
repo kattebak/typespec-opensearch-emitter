@@ -33,8 +33,10 @@
 		"@typespec/compiler": "^1.4.0"
 	},
 	"devDependencies": {
+		"@aws-appsync/eslint-plugin": "^2.0.2",
 		"@biomejs/biome": "^2.3.7",
 		"@types/node": "^22.18.11",
+		"eslint": "^9.39.4",
 		"tsx": "^4.20.5",
 		"typescript": "^5.9.3"
 	}
