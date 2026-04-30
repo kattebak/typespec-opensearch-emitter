@@ -1,46 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Type } from "@typespec/compiler";
 import { emitGraphQLResolver } from "./emit-graphql-resolver.js";
 import type { ResolvedProjection } from "./projection.js";
-
-function stripCommentsAndStrings(src: string): string {
-	let out = "";
-	let i = 0;
-	const n = src.length;
-	while (i < n) {
-		const ch = src[i];
-		const next = i + 1 < n ? src[i + 1] : "";
-		if (ch === "/" && next === "/") {
-			const nl = src.indexOf("\n", i);
-			if (nl < 0) return out;
-			i = nl;
-		} else if (ch === "/" && next === "*") {
-			const end = src.indexOf("*/", i + 2);
-			if (end < 0) return out;
-			i = end + 2;
-		} else if (ch === '"' || ch === "'" || ch === "`") {
-			const quote = ch;
-			out += " ";
-			i = i + 1;
-			while (i < n) {
-				const c = src[i];
-				if (c === "\\") {
-					i = i + 2;
-				} else if (c === quote) {
-					i = i + 1;
-					break;
-				} else {
-					i = i + 1;
-				}
-			}
-		} else {
-			out += ch;
-			i = i + 1;
-		}
-	}
-	return out;
-}
 
 function makeProjection(
 	overrides: Partial<{
@@ -715,176 +680,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("applyFilterSpec body contains no self-recursive call (APPSYNC_JS forbids recursion)", () => {
-		const projection = makeProjection({
-			fields: [
-				makeField({
-					name: "species",
-					keyword: true,
-					filterables: ["term"],
-				}),
-				makeField({
-					name: "tags",
-					nested: true,
-					subProjection: nestedTagSubProjection(),
-					type: {
-						kind: "Model",
-						name: "Array",
-						indexer: { value: { kind: "Model" } },
-					} as unknown as Type,
-				}),
-			],
-		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
-
-		const declStart = result.content.indexOf("function applyFilterSpec");
-		assert.ok(
-			declStart >= 0,
-			"expected to find applyFilterSpec function in emitted resolver",
-		);
-		const bodyStart = result.content.indexOf("{", declStart);
-		assert.ok(bodyStart > declStart, "function body opening brace not found");
-
-		let depth = 0;
-		let bodyEnd = -1;
-		for (let i = bodyStart; i < result.content.length; i++) {
-			const ch = result.content[i];
-			if (ch === "{") depth++;
-			else if (ch === "}") {
-				depth--;
-				if (depth === 0) {
-					bodyEnd = i + 1;
-					break;
-				}
-			}
-		}
-		assert.ok(bodyEnd > bodyStart, "function body closing brace not found");
-		const body = result.content.slice(bodyStart, bodyEnd);
-
-		assert.equal(
-			/\bapplyFilterSpec\s*\(/.test(body),
-			false,
-			`applyFilterSpec body must not call itself; APPSYNC_JS rejects recursive resolver code. Body was:\n${body}`,
-		);
-	});
-
-	it("applyFilterSpec body contains no while or continue (APPSYNC_JS forbids both)", () => {
-		const projection = makeProjection({
-			fields: [
-				makeField({
-					name: "species",
-					keyword: true,
-					filterables: ["term"],
-				}),
-				makeField({
-					name: "tags",
-					nested: true,
-					subProjection: nestedTagSubProjection(),
-					type: {
-						kind: "Model",
-						name: "Array",
-						indexer: { value: { kind: "Model" } },
-					} as unknown as Type,
-				}),
-			],
-		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
-
-		const declStart = result.content.indexOf("function applyFilterSpec");
-		assert.ok(
-			declStart >= 0,
-			"expected to find applyFilterSpec function in emitted resolver",
-		);
-		const bodyStart = result.content.indexOf("{", declStart);
-		assert.ok(bodyStart > declStart, "function body opening brace not found");
-
-		let depth = 0;
-		let bodyEnd = -1;
-		for (let i = bodyStart; i < result.content.length; i++) {
-			const ch = result.content[i];
-			if (ch === "{") depth++;
-			else if (ch === "}") {
-				depth--;
-				if (depth === 0) {
-					bodyEnd = i + 1;
-					break;
-				}
-			}
-		}
-		assert.ok(bodyEnd > bodyStart, "function body closing brace not found");
-		const body = result.content.slice(bodyStart, bodyEnd);
-
-		assert.equal(
-			/\bwhile\s*\(/.test(body),
-			false,
-			`applyFilterSpec body must not contain a while statement; APPSYNC_JS lint rule @aws-appsync/no-while rejects it. Body was:\n${body}`,
-		);
-		assert.equal(
-			/\bcontinue\s*;/.test(body),
-			false,
-			`applyFilterSpec body must not contain a continue statement; APPSYNC_JS lint rule @aws-appsync/no-continue rejects it. Body was:\n${body}`,
-		);
-	});
-
-	it("applyFilterSpec body contains no C-style for or ++/-- (APPSYNC_JS forbids both)", () => {
-		const projection = makeProjection({
-			fields: [
-				makeField({
-					name: "species",
-					keyword: true,
-					filterables: ["term"],
-				}),
-				makeField({
-					name: "tags",
-					nested: true,
-					subProjection: nestedTagSubProjection(),
-					type: {
-						kind: "Model",
-						name: "Array",
-						indexer: { value: { kind: "Model" } },
-					} as unknown as Type,
-				}),
-			],
-		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
-
-		const declStart = result.content.indexOf("function applyFilterSpec");
-		assert.ok(
-			declStart >= 0,
-			"expected to find applyFilterSpec function in emitted resolver",
-		);
-		const bodyStart = result.content.indexOf("{", declStart);
-		assert.ok(bodyStart > declStart, "function body opening brace not found");
-
-		let depth = 0;
-		let bodyEnd = -1;
-		for (let i = bodyStart; i < result.content.length; i++) {
-			const ch = result.content[i];
-			if (ch === "{") depth++;
-			else if (ch === "}") {
-				depth--;
-				if (depth === 0) {
-					bodyEnd = i + 1;
-					break;
-				}
-			}
-		}
-		assert.ok(bodyEnd > bodyStart, "function body closing brace not found");
-		const body = result.content.slice(bodyStart, bodyEnd);
-
-		assert.equal(
-			/\bfor\s*\(\s*(?:let|var|const)\b[^)]*;/.test(body),
-			false,
-			`applyFilterSpec body must not contain a C-style for(init;cond;update) statement; APPSYNC_JS lint rule @aws-appsync/no-for rejects it. Body was:\n${body}`,
-		);
-		assert.equal(
-			/\+\+|--/.test(body),
-			false,
-			`applyFilterSpec body must not contain ++ or -- operators; APPSYNC_JS lint rule @aws-appsync/no-disallowed-unary-operators rejects them. Body was:\n${body}`,
-		);
-	});
-
-	it("emitted resolver contains no APPSYNC_JS-forbidden constructs (while, continue, C-style for, ++/--, try/catch)", () => {
+	it("emitted resolver passes @aws-appsync/eslint-plugin recommended config", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -895,6 +691,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				makeField({
 					name: "rank",
 					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
 				}),
 				makeField({
 					name: "nickname",
@@ -914,50 +711,64 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		// Strip block comments, line comments, and string literals so the
-		// forbidden-token greps below only inspect executable JS code paths.
-		// Template literals are not used in the emitted resolver runtime body.
-		const stripped = stripCommentsAndStrings(result.content);
+		const { ESLint } = await import("eslint");
+		// @ts-expect-error — plugin ships no type declarations.
+		const { default: appsyncPlugin } = await import(
+			"@aws-appsync/eslint-plugin"
+		);
 
-		const forbidden: { name: string; rule: string; pattern: RegExp }[] = [
-			{
-				name: "while",
-				rule: "@aws-appsync/no-while",
-				pattern: /\bwhile\s*\(/,
-			},
-			{
-				name: "continue",
-				rule: "@aws-appsync/no-continue",
-				pattern: /\bcontinue\s*[;\n}]/,
-			},
-			{
-				name: "C-style for(init;cond;update)",
-				rule: "@aws-appsync/no-for",
-				pattern: /\bfor\s*\([^)]*;[^)]*;[^)]*\)/,
-			},
-			{
-				name: "++ or -- unary operator",
-				rule: "@aws-appsync/no-disallowed-unary-operators",
-				pattern: /\+\+|--/,
-			},
-			{
-				name: "try",
-				rule: "APPSYNC_JS forbids try/catch",
-				pattern: /\btry\s*\{/,
-			},
-			{
-				name: "catch",
-				rule: "APPSYNC_JS forbids try/catch",
-				pattern: /\bcatch\s*[({]/,
-			},
-		];
-
-		for (const { name, rule, pattern } of forbidden) {
-			assert.equal(
-				pattern.test(stripped),
-				false,
-				`emitted resolver must not contain ${name}; ${rule} rejects it.\n--- stripped resolver ---\n${stripped}\n--- end ---`,
+		const dir = await mkdtemp(join(tmpdir(), "appsync-lint-"));
+		try {
+			const filePath = join(dir, "resolver.js");
+			await writeFile(filePath, result.content);
+			// no-recursion is type-aware and needs a real TS project on disk.
+			await writeFile(
+				join(dir, "tsconfig.json"),
+				JSON.stringify({
+					compilerOptions: {
+						target: "ES2022",
+						module: "ES2022",
+						allowJs: true,
+						checkJs: false,
+						noEmit: true,
+					},
+					include: ["resolver.js"],
+				}),
 			);
+
+			const eslint = new ESLint({
+				cwd: dir,
+				overrideConfigFile: true,
+				overrideConfig: [
+					{
+						...appsyncPlugin.configs.recommended,
+						languageOptions: {
+							...appsyncPlugin.configs.recommended.languageOptions,
+							sourceType: "module",
+							ecmaVersion: 2022,
+							parserOptions: {
+								project: "./tsconfig.json",
+								tsconfigRootDir: dir,
+								ecmaVersion: 2022,
+								sourceType: "module",
+							},
+						},
+					},
+				],
+			});
+			const lintResults = await eslint.lintFiles([filePath]);
+			const messages = lintResults.flatMap((r) =>
+				r.messages.map(
+					(m) => `[${m.ruleId ?? "fatal"}] line ${m.line ?? "?"}: ${m.message}`,
+				),
+			);
+			assert.deepEqual(
+				messages,
+				[],
+				`@aws-appsync/eslint-plugin reported issues:\n${messages.join("\n")}\n--- emitted resolver ---\n${result.content}`,
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
 		}
 	});
 
