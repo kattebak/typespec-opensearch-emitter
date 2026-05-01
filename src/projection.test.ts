@@ -553,3 +553,204 @@ describe("projection resolution", () => {
 		assert.equal(nameField.keyword, true);
 	});
 });
+
+describe("@searchInfer", () => {
+	it("infers per-field defaults from each property's type", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Trade {
+        id: string;
+        @keyword counterpartyId: string;
+        notional: float64;
+        validFrom: utcDateTime;
+        active: boolean;
+        notes: string;
+      }
+
+      @searchInfer
+      model TradeSearchDoc is SearchProjection<Trade> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const byName = (n: string) => resolved.fields.find((f) => f.name === n);
+
+		// utcDateTime → range filter, date_histogram(month) agg
+		const validFrom = byName("validFrom");
+		assert.ok(validFrom);
+		assert.deepEqual(validFrom.filterables, ["range"]);
+		assert.deepEqual(validFrom.aggregations, [
+			{ kind: "date_histogram", options: { interval: "month" } },
+		]);
+
+		// numeric → range filter, sum/avg/min/max aggs
+		const notional = byName("notional");
+		assert.ok(notional);
+		assert.deepEqual(notional.filterables, ["range"]);
+		assert.deepEqual(notional.aggregations, [
+			{ kind: "sum" },
+			{ kind: "avg" },
+			{ kind: "min" },
+			{ kind: "max" },
+		]);
+
+		// string + @keyword → term/exists filter, terms agg
+		const counterpartyId = byName("counterpartyId");
+		assert.ok(counterpartyId);
+		assert.deepEqual(counterpartyId.filterables, ["term", "exists"]);
+		assert.deepEqual(counterpartyId.aggregations, [{ kind: "terms" }]);
+
+		// boolean → term filter, no agg
+		const active = byName("active");
+		assert.ok(active);
+		assert.deepEqual(active.filterables, ["term"]);
+		assert.equal(active.aggregations, undefined);
+
+		// free-text string (no @keyword) → no inference (still in projection)
+		const notes = byName("notes");
+		assert.ok(notes);
+		assert.equal(notes.filterables, undefined);
+		assert.equal(notes.aggregations, undefined);
+
+		// Plain string with no decorators → no inference
+		const id = byName("id");
+		assert.ok(id);
+		assert.equal(id.filterables, undefined);
+		assert.equal(id.aggregations, undefined);
+	});
+
+	it("explicit decorators win per axis (filter explicit + agg inferred, and vice versa)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Trade {
+        notional: float64;
+        validFrom: utcDateTime;
+      }
+
+      @searchInfer
+      model TradeSearchDoc is SearchProjection<Trade> {
+        @filterable("term") notional: float64;
+        @aggregatable("sum") validFrom: utcDateTime;
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const notional = resolved.fields.find((f) => f.name === "notional");
+		assert.ok(notional);
+		// Filter axis explicit → only "term".
+		assert.deepEqual(notional.filterables, ["term"]);
+		// Agg axis inferred → numeric metric quartet.
+		assert.deepEqual(notional.aggregations, [
+			{ kind: "sum" },
+			{ kind: "avg" },
+			{ kind: "min" },
+			{ kind: "max" },
+		]);
+
+		const validFrom = resolved.fields.find((f) => f.name === "validFrom");
+		assert.ok(validFrom);
+		// Filter axis inferred → range.
+		assert.deepEqual(validFrom.filterables, ["range"]);
+		// Agg axis explicit → only sum.
+		assert.deepEqual(validFrom.aggregations, [{ kind: "sum" }]);
+	});
+
+	it("@searchSkip excludes a field when it has no other decorators", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Trade {
+        notional: float64;
+        @searchSkip secret: float64;
+      }
+
+      @searchInfer
+      model TradeSearchDoc is SearchProjection<Trade> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const notional = resolved.fields.find((f) => f.name === "notional");
+		assert.ok(notional);
+		assert.deepEqual(notional.filterables, ["range"]);
+
+		// @searchSkip blocks the inference path; without other decorators
+		// the field has no reason to be in the projection.
+		assert.equal(
+			resolved.fields.find((f) => f.name === "secret"),
+			undefined,
+		);
+	});
+
+	it("@searchSkip preserves @searchable field in response shape but suppresses inference", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Trade {
+        notional: float64;
+        @searchable @searchSkip auditTrail: string;
+      }
+
+      @searchInfer
+      model TradeSearchDoc is SearchProjection<Trade> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const auditTrail = resolved.fields.find((f) => f.name === "auditTrail");
+		assert.ok(auditTrail, "@searchable @searchSkip field stays in projection");
+		assert.equal(auditTrail.searchable, true);
+		// Inference suppressed even though it would normally apply (free-text
+		// string would infer nothing anyway, so this also covers @keyword).
+		assert.equal(auditTrail.filterables, undefined);
+		assert.equal(auditTrail.aggregations, undefined);
+	});
+
+	it("without @searchInfer, fields with no decorators stay excluded", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+      model Trade {
+        notional: float64;
+        @searchable name: string;
+      }
+
+      model TradeSearchDoc is SearchProjection<Trade> {}
+    `);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		// Only `name` (which is @searchable) should be present.
+		assert.deepEqual(
+			resolved.fields.map((f) => f.name),
+			["name"],
+		);
+	});
+});

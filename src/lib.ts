@@ -120,6 +120,14 @@ export const $lib = createTypeSpecLibrary({
 		filterable: {
 			description: "Declare filter kinds (term, term_negate, exists, range)",
 		},
+		searchInfer: {
+			description:
+				"Model-level marker — infer per-field filter/agg defaults from each property's type",
+		},
+		searchSkip: {
+			description:
+				"Field-level marker — opt out of @searchInfer inference for this property",
+		},
 	},
 	emitter: {
 		options: {

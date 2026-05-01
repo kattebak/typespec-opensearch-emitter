@@ -15,5 +15,7 @@ extern dec indexSettings(target: Model, settings: valueof string);
 extern dec searchAs(target: ModelProperty, name: valueof string);
 extern dec aggregatable(target: ModelProperty, ...args: valueof unknown[]);
 extern dec filterable(target: ModelProperty, ...kinds: valueof string[]);
+extern dec searchInfer(target: Model);
+extern dec searchSkip(target: ModelProperty);
 
 model SearchProjection<T> {}
