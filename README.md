@@ -266,25 +266,26 @@ In this example:
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
-| `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub. See [Aggregations](#aggregations-aggregatable) for the option shapes. | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("date_histogram", #{ interval: "month" }) validFrom: utcDateTime;` |
-| `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"exists"`, `"range"`. On a `@nested` array field, `"exists"` becomes a path-level nested-existence check (`true` matches docs with at least one nested element; `false` matches docs with none). | `@filterable("term", "term_negate") status: string;` / `@filterable("exists") @nested tags: Tag[];` |
-| `@searchInfer` | `Model` (projection) | Walks the source model's fields and applies type-driven default `@filterable` / `@aggregatable` capabilities (see [Inference](#searchinfer-type-driven-defaults)). Explicit decorators on a field always win on their axis. | `@searchInfer model TradeSearchDoc is SearchProjection<Trade> {}` |
+| `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub or `"terms"`-with-`topHits`. `topHits: N` adds a `top_hits: { size: N }` sub-agg so each bucket carries up to N matching docs. See [Aggregations](#aggregations-aggregatable). | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("terms", #{ topHits: 5 }) tagId: string;` |
+| `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"terms"`, `"exists"`, `"range"`. `"terms"` produces a `<field>In: [Type!]` multi-value input (chip-style filters). On a `@nested` array field, `"exists"` becomes a path-level nested-existence check. | `@filterable("term", "terms") status: string;` / `@filterable("exists") @nested tags: Tag[];` |
+| `@searchInfer` | `Model` (projection) | Walks the source model's fields and applies type-driven default `@filterable` / `@aggregatable` / `@sortable` capabilities (see [Inference](#searchinfer-type-driven-defaults)). Explicit decorators on a field always win on their axis. | `@searchInfer model TradeSearchDoc is SearchProjection<Trade> {}` |
 | `@searchSkip` | `ModelProperty` | Opts a field out of `@searchInfer` inference. The field is still included in response shape if `@searchable` / `@nested` apply; without those, the field is excluded entirely. | `@searchable @searchSkip auditTrail: string;` |
+| `@sortable` | `ModelProperty` | Exposes the field on the projection's `<Type>SortField` enum + `<Type>SortInput` so callers can pass `sortBy: [<Type>SortInput!]`. Inferred for keyword strings, numerics, dates, booleans, enums, and unions when the projection model has `@searchInfer`. Resolver falls back to `_score, _id` when `sortBy` is omitted. | `@sortable @keyword name: string;` |
 
 ## `@searchInfer` (type-driven defaults)
 
 Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical search projection. `@searchInfer` is a model-level decorator that walks the source model's properties and applies a default capability set per type:
 
-| Field type | Default `@filterable` | Default `@aggregatable` |
-| --- | --- | --- |
-| `utcDateTime` / `plainDate` | `range` | `date_histogram(month)` |
-| `string` + `@keyword` | `term`, `exists` | `terms` |
-| free-text `string` (no `@keyword`) | (none) | (none) |
-| numeric (`int*`, `float*`, `decimal`, …) | `range` | `sum`, `avg`, `min`, `max` |
-| `boolean` | `term` | (none) |
-| `@nested` array field | `exists` (path-level) | (none — sub-projection carries its own `@searchInfer` if desired) |
-| Enum / scalar union | `term`, `exists` | `terms` |
-| `bytes` | (none) | (none) |
+| Field type | Default `@filterable` | Default `@aggregatable` | Default `@sortable` |
+| --- | --- | --- | --- |
+| `utcDateTime` / `plainDate` | `range` | `date_histogram(month)` | yes |
+| `string` + `@keyword` | `term`, `terms`, `exists` | `terms` | yes |
+| free-text `string` (no `@keyword`) | (none) | (none) | no |
+| numeric (`int*`, `float*`, `decimal`, …) | `range` | `sum`, `avg`, `min`, `max` | yes |
+| `boolean` | `term`, `terms` | (none) | yes |
+| `@nested` array field | `exists` (path-level) | (none — sub-projection carries its own `@searchInfer` if desired) | no |
+| Enum / scalar union | `term`, `terms`, `exists` | `terms` | yes |
+| `bytes` | (none) | (none) | no |
 
 ### Override semantics
 

@@ -600,16 +600,16 @@ describe("@searchInfer", () => {
 			{ kind: "max" },
 		]);
 
-		// string + @keyword → term/exists filter, terms agg
+		// string + @keyword → term/terms/exists filter, terms agg
 		const counterpartyId = byName("counterpartyId");
 		assert.ok(counterpartyId);
-		assert.deepEqual(counterpartyId.filterables, ["term", "exists"]);
+		assert.deepEqual(counterpartyId.filterables, ["term", "terms", "exists"]);
 		assert.deepEqual(counterpartyId.aggregations, [{ kind: "terms" }]);
 
-		// boolean → term filter, no agg
+		// boolean → term + terms filter, no agg
 		const active = byName("active");
 		assert.ok(active);
-		assert.deepEqual(active.filterables, ["term"]);
+		assert.deepEqual(active.filterables, ["term", "terms"]);
 		assert.equal(active.aggregations, undefined);
 
 		// free-text string (no @keyword) → no inference (still in projection)
@@ -727,6 +727,68 @@ describe("@searchInfer", () => {
 		// string would infer nothing anyway, so this also covers @keyword).
 		assert.equal(auditTrail.filterables, undefined);
 		assert.equal(auditTrail.aggregations, undefined);
+	});
+
+	it("infers sortable on keyword/numeric/date/boolean fields, not on free-text or @nested", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @searchable name: string;
+      }
+      model Trade {
+        @keyword counterpartyId: string;
+        notional: float64;
+        validFrom: utcDateTime;
+        active: boolean;
+        notes: string;                  // free-text — not sortable
+        @nested tags: Tag[];            // nested — not sortable
+      }
+      @searchInfer
+      model TradeSearchDoc is SearchProjection<Trade> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const byName = (n: string) => resolved.fields.find((f) => f.name === n);
+
+		assert.equal(byName("counterpartyId")?.sortable, true);
+		assert.equal(byName("notional")?.sortable, true);
+		assert.equal(byName("validFrom")?.sortable, true);
+		assert.equal(byName("active")?.sortable, true);
+		assert.equal(byName("notes")?.sortable, false);
+		assert.equal(byName("tags")?.sortable, false);
+	});
+
+	it("@sortable on a field is honored even without @searchInfer", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Trade {
+        @searchable name: string;
+        @searchable @sortable @keyword counterpartyId: string;
+      }
+      model TradeSearchDoc is SearchProjection<Trade> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("TradeSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		assert.equal(
+			resolved.fields.find((f) => f.name === "counterpartyId")?.sortable,
+			true,
+		);
+		assert.equal(
+			resolved.fields.find((f) => f.name === "name")?.sortable,
+			false,
+		);
 	});
 
 	it("without @searchInfer, fields with no decorators stay excluded", async () => {

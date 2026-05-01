@@ -17,6 +17,7 @@ import {
 	isSearchable,
 	isSearchInfer,
 	isSearchSkip,
+	isSortable,
 } from "./decorators.js";
 
 function isReachable(
@@ -49,6 +50,7 @@ export interface ResolvedProjectionField {
 	searchable: boolean;
 	keyword: boolean;
 	nested: boolean;
+	sortable: boolean;
 	analyzer?: string;
 	boost?: number;
 	ignoreAbove?: number;
@@ -260,6 +262,15 @@ function resolveProjectionField(
 		explicitAggregations ?? inferred?.aggregations ?? undefined;
 	const filterables = explicitFilterables ?? inferred?.filterables ?? undefined;
 
+	const explicitSortable =
+		(projectionProperty && isSortable(program, projectionProperty)) ||
+		isSortable(program, sourceProperty);
+	const inferredSortable =
+		inferOnModel &&
+		!skipInference &&
+		isSortableType(fieldType, { keyword, nested });
+	const sortable = explicitSortable || inferredSortable;
+
 	return {
 		name: sourceProperty.name,
 		projectedName: searchAs,
@@ -270,6 +281,7 @@ function resolveProjectionField(
 		searchable: isSearchable(program, sourceProperty),
 		keyword,
 		nested,
+		sortable,
 		analyzer,
 		boost,
 		ignoreAbove,
@@ -307,22 +319,22 @@ function inferDirectives(
 
 	if (type.kind === "Enum") {
 		return {
-			filterables: ["term", "exists"],
+			filterables: ["term", "terms", "exists"],
 			aggregations: [{ kind: "terms" }],
 		};
 	}
 	if (type.kind === "Union") {
 		return {
-			filterables: ["term", "exists"],
+			filterables: ["term", "terms", "exists"],
 			aggregations: [{ kind: "terms" }],
 		};
 	}
 	if (type.kind === "Boolean") {
-		return { filterables: ["term"] };
+		return { filterables: ["term", "terms"] };
 	}
 	if (type.kind === "Scalar") {
 		const root = scalarRootName(type);
-		if (root === "boolean") return { filterables: ["term"] };
+		if (root === "boolean") return { filterables: ["term", "terms"] };
 		if (root === "utcDateTime" || root === "plainDate") {
 			return {
 				filterables: ["range"],
@@ -345,7 +357,7 @@ function inferDirectives(
 		if (root === "string") {
 			if (flags.keyword) {
 				return {
-					filterables: ["term", "exists"],
+					filterables: ["term", "terms", "exists"],
 					aggregations: [{ kind: "terms" }],
 				};
 			}
@@ -366,6 +378,31 @@ function inferDirectives(
 		return {};
 	}
 	return {};
+}
+
+/**
+ * @searchInfer treats a field as sortable when its type unambiguously orders:
+ * keyword strings, numerics, dates, and booleans. Free-text strings and
+ * @nested arrays are excluded — sorting them is either ill-defined
+ * (text relevance is sort by score) or requires picking an element.
+ */
+function isSortableType(
+	type: Type,
+	flags: { keyword: boolean; nested: boolean },
+): boolean {
+	if (flags.nested) return false;
+	if (type.kind === "Boolean") return true;
+	if (type.kind === "Enum" || type.kind === "Union") return true;
+	if (type.kind === "String") return flags.keyword;
+	if (type.kind === "Scalar") {
+		const root = scalarRootName(type);
+		if (!root) return false;
+		if (root === "boolean") return true;
+		if (root === "utcDateTime" || root === "plainDate") return true;
+		if (isNumericRootName(root)) return true;
+		if (root === "string") return flags.keyword;
+	}
+	return false;
 }
 
 function scalarRootName(type: Type): string | undefined {

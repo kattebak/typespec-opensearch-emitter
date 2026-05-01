@@ -12,6 +12,7 @@ export {
 	$searchable,
 	$searchInfer,
 	$searchSkip,
+	$sortable,
 	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
@@ -25,6 +26,7 @@ export {
 	isSearchable,
 	isSearchInfer,
 	isSearchSkip,
+	isSortable,
 	namespace,
 } from "./decorators.js";
 export { $onEmit } from "./emitter.js";

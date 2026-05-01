@@ -113,11 +113,12 @@ export function request(ctx) {
 	const searchAfter = args.after ? JSON.parse(util.base64Decode(args.after)) : undefined;
 
 	const query = buildQuery(args.query, args.filter, args.searchFilter);
+	const sort = buildSort(args.sortBy);
 
 	const body = {
 		size: size + 1,
 		track_total_hits: ${options.trackTotalHitsUpTo},
-		sort: [{ _score: "desc" }, { _id: "asc" }],
+		sort,
 		query,${aggsBlock}
 	};
 
@@ -198,6 +199,23 @@ function buildQuery(queryText, filter, searchFilter) {
 			...(mustNots.length > 0 ? { must_not: mustNots } : {}),
 		},
 	};
+}
+
+function buildSort(sortBy) {
+	const fallback = [{ _score: "desc" }, { _id: "asc" }];
+	if (!sortBy || sortBy.length === 0) {
+		return fallback;
+	}
+	const out = [];
+	for (const entry of sortBy) {
+		if (entry && entry.field) {
+			const direction = entry.direction === "ASC" ? "asc" : "desc";
+			out.push({ [entry.field]: direction });
+		}
+	}
+	// Always tie-break on _id for stable cursor pagination.
+	out.push({ _id: "asc" });
+	return out;
 }
 
 function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
@@ -292,6 +310,10 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 					} else if (node.kind === "term_negate") {
 						if (value != null) {
 							outMustNots.push({ term: { [node.field]: value } });
+						}
+					} else if (node.kind === "terms") {
+						if (value != null && value.length > 0) {
+							outFilters.push({ terms: { [node.field]: value } });
 						}
 					} else if (node.kind === "exists") {
 						if (value != null) {
@@ -391,19 +413,25 @@ function renderAggInner(entry: AggregationEntry): string {
 		const rangesLit = JSON.stringify(ranges);
 		return `{ ${aggType}: { field: ${fieldLit}, ranges: ${rangesLit} } }`;
 	}
-	if (entry.kind === "terms" && entry.options && "sub" in entry.options) {
-		const sub = entry.options.sub ?? {};
-		const subEntries = Object.entries(sub);
-		if (subEntries.length === 0) {
+	if (entry.kind === "terms" && entry.options) {
+		const opts = entry.options as {
+			sub?: Record<string, { kind: string; field: string }>;
+			topHits?: number;
+		};
+		const subEntries = Object.entries(opts.sub ?? {});
+		const hasSub = subEntries.length > 0;
+		const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
+		if (!hasSub && !hasTopHits) {
 			return `{ ${aggType}: { field: ${fieldLit} } }`;
 		}
-		const subLines = subEntries
-			.map(
-				([name, spec]) =>
-					`${JSON.stringify(name)}: { ${spec.kind}: { field: ${JSON.stringify(spec.field)} } }`,
-			)
-			.join(", ");
-		return `{ ${aggType}: { field: ${fieldLit} }, aggs: { ${subLines} } }`;
+		const subLines = subEntries.map(
+			([name, spec]) =>
+				`${JSON.stringify(name)}: { ${spec.kind}: { field: ${JSON.stringify(spec.field)} } }`,
+		);
+		if (hasTopHits) {
+			subLines.push(`"hits": { top_hits: { size: ${opts.topHits} } }`);
+		}
+		return `{ ${aggType}: { field: ${fieldLit} }, aggs: { ${subLines.join(", ")} } }`;
 	}
 	return `{ ${aggType}: { field: ${fieldLit} } }`;
 }
@@ -426,17 +454,22 @@ function renderResponseAggregationLine(entry: AggregationEntry): string {
 		: `parsedBody.aggregations?.${entry.aggName}`;
 	switch (entry.kind) {
 		case "terms": {
-			const subEntries =
-				entry.options && "sub" in entry.options && entry.options.sub
-					? Object.entries(entry.options.sub)
-					: [];
-			if (subEntries.length === 0) {
+			const opts = (entry.options ?? {}) as {
+				sub?: Record<string, unknown>;
+				topHits?: number;
+			};
+			const subEntries = Object.entries(opts.sub ?? {});
+			const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
+			if (subEntries.length === 0 && !hasTopHits) {
 				return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
 			}
 			const subFields = subEntries
 				.map(([name]) => `, ${name}: b.${name}?.value ?? null`)
 				.join("");
-			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count${subFields} })),`;
+			const hitsField = hasTopHits
+				? `, hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)`
+				: "";
+			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count${subFields}${hitsField} })),`;
 		}
 		case "cardinality":
 			return `\t\t\t${entry.aggName}: ${path}?.value ?? 0,`;

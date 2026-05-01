@@ -50,6 +50,17 @@ export function isSearchSkip(program: Program, target: ModelProperty): boolean {
 	return program.stateSet(StateKeys.searchSkip).has(target);
 }
 
+export function $sortable(
+	context: DecoratorContext,
+	target: ModelProperty,
+): void {
+	context.program.stateSet(StateKeys.sortable).add(target);
+}
+
+export function isSortable(program: Program, target: ModelProperty): boolean {
+	return program.stateSet(StateKeys.sortable).has(target);
+}
+
 export function $keyword(
 	context: DecoratorContext,
 	target: ModelProperty,
@@ -281,6 +292,12 @@ export interface RangeOptions {
 
 export interface TermsOptions {
 	sub?: Record<string, SubAggSpec>;
+	/**
+	 * Per-bucket `top_hits` sub-aggregation size. Surfaces up to N matching
+	 * docs on each terms bucket so callers can avoid a per-bucket round-trip
+	 * to fetch examples. Not inferred by default — opt-in only.
+	 */
+	topHits?: number;
 }
 
 export type AggregationOptions =
@@ -391,45 +408,64 @@ function validateOptions(
 		if (!isPlainObject(raw)) {
 			reportDiagnostic(context.program, {
 				code: "invalid-aggregation-options",
-				format: { kind, reason: "expected { sub: {...} }" },
+				format: { kind, reason: "expected { sub: {...}, topHits?: N }" },
 				target,
 			});
 			return undefined;
 		}
-		if (raw.sub === undefined) {
-			return {};
-		}
-		if (!isPlainObject(raw.sub)) {
-			reportDiagnostic(context.program, {
-				code: "invalid-aggregation-options",
-				format: {
-					kind,
-					reason: "sub must map sub-agg names to { kind, field }",
-				},
-				target,
-			});
-			return undefined;
-		}
-		const sub: Record<string, SubAggSpec> = {};
-		for (const [name, spec] of Object.entries(raw.sub)) {
-			if (
-				!isPlainObject(spec) ||
-				!isSubAggKind(spec.kind) ||
-				typeof spec.field !== "string"
-			) {
+		const result: TermsOptions = {};
+		if (raw.sub !== undefined) {
+			if (!isPlainObject(raw.sub)) {
 				reportDiagnostic(context.program, {
 					code: "invalid-aggregation-options",
 					format: {
 						kind,
-						reason: `sub-agg "${name}" must be { kind: <metric>, field: <string> }`,
+						reason: "sub must map sub-agg names to { kind, field }",
 					},
 					target,
 				});
 				return undefined;
 			}
-			sub[name] = { kind: spec.kind, field: spec.field };
+			const sub: Record<string, SubAggSpec> = {};
+			for (const [name, spec] of Object.entries(raw.sub)) {
+				if (
+					!isPlainObject(spec) ||
+					!isSubAggKind(spec.kind) ||
+					typeof spec.field !== "string"
+				) {
+					reportDiagnostic(context.program, {
+						code: "invalid-aggregation-options",
+						format: {
+							kind,
+							reason: `sub-agg "${name}" must be { kind: <metric>, field: <string> }`,
+						},
+						target,
+					});
+					return undefined;
+				}
+				sub[name] = { kind: spec.kind, field: spec.field };
+			}
+			result.sub = sub;
 		}
-		return { sub };
+		if (raw.topHits !== undefined) {
+			if (
+				typeof raw.topHits !== "number" ||
+				!Number.isInteger(raw.topHits) ||
+				raw.topHits <= 0
+			) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: {
+						kind,
+						reason: "topHits must be a positive integer",
+					},
+					target,
+				});
+				return undefined;
+			}
+			result.topHits = raw.topHits;
+		}
+		return result;
 	}
 	reportDiagnostic(context.program, {
 		code: "invalid-aggregation-options",
@@ -551,6 +587,7 @@ export function hasAggregatable(
 export const FILTERABLE_KINDS = [
 	"term",
 	"term_negate",
+	"terms",
 	"exists",
 	"range",
 ] as const;
