@@ -900,6 +900,41 @@ describe("@searchInfer", () => {
 		assert.deepEqual(coordsFieldNames, ["latitude", "longitude"]);
 	});
 
+	it("recurses into a nested type whose model has @searchInfer, even when the parent projection lacks it (issue #102)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      @searchInfer
+      model Address {
+        @keyword country: string;
+        @keyword city: string;
+      }
+      model Location {
+        @keyword name: string;
+        address: Address;
+      }
+      model LocationSearchDoc is SearchProjection<Location> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("LocationSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		// LocationSearchDoc has no @searchInfer of its own. Without #102,
+		// the address sub-projection wouldn't be built at all because the
+		// parent walker only recurses when the parent is @searchInfer.
+		const address = resolved.fields.find((f) => f.name === "address");
+		assert.ok(
+			address?.subProjection,
+			"address should auto-recurse because Address has @searchInfer",
+		);
+		const subFieldNames = address.subProjection.fields.map((f) => f.name);
+		assert.deepEqual(subFieldNames, ["country", "city"]);
+	});
+
 	it("@searchSkip on a struct field opts the entire sub-tree out of recursion", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
@@ -958,17 +993,24 @@ describe("@searchInfer", () => {
 });
 
 describe("emitted resolver size budget", () => {
-	it("stays under AppSync's 32 KB code cap on a wide @searchInfer projection (issue #99)", async () => {
+	it("stays under AppSync's 32 KB code cap on a wide @searchInfer projection (issues #99, #101)", async () => {
+		// Consumer's shape from the v1.22.0 incident: 4 nested-record types
+		// each carrying @searchInfer (Address / PhoneNumberRecord / EmailRecord
+		// / PersonRecord), plus 4 simpler sub-models, all reachable from the
+		// root Counterparty projection. Pre-#101 this hit 38 KB and the
+		// AppSync deploy was rejected.
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
-      model Address { @keyword country: string; @keyword city: string; postalCode: string; }
-      model Phone { @keyword number: string; @keyword countryCode: string; }
+      @searchInfer model Address { @keyword country: string; @keyword city: string; postalCode: string; }
+      @searchInfer model PhoneNumberRecord { @keyword number: string; @keyword countryCode: string; }
+      @searchInfer model EmailRecord { @keyword email: string; @keyword type: string; }
+      @searchInfer model PersonRecord { @keyword name: string; @keyword role: string; }
       model Tag { @keyword tagId: string; @keyword label: string; }
       model Group { @keyword groupId: string; @keyword name: string; }
       model Approval { @keyword type: string; validFrom: utcDateTime; validTo: utcDateTime; }
       model Reference { @keyword refId: string; @keyword source: string; }
       model Location { address: Address; @keyword name: string; }
-      model Contact { @keyword name: string; phones: Phone[]; }
+      model Contact { name: PersonRecord; phone: PhoneNumberRecord; email: EmailRecord; }
       model Counterparty {
         @keyword id: string;
         @keyword name: string;

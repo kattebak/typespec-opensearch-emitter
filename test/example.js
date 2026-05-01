@@ -141,12 +141,14 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 	assert.ok(resolver.includes("const FILTER_SPEC = ["));
 	assert.ok(resolver.includes("applyFilterSpec(FILTER_SPEC, searchFilter"));
 	// FILTER_SPEC entries use compact single-letter keys to fit under
-	// AppSync's 32 KB resolver code cap (issue #99).
+	// AppSync's 32 KB resolver code cap (issue #99). Range emits ONE
+	// entry per field; the four bound input lookups (Gte/Lte/Gt/Lt) are
+	// done at iteration time inside applyFilterSpec (issue #101).
 	assert.ok(resolver.includes('i:"tags"'));
 	assert.ok(resolver.includes('k:"nested"'));
 	assert.ok(resolver.includes('p:"tags"'));
-	assert.ok(resolver.includes('i:"rankGte"'));
-	assert.ok(resolver.includes('b:"gte"'));
+	assert.ok(resolver.includes('{i:"rank",k:"range"'));
+	assert.ok(!resolver.includes('"rankGte"'));
 });
 
 test("emits nested-aware aggregations on nested sub-projections", async () => {
