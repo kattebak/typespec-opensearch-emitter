@@ -6,3 +6,8 @@ options:
     emitter-output-dir: "{cwd}/build/opensearch-emit"
     graphql:
       emit: true
+      # Force pipeline mode + verbose source for the legacy test assertions
+      # (which substring-match the readable pipeline shape). New test
+      # tspconfig.monolithic.yaml exercises monolithic mode separately.
+      minify: false
+      monolithic-threshold-bytes: 0
