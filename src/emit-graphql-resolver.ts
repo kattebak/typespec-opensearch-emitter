@@ -274,9 +274,12 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 				const outMustNots = item.outMustNots;
 				const rangeBuckets = {};
 
+				// FILTER_SPEC nodes use compact keys to fit under AppSync's 32 KB
+				// resolver code cap (issue #99): i=inputName, k=kind, f=field,
+				// p=path, c=children, b=bound. See stringifyNode in the emitter.
 				for (const node of spec) {
-					const value = input[node.inputName];
-					if (node.kind === "nested") {
+					const value = input[node.i];
+					if (node.k === "nested") {
 						if (value != null) {
 							const childFilters = [];
 							const childMustNots = [];
@@ -287,7 +290,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 							}
 							slots[tail] = {
 								kind: "process",
-								spec: node.children,
+								spec: node.c,
 								input: value,
 								outFilters: childFilters,
 								outMustNots: childMustNots,
@@ -295,7 +298,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 							tail = tail + 1;
 							slots[tail] = {
 								kind: "finalize",
-								path: node.path,
+								path: node.p,
 								childFilters,
 								childMustNots,
 								parentFilters: outFilters,
@@ -303,30 +306,46 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 							};
 							tail = tail + 1;
 						}
-					} else if (node.kind === "term") {
+					} else if (node.k === "object") {
 						if (value != null) {
-							outFilters.push({ term: { [node.field]: value } });
+							if (tail + 1 > slots.length) {
+								util.error(
+									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS resolver",
+								);
+							}
+							slots[tail] = {
+								kind: "process",
+								spec: node.c,
+								input: value,
+								outFilters,
+								outMustNots,
+							};
+							tail = tail + 1;
 						}
-					} else if (node.kind === "term_negate") {
+					} else if (node.k === "term") {
 						if (value != null) {
-							outMustNots.push({ term: { [node.field]: value } });
+							outFilters.push({ term: { [node.f]: value } });
 						}
-					} else if (node.kind === "terms") {
+					} else if (node.k === "term_negate") {
+						if (value != null) {
+							outMustNots.push({ term: { [node.f]: value } });
+						}
+					} else if (node.k === "terms") {
 						if (value != null && value.length > 0) {
-							outFilters.push({ terms: { [node.field]: value } });
+							outFilters.push({ terms: { [node.f]: value } });
 						}
-					} else if (node.kind === "exists") {
+					} else if (node.k === "exists") {
 						if (value != null) {
 							if (value === true) {
-								outFilters.push({ exists: { field: node.field } });
+								outFilters.push({ exists: { field: node.f } });
 							} else {
-								outMustNots.push({ exists: { field: node.field } });
+								outMustNots.push({ exists: { field: node.f } });
 							}
 						}
-					} else if (node.kind === "nested_exists") {
+					} else if (node.k === "nested_exists") {
 						if (value != null) {
 							const nestedClause = {
-								nested: { path: node.path, query: { match_all: {} } },
+								nested: { path: node.p, query: { match_all: {} } },
 							};
 							if (value === true) {
 								outFilters.push(nestedClause);
@@ -334,10 +353,10 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 								outMustNots.push(nestedClause);
 							}
 						}
-					} else if (node.kind === "range") {
+					} else if (node.k === "range") {
 						if (value != null) {
-							const bucket = (rangeBuckets[node.field] = rangeBuckets[node.field] || {});
-							bucket[node.bound] = value;
+							const bucket = (rangeBuckets[node.f] = rangeBuckets[node.f] || {});
+							bucket[node.b] = value;
 						}
 					}
 				}
@@ -365,17 +384,26 @@ function stringifySpec(nodes: FilterSpecNode[]): string {
 }
 
 function stringifyNode(node: FilterSpecNode): string {
+	// FILTER_SPEC entries use single-letter keys to keep wide projections
+	// under AppSync's 32 KB resolver-code cap (issue #99). The reader is
+	// applyFilterSpec inside the emitted resolver; keys must match there:
+	//   i = inputName, k = kind, f = field, p = path, c = children, b = bound.
+	const i = JSON.stringify(node.inputName);
 	if (node.kind === "nested") {
 		const children = stringifySpec(node.children ?? []);
-		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "nested", path: ${JSON.stringify(node.path ?? "")}, children: ${children} }`;
+		return `{i:${i},k:"nested",p:${JSON.stringify(node.path ?? "")},c:${children}}`;
+	}
+	if (node.kind === "object") {
+		const children = stringifySpec(node.children ?? []);
+		return `{i:${i},k:"object",c:${children}}`;
 	}
 	if (node.kind === "nested_exists") {
-		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "nested_exists", path: ${JSON.stringify(node.path ?? "")} }`;
+		return `{i:${i},k:"nested_exists",p:${JSON.stringify(node.path ?? "")}}`;
 	}
 	if (node.kind === "range") {
-		return `{ inputName: ${JSON.stringify(node.inputName)}, kind: "range", field: ${JSON.stringify(node.field ?? "")}, bound: ${JSON.stringify(node.bound ?? "")} }`;
+		return `{i:${i},k:"range",f:${JSON.stringify(node.field ?? "")},b:${JSON.stringify(node.bound ?? "")}}`;
 	}
-	return `{ inputName: ${JSON.stringify(node.inputName)}, kind: ${JSON.stringify(node.kind)}, field: ${JSON.stringify(node.field ?? "")} }`;
+	return `{i:${i},k:${JSON.stringify(node.kind)},f:${JSON.stringify(node.field ?? "")}}`;
 }
 
 function renderAggsBlock(aggregations: AggregationEntry[]): string {

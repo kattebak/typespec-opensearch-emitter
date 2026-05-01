@@ -143,7 +143,7 @@ function renderSearchFilterField(
 	program: Program,
 	node: FilterSpecNode,
 ): string {
-	if (node.kind === "nested") {
+	if (node.kind === "nested" || node.kind === "object") {
 		return `  ${node.inputName}: ${node.nestedTypeName ?? "String"}`;
 	}
 	if (node.kind === "exists" || node.kind === "nested_exists") {

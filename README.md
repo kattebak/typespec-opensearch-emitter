@@ -287,6 +287,15 @@ Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical 
 | Enum / scalar union | `term`, `terms`, `exists` | `terms` | yes |
 | `bytes` | (none) | (none) | no |
 
+### Nested struct recursion
+
+When a field's type is a TypeSpec model (struct) — either inline (`address: Address`) or as an array (`tags: Tag[]`) — `@searchInfer` recurses into the nested model's properties and applies the same inference table. The parent's `<Type>SearchFilter` exposes `<fieldName>: <NestedType>SearchFilter`, and a separate `<NestedType>SearchFilter` input is emitted alongside.
+
+- **`@nested` array** (OS-nested mapping): filter clauses wrap in `bool.filter[ nested + inner ]`.
+- **Inline struct** (no `@nested`): children carry dotted OS field paths (`address.country`) — no nested wrapper.
+- **Recursion depth**: unbounded; cycles are guarded by a visited-name set.
+- **Opt-out**: `@searchSkip` on the parent's field suppresses the virtual sub-projection (and the parent skips the field when no other decorator keeps it in the projection).
+
 ### Override semantics
 
 - **No decorators on the field**: gets the inferred set from the table.

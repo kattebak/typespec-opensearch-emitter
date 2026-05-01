@@ -140,11 +140,13 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 
 	assert.ok(resolver.includes("const FILTER_SPEC = ["));
 	assert.ok(resolver.includes("applyFilterSpec(FILTER_SPEC, searchFilter"));
-	assert.ok(resolver.includes('inputName: "tags"'));
-	assert.ok(resolver.includes('kind: "nested"'));
-	assert.ok(resolver.includes('path: "tags"'));
-	assert.ok(resolver.includes('inputName: "rankGte"'));
-	assert.ok(resolver.includes('bound: "gte"'));
+	// FILTER_SPEC entries use compact single-letter keys to fit under
+	// AppSync's 32 KB resolver code cap (issue #99).
+	assert.ok(resolver.includes('i:"tags"'));
+	assert.ok(resolver.includes('k:"nested"'));
+	assert.ok(resolver.includes('p:"tags"'));
+	assert.ok(resolver.includes('i:"rankGte"'));
+	assert.ok(resolver.includes('b:"gte"'));
 });
 
 test("emits nested-aware aggregations on nested sub-projections", async () => {
