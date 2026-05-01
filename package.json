@@ -30,7 +30,8 @@
 		"prepublishOnly": "tsc"
 	},
 	"dependencies": {
-		"@typespec/compiler": "^1.4.0"
+		"@typespec/compiler": "^1.4.0",
+		"terser": "^5.46.2"
 	},
 	"devDependencies": {
 		"@aws-appsync/eslint-plugin": "^2.0.2",

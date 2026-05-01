@@ -87,53 +87,56 @@ function loadBuildQuery(
 	return factory();
 }
 
+type EmitResult = Awaited<ReturnType<typeof emitGraphQLResolver>>;
+
 /**
  * Returns a concatenation of every emitted file (resolver-level + each
  * pipeline function). Lets assertions that don't care WHICH file something
  * lands in just substring-check the union.
  */
-function combinedContent(
-	result: ReturnType<typeof emitGraphQLResolver>,
-): string {
+function combinedContent(result: EmitResult): string {
 	return [result.content, ...result.functions.map((fn) => fn.content)].join(
 		"\n",
 	);
 }
 
-function prepareFunctionContent(
-	result: ReturnType<typeof emitGraphQLResolver>,
-): string {
+function prepareFunctionContent(result: EmitResult): string {
 	const fn = result.functions.find((f) => f.name === "prepare");
 	if (!fn) throw new Error("missing prepare function");
 	return fn.content;
 }
 
-function searchFunctionContent(
-	result: ReturnType<typeof emitGraphQLResolver>,
-): string {
+function searchFunctionContent(result: EmitResult): string {
 	const fn = result.functions.find((f) => f.name === "search");
 	if (!fn) throw new Error("missing search function");
 	return fn.content;
 }
 
+// Pipeline-mode options for the legacy assertions in this file. Setting the
+// monolithic threshold to 0 forces the emitter into pipeline mode (issue
+// #112) so the existing pipeline-shape tests stay valid; `minify: false`
+// keeps the source readable for substring assertions. Monolithic-mode and
+// threshold-flip tests live further down.
 const defaultOptions = {
 	defaultPageSize: 20,
 	maxPageSize: 100,
 	trackTotalHitsUpTo: 10000,
+	minify: false,
+	monolithicThresholdBytes: 0,
 };
 
 describe("emitGraphQLResolver", () => {
-	it("generates resolver file with correct name", () => {
+	it("generates resolver file with correct name", async () => {
 		const projection = makeProjection({ fields: [] });
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.equal(result.fileName, "pet-search-doc-resolver.js");
 		assert.equal(result.queryFieldName, "searchPet");
 	});
 
-	it("emits a pipeline shape: resolver + prepare (NONE) + search (OPENSEARCH) functions", () => {
+	it("emits a pipeline shape: resolver + prepare (NONE) + search (OPENSEARCH) functions", async () => {
 		const projection = makeProjection({ fields: [] });
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.equal(result.functions.length, 2);
 		assert.deepEqual(
@@ -159,39 +162,39 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("includes index name in request path", () => {
+	it("includes index name in request path", async () => {
 		const projection = makeProjection({
 			indexName: "pets_v1",
 			fields: [],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		// Index name lives in the search-datasource pipeline function only.
 		assert.ok(searchFunctionContent(result).includes("/pets_v1/_search"));
 	});
 
-	it("includes text fields in multi_match", () => {
+	it("includes text fields in multi_match", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" }), makeField({ name: "breed" })],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes('"name","breed"'));
 	});
 
-	it("includes keyword fields in filter logic", () => {
+	it("includes keyword fields in filter logic", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "species", keyword: true }),
 				makeField({ name: "status", keyword: true }),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes('"species","status"'));
 	});
 
-	it("excludes nested and sub-projection fields from text fields", () => {
+	it("excludes nested and sub-projection fields from text fields", async () => {
 		const subProjection = {
 			projectionModel: { name: "TagSearchDoc" },
 		} as unknown as ResolvedProjection;
@@ -203,12 +206,12 @@ describe("emitGraphQLResolver", () => {
 				makeField({ name: "owner", subProjection }),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes('["name"]'));
 	});
 
-	it("excludes non-searchable filter-only fields from text_fields and keyword_fields but includes them in FILTER_SPEC", () => {
+	it("excludes non-searchable filter-only fields from text_fields and keyword_fields but includes them in FILTER_SPEC", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "name" }),
@@ -220,7 +223,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
 			combinedContent(result).includes('fields: ["name"]'),
@@ -234,7 +237,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("excludes non-searchable agg-only fields from text/keyword sets but includes them in aggs", () => {
+	it("excludes non-searchable agg-only fields from text/keyword sets but includes them in aggs", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "name" }),
@@ -246,7 +249,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes('fields: ["name"]'));
 		assert.ok(
@@ -255,9 +258,10 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("respects custom page size and track_total_hits options", () => {
+	it("respects custom page size and track_total_hits options", async () => {
 		const projection = makeProjection({ fields: [] });
-		const result = emitGraphQLResolver(projection, {
+		const result = await emitGraphQLResolver(projection, {
+			...defaultOptions,
 			defaultPageSize: 10,
 			maxPageSize: 50,
 			trackTotalHitsUpTo: 5000,
@@ -268,21 +272,21 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(combinedContent(result).includes("track_total_hits: 5000"));
 	});
 
-	it("uses projectedName for field references", () => {
+	it("uses projectedName for field references", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name", projectedName: "displayName" })],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes('"displayName"'));
 		assert.ok(!combinedContent(result).includes('"name"'));
 	});
 
-	it("has no import statements except aws-appsync/utils", () => {
+	it("has no import statements except aws-appsync/utils", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" })],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		// Each emitted file (resolver + each pipeline function) has at most
 		// one import — and only `@aws-appsync/utils`.
@@ -299,9 +303,9 @@ describe("emitGraphQLResolver", () => {
 		}
 	});
 
-	it("falls back to _score desc then _id asc when sortBy arg is omitted", () => {
+	it("falls back to _score desc then _id asc when sortBy arg is omitted", async () => {
 		const projection = makeProjection({ fields: [] });
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes('{ _score: "desc" }'));
 		assert.ok(combinedContent(result).includes('{ _id: "asc" }'));
@@ -311,10 +315,10 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(combinedContent(result).includes("function buildSort(sortBy)"));
 	});
 
-	it("buildSort honors sortBy arg with multiple fields, appending _id tie-break", () => {
+	it("buildSort honors sortBy arg with multiple fields, appending _id tie-break", async () => {
 		const projection = makeProjection({ fields: [] });
 		const source = prepareFunctionContent(
-			emitGraphQLResolver(projection, defaultOptions),
+			await emitGraphQLResolver(projection, defaultOptions),
 		);
 		const stripped = source
 			.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
@@ -343,26 +347,26 @@ describe("emitGraphQLResolver", () => {
 		]);
 	});
 
-	it("uses search_after for cursor pagination", () => {
+	it("uses search_after for cursor pagination", async () => {
 		const projection = makeProjection({ fields: [] });
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes("search_after"));
 		assert.ok(combinedContent(result).includes("base64Decode"));
 		assert.ok(combinedContent(result).includes("base64Encode"));
 	});
 
-	it("omits aggs block when no aggregations", () => {
+	it("omits aggs block when no aggregations", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" })],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(!combinedContent(result).includes("aggs:"));
 		assert.ok(!combinedContent(result).includes("aggregations:"));
 	});
 
-	it("emits aggs block in request when fields have aggregations", () => {
+	it("emits aggs block in request when fields have aggregations", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -381,7 +385,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes("aggs:"));
 		assert.ok(
@@ -396,7 +400,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits cardinality and missing aggs in request", () => {
+	it("emits cardinality and missing aggs in request", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -411,7 +415,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
 			combinedContent(result).includes(
@@ -425,7 +429,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits date_histogram with calendar_interval option", () => {
+	it("emits date_histogram with calendar_interval option", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -437,7 +441,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
 				'byValidFromOverTime: { date_histogram: { field: "validFrom", calendar_interval: "month" } }',
@@ -451,7 +455,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits range buckets with the configured ranges", () => {
+	it("emits range buckets with the configured ranges", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -472,7 +476,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
 				'byNotionalRange: { range: { field: "notional", ranges: [{"to":1000},{"from":1000,"to":10000},{"from":10000}] } }',
@@ -485,7 +489,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits terms with sub-aggregations", () => {
+	it("emits terms with sub-aggregations", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -502,7 +506,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
 				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }',
@@ -515,7 +519,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits top_hits sub-agg under terms when topHits option is set", () => {
+	it("emits top_hits sub-agg under terms when topHits option is set", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -525,7 +529,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
 			combinedContent(result).includes(
@@ -541,7 +545,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits combined sub-aggs and top_hits when both options are set", () => {
+	it("emits combined sub-aggs and top_hits when both options are set", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -559,7 +563,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
 				'aggs: { "latestValidTo": { max: { field: "validTo" } }, "hits": { top_hits: { size: 3 } } }',
@@ -572,7 +576,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits sum/avg/min/max numeric metric aggs", () => {
+	it("emits sum/avg/min/max numeric metric aggs", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -587,7 +591,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
 			combinedContent(result).includes(
@@ -616,7 +620,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("wraps aggs inside @nested sub-projection in nested+inner block", () => {
+	it("wraps aggs inside @nested sub-projection in nested+inner block", async () => {
 		const subProjection = {
 			projectionModel: { name: "TagSearchDoc" },
 			sourceModel: { name: "Tag" },
@@ -650,7 +654,7 @@ describe("emitGraphQLResolver", () => {
 			],
 		});
 
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		// All nested aggs sharing a path are grouped under one wrapper
 		// (`__n_<path>` key) — saves the per-agg `{ nested: ..., aggs: { inner: ... } }`
@@ -678,7 +682,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("does not wrap top-level aggregations in nested block", () => {
+	it("does not wrap top-level aggregations in nested block", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -693,7 +697,7 @@ describe("emitGraphQLResolver", () => {
 			],
 		});
 
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
 				'byTag: { terms: { field: "tags.keyword" } }',
@@ -703,7 +707,7 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(!combinedContent(result).includes("byTag: { nested:"));
 	});
 
-	it("emits aggregations mapping in response", () => {
+	it("emits aggregations mapping in response", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -723,7 +727,7 @@ describe("emitGraphQLResolver", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes("aggregations: {"));
 		assert.ok(
@@ -763,7 +767,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		} as unknown as ResolvedProjection;
 	}
 
-	it("emits a static FILTER_SPEC literal for filterable fields", () => {
+	it("emits a static FILTER_SPEC literal for filterable fields", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -778,7 +782,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(combinedContent(result).includes("const FILTER_SPEC = ["));
 		assert.ok(combinedContent(result).includes('"species"'));
 		assert.ok(combinedContent(result).includes('"speciesNot"'));
@@ -790,27 +794,29 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		assert.ok(!combinedContent(result).includes('"rankGte"'));
 	});
 
-	it("emits an empty FILTER_SPEC when no @filterable fields", () => {
+	it("emits an empty FILTER_SPEC when no @filterable fields", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" })],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(combinedContent(result).includes("const FILTER_SPEC = []"));
 	});
 
-	it("buildQuery returns match_all when no inputs", () => {
+	it("buildQuery returns match_all when no inputs", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" })],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		assert.deepEqual(buildQuery(undefined, undefined, undefined), {
 			match_all: {},
 		});
 	});
 
-	it("buildQuery emits flat term filter into bool.filter", () => {
+	it("buildQuery emits flat term filter into bool.filter", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -821,7 +827,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, { species: "cat" });
 		assert.deepEqual(result, {
@@ -831,7 +839,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery emits terms (multi-value) filter as bool.filter[terms]", () => {
+	it("buildQuery emits terms (multi-value) filter as bool.filter[terms]", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -842,7 +850,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, {
 			speciesIn: ["cat", "dog"],
@@ -854,7 +864,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery skips terms filter when array is empty", () => {
+	it("buildQuery skips terms filter when array is empty", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -865,13 +875,15 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, { speciesIn: [] });
 		assert.deepEqual(result, { match_all: {} });
 	});
 
-	it("buildQuery emits flat term_negate into bool.must_not", () => {
+	it("buildQuery emits flat term_negate into bool.must_not", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -882,7 +894,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, { speciesNot: "cat" });
 		assert.deepEqual(result, {
@@ -892,7 +906,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery wraps nested term in nested+bool.filter under outer filter", () => {
+	it("buildQuery wraps nested term in nested+bool.filter under outer filter", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -908,7 +922,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, {
 			tags: { name: "vip" },
@@ -929,7 +945,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery wraps nested term_negate inside nested under outer must_not", () => {
+	it("buildQuery wraps nested term_negate inside nested under outer must_not", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -945,7 +961,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, {
 			tags: { nameNot: "blocked" },
@@ -966,7 +984,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery groups range bounds into one range clause", () => {
+	it("buildQuery groups range bounds into one range clause", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -977,7 +995,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, {
 			createdAtGte: "2026-01-01",
@@ -996,7 +1016,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery emits exists in filter for true and must_not for false", () => {
+	it("buildQuery emits exists in filter for true and must_not for false", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -1007,7 +1027,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 
 		assert.deepEqual(
@@ -1028,7 +1050,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		);
 	});
 
-	it("buildQuery combines multi_match text search with searchFilter", () => {
+	it("buildQuery combines multi_match text search with searchFilter", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "name" }),
@@ -1040,7 +1062,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery("fluffy", undefined, { species: "cat" }) as {
 			bool: { must: unknown[]; filter: unknown[] };
@@ -1052,7 +1076,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery still honors legacy keyword `filter` argument", () => {
+	it("buildQuery still honors legacy keyword `filter` argument", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -1062,7 +1086,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, { species: "cat" }, undefined);
 		assert.deepEqual(result, {
@@ -1072,7 +1098,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("emitted resolver contains no forbidden global coercion calls (String, Number, Boolean, Array, Object)", () => {
+	it("emitted resolver contains no forbidden global coercion calls (String, Number, Boolean, Array, Object)", async () => {
 		// APPSYNC_JS rejects these globals at deploy time even though
 		// @aws-appsync/eslint-plugin doesn't flag them (no rule covers
 		// global function calls). Use template literals (\`${x}\`) for
@@ -1115,7 +1141,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		const forbidden = ["String", "Number", "Boolean", "Array", "Object"];
 		const allFiles = [
@@ -1204,7 +1230,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		const { ESLint } = await import("eslint");
 		// @ts-expect-error — plugin ships no type declarations.
@@ -1275,7 +1301,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		}
 	});
 
-	it('emits nested_exists FILTER_SPEC entry for @filterable("exists") on a @nested array field', () => {
+	it('emits nested_exists FILTER_SPEC entry for @filterable("exists") on a @nested array field', async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -1291,7 +1317,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				}),
 			],
 		});
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
 				'{i:"tagsExists",k:"nested_exists",p:"tags"}',
@@ -1300,7 +1326,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		);
 	});
 
-	it("buildQuery translates tagsExists: true into nested+match_all in bool.filter", () => {
+	it("buildQuery translates tagsExists: true into nested+match_all in bool.filter", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -1317,7 +1343,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 
 		const truthy = buildQuery(undefined, undefined, { tagsExists: true });
@@ -1335,7 +1363,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("buildQuery preserves nested-filter semantics for deeply structured input", () => {
+	it("buildQuery preserves nested-filter semantics for deeply structured input", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -1356,7 +1384,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 		const result = buildQuery(undefined, undefined, {
 			species: "cat",
@@ -1410,7 +1440,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 	// sub-projection) was silently dropped. The SDL accepted the input but
 	// the prepare function emitted no clause, so OS returned the unfiltered
 	// total instead of the filtered subset.
-	it("buildQuery walks non-@nested struct (object kind) inside a @nested array — locations.address.country (issue #110)", () => {
+	it("buildQuery walks non-@nested struct (object kind) inside a @nested array — locations.address.country (issue #110)", async () => {
 		const addressSubProjection = {
 			projectionModel: { name: "AddressSearchDoc" },
 			sourceModel: { name: "Address" },
@@ -1463,7 +1493,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 
 		const result = buildQuery(undefined, undefined, {
@@ -1495,7 +1527,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 	// Issue #110: same hazard, two-level @nested. Outer finalize used to run
 	// before inner finalize had populated its parent's child-clause array,
 	// silently dropping the inner term.
-	it("buildQuery walks @nested inside @nested — addresses.country wrapped in two nested clauses", () => {
+	it("buildQuery walks @nested inside @nested — addresses.country wrapped in two nested clauses", async () => {
 		const addressSubProjection = {
 			projectionModel: { name: "AddressSearchDoc" },
 			sourceModel: { name: "Address" },
@@ -1543,7 +1575,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 
 		const result = buildQuery(undefined, undefined, {
@@ -1587,7 +1621,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 
 	// Issue #110: term_negate inside an object-in-nested descent must end up
 	// on bool.must_not at the outer query level (mirrors the term path).
-	it("buildQuery routes term_negate from inside object-in-nested to outer bool.must_not", () => {
+	it("buildQuery routes term_negate from inside object-in-nested to outer bool.must_not", async () => {
 		const addressSubProjection = {
 			projectionModel: { name: "AddressSearchDoc" },
 			sourceModel: { name: "Address" },
@@ -1629,7 +1663,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 
 		const buildQuery = loadBuildQuery(
-			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
 		);
 
 		const result = buildQuery(undefined, undefined, {
@@ -1708,7 +1744,7 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 		return s[0].toLowerCase() + s.slice(1);
 	}
 
-	it("counterparty-shape projection (7 nested sub-models) emits resolver under 32 KB AppSync cap", () => {
+	it("counterparty-shape projection (7 nested sub-models) emits resolver under 32 KB AppSync cap", async () => {
 		// Synthetic mirror of the consumer counterparty projection: 7 @nested
 		// sub-models (approvals/relations/locations/contacts/tags/groups/references),
 		// each with id+type+createdAt+updatedAt aggs/filters. Acceptance criterion
@@ -1761,7 +1797,7 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 			],
 		});
 
-		const result = emitGraphQLResolver(projection, defaultOptions);
+		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		// Pipeline resolver: cap is per-file (resolver after-mapping + each
 		// pipeline function), not the sum. Issue #105 acceptance: each emitted
@@ -1776,6 +1812,356 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 				bytes < 32_768,
 				`wide projection ${file.name} file is ${bytes} bytes; must stay under AppSync's 32,768-byte per-file cap (issue #105). Headroom: ${32_768 - bytes} bytes.`,
 			);
+		}
+	});
+});
+
+// Issue #112 — two-stage adaptive emit: minify + threshold-based mode.
+describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
+	const monolithicOptions = {
+		defaultPageSize: 20,
+		maxPageSize: 100,
+		trackTotalHitsUpTo: 10000,
+		minify: true,
+		monolithicThresholdBytes: 28000,
+	};
+
+	it("emits monolithic UNIT shape for a typical projection (mode 'monolithic', no functions)", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, monolithicOptions);
+
+		assert.equal(result.mode, "monolithic");
+		assert.equal(result.functions.length, 0);
+		// Monolithic resolver carries the OS HTTP request shape directly —
+		// no pipeline before/after, no `ctx.prev.result`, no `ctx.stash`.
+		assert.ok(
+			result.content.includes('operation:"GET"') ||
+				result.content.includes('operation: "GET"'),
+		);
+		assert.ok(!result.content.includes("ctx.prev.result"));
+		assert.ok(!result.content.includes("ctx.stash"));
+	});
+
+	it("falls back to pipeline when monolithic exceeds threshold", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, {
+			...monolithicOptions,
+			monolithicThresholdBytes: 0,
+		});
+
+		assert.equal(result.mode, "pipeline");
+		assert.equal(result.functions.length, 2);
+		assert.deepEqual(
+			result.functions.map((f) => f.name),
+			["prepare", "search"],
+		);
+	});
+
+	it("respects minify: false (verbose source emission)", async () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name" })],
+		});
+		const result = await emitGraphQLResolver(projection, {
+			...monolithicOptions,
+			minify: false,
+		});
+
+		assert.ok(result.content.includes("buildQuery"));
+		assert.ok(result.content.includes("function buildSort"));
+		assert.ok(result.content.includes("\t"));
+	});
+
+	it("counterparty-shape projection fits under threshold in monolithic mode (perf-critical case)", async () => {
+		// Mirrors the wide-projection acceptance test — 7 nested sub-models
+		// with id+type+createdAt+updatedAt aggs/filters. Issue #112 expects
+		// this shape to fit monolithic post-minify (under 28K), unlocking the
+		// ~50ms median latency saving.
+		const subShapes = [
+			"Approval",
+			"Relation",
+			"Location",
+			"Contact",
+			"Tag",
+			"Group",
+			"Reference",
+		];
+		function lowerFirst(s: string): string {
+			return s[0].toLowerCase() + s.slice(1);
+		}
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			indexName: "counterparties_v1",
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+				...subShapes.map((shape) =>
+					makeField({
+						name: `${shape.toLowerCase()}s`,
+						nested: true,
+						subProjection: {
+							projectionModel: { name: `${shape}SearchDoc` },
+							sourceModel: { name: shape },
+							indexName: shape.toLowerCase(),
+							fields: [
+								makeField({
+									name: `${lowerFirst(shape)}Id`,
+									keyword: true,
+									filterables: ["term", "terms", "exists"],
+									aggregations: ["terms"],
+								}),
+								makeField({
+									name: "type",
+									keyword: true,
+									filterables: ["term", "terms", "exists"],
+									aggregations: ["terms"],
+								}),
+								makeField({
+									name: "createdAt",
+									filterables: ["range"],
+									type: {
+										kind: "Scalar",
+										name: "utcDateTime",
+									} as unknown as Type,
+								}),
+							],
+						} as unknown as ResolvedProjection,
+						filterables: ["exists"],
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				),
+			],
+		});
+
+		const result = await emitGraphQLResolver(projection, monolithicOptions);
+		const bytes = Buffer.byteLength(result.content, "utf-8");
+
+		assert.equal(
+			result.mode,
+			"monolithic",
+			`Counterparty projection should fit monolithic; got ${bytes} bytes`,
+		);
+		assert.ok(bytes < 28_000, "monolithic must fit under threshold");
+	});
+
+	it("pipelines a synthetic wide projection (14 sub-models) even with minify on", async () => {
+		function lowerFirst(s: string): string {
+			return s[0].toLowerCase() + s.slice(1);
+		}
+		const subShapes = Array.from({ length: 14 }, (_, i) => `Sub${i}`);
+		const projection = makeProjection({
+			name: "WideSearchDoc",
+			indexName: "wide_v1",
+			fields: subShapes.map((shape) =>
+				makeField({
+					name: `${shape.toLowerCase()}s`,
+					nested: true,
+					subProjection: {
+						projectionModel: { name: `${shape}SearchDoc` },
+						sourceModel: { name: shape },
+						indexName: shape.toLowerCase(),
+						fields: [
+							makeField({
+								name: `${lowerFirst(shape)}Id`,
+								keyword: true,
+								filterables: ["term", "terms", "exists"],
+								aggregations: ["terms"],
+							}),
+							makeField({
+								name: "type",
+								keyword: true,
+								filterables: ["term", "terms", "exists"],
+								aggregations: ["terms"],
+							}),
+							makeField({
+								name: "createdAt",
+								filterables: ["range"],
+								type: {
+									kind: "Scalar",
+									name: "utcDateTime",
+								} as unknown as Type,
+								aggregations: [
+									"sum",
+									"avg",
+									"min",
+									"max",
+									{ kind: "date_histogram", options: { interval: "month" } },
+								],
+							}),
+							makeField({
+								name: "updatedAt",
+								filterables: ["range"],
+								type: {
+									kind: "Scalar",
+									name: "utcDateTime",
+								} as unknown as Type,
+								aggregations: ["sum", "avg", "min", "max"],
+							}),
+						],
+					} as unknown as ResolvedProjection,
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			),
+		});
+
+		const result = await emitGraphQLResolver(projection, monolithicOptions);
+
+		assert.equal(result.mode, "pipeline");
+		const files = [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({
+				name: fn.name,
+				content: fn.content,
+			})),
+		];
+		for (const file of files) {
+			const bytes = Buffer.byteLength(file.content, "utf-8");
+			assert.ok(
+				bytes < 32_768,
+				`wide projection pipeline file ${file.name} is ${bytes} bytes; must stay under 32 KB cap`,
+			);
+		}
+	});
+
+	it("minified monolithic output passes @aws-appsync/eslint-plugin recommended config", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+					aggregations: ["terms", "cardinality", "missing"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, monolithicOptions);
+		assert.equal(result.mode, "monolithic");
+
+		const { ESLint } = await import("eslint");
+		// @ts-expect-error — plugin ships no type declarations.
+		const { default: appsyncPlugin } = await import(
+			"@aws-appsync/eslint-plugin"
+		);
+
+		const dir = await mkdtemp(join(tmpdir(), "appsync-lint-mono-"));
+		try {
+			await writeFile(join(dir, "resolver.js"), result.content);
+			await writeFile(
+				join(dir, "tsconfig.json"),
+				JSON.stringify({
+					compilerOptions: {
+						target: "ES2022",
+						module: "ES2022",
+						allowJs: true,
+						checkJs: false,
+						noEmit: true,
+					},
+					include: ["resolver.js"],
+				}),
+			);
+			const eslint = new ESLint({
+				cwd: dir,
+				overrideConfigFile: true,
+				overrideConfig: [
+					{
+						...appsyncPlugin.configs.recommended,
+						languageOptions: {
+							...appsyncPlugin.configs.recommended.languageOptions,
+							sourceType: "module",
+							ecmaVersion: 2022,
+							parserOptions: {
+								project: "./tsconfig.json",
+								tsconfigRootDir: dir,
+								ecmaVersion: 2022,
+								sourceType: "module",
+							},
+						},
+					},
+				],
+			});
+			const lintResults = await eslint.lintFiles([join(dir, "resolver.js")]);
+			const messages = lintResults.flatMap((r) =>
+				r.messages.map(
+					(m) =>
+						`[${m.ruleId ?? "fatal"}] ${r.filePath.split("/").pop()} line ${m.line ?? "?"}: ${m.message}`,
+				),
+			);
+			assert.deepEqual(
+				messages,
+				[],
+				`@aws-appsync/eslint-plugin reported issues on minified monolithic output:\n${messages.join("\n")}\n--- emitted ---\n${result.content}`,
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
 		}
 	});
 });

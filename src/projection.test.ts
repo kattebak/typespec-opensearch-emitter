@@ -1037,17 +1037,30 @@ describe("emitted resolver size budget", () => {
 		const resolved = resolveProjectionModel(runner.program, projection);
 		assert.ok(resolved);
 
-		const result = emitGraphQLResolver(resolved, {
+		const result = await emitGraphQLResolver(resolved, {
 			defaultPageSize: 20,
 			maxPageSize: 100,
 			trackTotalHitsUpTo: 10000,
 		});
 
-		// AppSync APPSYNC_JS hard cap on resolver source code.
+		// AppSync APPSYNC_JS hard cap on resolver source code. With the
+		// two-stage emit (issue #112), monolithic mode keeps everything in
+		// `content`; pipeline mode splits across `content` + functions. Either
+		// way every emitted file must fit under the per-file cap.
 		const APPSYNC_CODE_CAP = 32 * 1024;
-		assert.ok(
-			result.content.length < APPSYNC_CODE_CAP,
-			`emitted resolver is ${result.content.length} bytes — exceeds AppSync's ${APPSYNC_CODE_CAP}-byte cap. Wide projections need further shrink work.`,
-		);
+		const files = [
+			{ name: result.fileName, content: result.content },
+			...result.functions.map((fn) => ({
+				name: fn.fileName,
+				content: fn.content,
+			})),
+		];
+		for (const file of files) {
+			const bytes = Buffer.byteLength(file.content, "utf-8");
+			assert.ok(
+				bytes < APPSYNC_CODE_CAP,
+				`emitted file ${file.name} is ${bytes} bytes — exceeds AppSync's ${APPSYNC_CODE_CAP}-byte per-file cap.`,
+			);
+		}
 	});
 });

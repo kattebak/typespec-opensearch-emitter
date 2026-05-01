@@ -5,6 +5,7 @@ import {
 	type FilterSpecNode,
 	type SearchFilterShape,
 } from "./filters.js";
+import { minifyAppsync } from "./minify.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -20,9 +21,19 @@ export interface EmittedPipelineFunction {
 	dataSource: PipelineFunctionDataSource;
 }
 
+export type ResolverEmissionMode = "monolithic" | "pipeline";
+
 export interface EmittedResolverFile {
 	queryFieldName: string;
-	/** Resolver-level file (`request`/`response` orchestration). */
+	/**
+	 * `monolithic` — `content` carries the full UNIT resolver (request +
+	 * response inline; reads OS via `operation: "GET"` directly). `functions`
+	 * is empty.
+	 * `pipeline` — `content` is the resolver-level after-mapping; `functions`
+	 * holds the prepare (NONE) and search (OPENSEARCH) pipeline functions.
+	 */
+	mode: ResolverEmissionMode;
+	/** Resolver-level file. UNIT body for monolithic; before/after for pipeline. */
 	fileName: string;
 	content: string;
 	/**
@@ -30,7 +41,7 @@ export interface EmittedResolverFile {
 	 * Functions and reference them on a PIPELINE Resolver. Splitting the work
 	 * across functions keeps each file's APPSYNC_JS code under the 32 KB
 	 * per-function cap, which a single-resolver shape would exceed on wide
-	 * @searchInfer projections (issue #105).
+	 * @searchInfer projections (issue #105). Empty for `mode === "monolithic"`.
 	 */
 	functions: EmittedPipelineFunction[];
 }
@@ -39,7 +50,33 @@ export interface ResolverOptions {
 	defaultPageSize: number;
 	maxPageSize: number;
 	trackTotalHitsUpTo: number;
+	/**
+	 * Apply post-emit minification (terser, APPSYNC_JS-safe config). Smaller
+	 * output means more projections fit under `monolithicThresholdBytes`.
+	 * Default: true.
+	 */
+	minify?: boolean;
+	/**
+	 * Byte threshold above which a projection's monolithic shape is rejected
+	 * and the pipeline shape is emitted instead. Suggested 28,000 (32K cap
+	 * minus headroom). Measured against the post-minify (or post-render)
+	 * monolithic content.
+	 */
+	monolithicThresholdBytes?: number;
 }
+
+// Default `minify: false` until the terser-vs-APPSYNC_JS shape-mismatch bug
+// is root-caused. Empirically: terser's output (with or without mangling)
+// runs cleanly for filters that produce a `match_all` nested clause but fails
+// at AppSync's request-evaluator with `Unable to convert ... to
+// ElasticsearchVersionedConfig` for `term`/`range` clauses inside a nested
+// path — even though the produced JSON body is structurally identical to the
+// verbose form (and OS accepts it directly). Verbose monolithic emission is
+// stable; the byte cost (~25-30% larger) is acceptable for the issue-#112
+// perf win. Consumers who verify their projections in-situ may opt-in to
+// `minify: true`.
+const DEFAULT_MINIFY = false;
+const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
 
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
 // APPSYNC_JS does not honor self-extending Array iteration, so the emitted
@@ -47,10 +84,10 @@ export interface ResolverOptions {
 // realistic SearchFilter shape; runtime util.error fires if exceeded.
 const FILTER_WORK_SLOT_COUNT = 256;
 
-export function emitGraphQLResolver(
+export async function emitGraphQLResolver(
 	projection: ResolvedProjection,
 	options: ResolverOptions,
-): EmittedResolverFile {
+): Promise<EmittedResolverFile> {
 	const typeName = projection.projectionModel.name;
 	const queryFieldName = toGraphQLQueryFieldName(typeName);
 	const baseName = toKebabCase(typeName);
@@ -73,18 +110,62 @@ export function emitGraphQLResolver(
 	const aggregations = collectAggregations(projection);
 	const searchFilterShape = buildSearchFilterShape(projection);
 
-	const prepareContent = renderPrepareFunction(
+	const minifyEnabled = options.minify ?? DEFAULT_MINIFY;
+	const threshold =
+		options.monolithicThresholdBytes ?? DEFAULT_MONOLITHIC_THRESHOLD_BYTES;
+
+	// Stage 1 of the two-stage emit (issue #112): render the monolithic UNIT
+	// shape first, optionally minify, then measure. Under the threshold we
+	// ship monolithic — saves ~50ms median per query (pipeline-dispatch I/O).
+	// Over the threshold we fall back to the pipeline split (issue #105).
+	const monolithicRaw = renderMonolithicResolver(
+		textFields,
+		keywordFields,
+		aggregations,
+		searchFilterShape,
+		projection.indexName,
+		options,
+	);
+	const monolithicContent = minifyEnabled
+		? await minifyAppsync(monolithicRaw)
+		: monolithicRaw;
+	const monolithicBytes = Buffer.byteLength(monolithicContent, "utf-8");
+
+	if (monolithicBytes <= threshold) {
+		return {
+			queryFieldName,
+			mode: "monolithic",
+			fileName: `${baseName}-resolver.js`,
+			content: monolithicContent,
+			functions: [],
+		};
+	}
+
+	// Pipeline fallback. Each function gets the same Stage 1 treatment so
+	// per-function size stays tight against the per-file 32 KB cap (issue
+	// #105). The resolver-level file holds the after-mapping; prepare runs
+	// on NONE, search on OPENSEARCH.
+	const prepareRaw = renderPrepareFunction(
 		textFields,
 		keywordFields,
 		aggregations,
 		searchFilterShape,
 		options,
 	);
-	const searchContent = renderSearchFunction(projection.indexName);
-	const resolverContent = renderResolver(aggregations, options);
+	const searchRaw = renderSearchFunction(projection.indexName);
+	const resolverRaw = renderResolver(aggregations, options);
+
+	const [prepareContent, searchContent, resolverContent] = minifyEnabled
+		? await Promise.all([
+				minifyAppsync(prepareRaw),
+				minifyAppsync(searchRaw),
+				minifyAppsync(resolverRaw),
+			])
+		: [prepareRaw, searchRaw, resolverRaw];
 
 	return {
 		queryFieldName,
+		mode: "pipeline",
 		fileName: `${baseName}-resolver.js`,
 		content: resolverContent,
 		functions: [
@@ -115,6 +196,300 @@ function hasTextType(field: ResolvedProjectionField): boolean {
 		}
 	}
 	return type.kind === "String";
+}
+
+/**
+ * Monolithic UNIT resolver — single file with request building + OS dispatch +
+ * response shaping inline. AppSync invokes `request(ctx)` once on the OS
+ * datasource; the OS response lands in `ctx.result` (not `ctx.prev.result`,
+ * which is pipeline-only). Issue #112 — collapses the 3-function pipeline
+ * into one when the projection fits under threshold.
+ */
+function renderMonolithicResolver(
+	textFields: string[],
+	keywordFields: string[],
+	aggregations: AggregationEntry[],
+	searchFilterShape: SearchFilterShape | undefined,
+	indexName: string,
+	options: ResolverOptions,
+): string {
+	const textFieldsLiteral = JSON.stringify(textFields);
+	const keywordFieldsLiteral = JSON.stringify(keywordFields);
+	const aggsBlock = renderAggsBlock(aggregations);
+	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
+	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
+	const responseAggregationsPreamble =
+		renderResponseAggregationsPreamble(aggregations);
+	const responseAggregations = renderResponseAggregations(aggregations);
+
+	return `import { util } from "@aws-appsync/utils";
+
+const FILTER_SPEC = ${filterSpecLiteral};
+
+export function request(ctx) {
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+	const searchAfter = args.after ? JSON.parse(util.base64Decode(args.after)) : undefined;
+
+	const query = buildQuery(args.query, args.filter, args.searchFilter);
+	const sort = buildSort(args.sortBy);
+
+	const body = {
+		size: size + 1,
+		track_total_hits: ${options.trackTotalHitsUpTo},
+		sort,
+		query,${aggsBlock}
+	};
+
+	if (searchAfter) {
+		body.search_after = searchAfter;
+	}
+
+	return {
+		operation: "GET",
+		path: "/${indexName}/_search",
+		params: { body },
+	};
+}
+
+export function response(ctx) {
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type);
+	}
+
+	const parsedBody = ctx.result;
+	const hits = parsedBody.hits.hits;
+	const totalHits = parsedBody.hits.total.value;
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+
+	const hasNextPage = hits.length > size;
+	const edges = hits.slice(0, size).map((hit) => ({
+		node: hit._source,
+		cursor: util.base64Encode(JSON.stringify(hit.sort)),
+	}));
+${responseAggregationsPreamble}
+	return {
+		edges,
+		totalCount: totalHits,${responseAggregations}
+		pageInfo: {
+			hasNextPage,
+			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+		},
+	};
+}
+
+function buildQuery(queryText, filter, searchFilter) {
+	const musts = [];
+	const filters = [];
+	const mustNots = [];
+
+	if (queryText) {
+		musts.push({
+			multi_match: {
+				query: queryText,
+				fields: ${textFieldsLiteral},
+				type: "best_fields",
+			},
+		});
+	}
+
+	const keywordFields = ${keywordFieldsLiteral};
+	if (filter) {
+		for (const field of keywordFields) {
+			if (filter[field] != null) {
+				filters.push({ term: { [field]: filter[field] } });
+			}
+		}
+	}
+
+	if (searchFilter) {
+		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+	}
+
+	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
+		return { match_all: {} };
+	}
+
+	return {
+		bool: {
+			...(musts.length > 0 ? { must: musts } : {}),
+			...(filters.length > 0 ? { filter: filters } : {}),
+			...(mustNots.length > 0 ? { must_not: mustNots } : {}),
+		},
+	};
+}
+
+function buildSort(sortBy) {
+	const fallback = [{ _score: "desc" }, { _id: "asc" }];
+	if (!sortBy || sortBy.length === 0) {
+		return fallback;
+	}
+	const out = [];
+	for (const entry of sortBy) {
+		if (entry && entry.field) {
+			const direction = entry.direction === "ASC" ? "asc" : "desc";
+			out.push({ [entry.field]: direction });
+		}
+	}
+	out.push({ _id: "asc" });
+	return out;
+}
+
+function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
+	if (!rootSpec || !rootInput) return;
+
+	const procSlots = ${slotsLiteral};
+	const finSlots = ${slotsLiteral};
+	procSlots[0] = {
+		spec: rootSpec,
+		input: rootInput,
+		outFilters: rootOutFilters,
+		outMustNots: rootOutMustNots,
+	};
+	let procHead = 0;
+	let procTail = 1;
+	let finTail = 0;
+
+	for (const _slot of procSlots) {
+		if (procHead < procTail) {
+			const item = procSlots[procHead];
+			procHead = procHead + 1;
+			const spec = item.spec;
+			const input = item.input;
+			const outFilters = item.outFilters;
+			const outMustNots = item.outMustNots;
+
+			for (const node of spec) {
+				const value = input[node.i];
+				if (node.k === "nested") {
+					if (value != null) {
+						const childFilters = [];
+						const childMustNots = [];
+						if (procTail + 1 > procSlots.length) {
+							util.error(
+								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
+							);
+						}
+						if (finTail + 1 > finSlots.length) {
+							util.error(
+								"applyFilterSpec exceeded fixed finalize-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
+							);
+						}
+						procSlots[procTail] = {
+							spec: node.c,
+							input: value,
+							outFilters: childFilters,
+							outMustNots: childMustNots,
+						};
+						procTail = procTail + 1;
+						finSlots[finTail] = {
+							path: node.p,
+							childFilters,
+							childMustNots,
+							parentFilters: outFilters,
+							parentMustNots: outMustNots,
+						};
+						finTail = finTail + 1;
+					}
+				} else if (node.k === "object") {
+					if (value != null) {
+						if (procTail + 1 > procSlots.length) {
+							util.error(
+								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
+							);
+						}
+						procSlots[procTail] = {
+							spec: node.c,
+							input: value,
+							outFilters,
+							outMustNots,
+						};
+						procTail = procTail + 1;
+					}
+				} else if (node.k === "term") {
+					if (value != null) {
+						outFilters.push({ term: { [node.f]: value } });
+					}
+				} else if (node.k === "term_negate") {
+					if (value != null) {
+						outMustNots.push({ term: { [node.f]: value } });
+					}
+				} else if (node.k === "terms") {
+					if (value != null && value.length > 0) {
+						outFilters.push({ terms: { [node.f]: value } });
+					}
+				} else if (node.k === "exists") {
+					if (value != null) {
+						if (value === true) {
+							outFilters.push({ exists: { field: node.f } });
+						} else {
+							outMustNots.push({ exists: { field: node.f } });
+						}
+					}
+				} else if (node.k === "nested_exists") {
+					if (value != null) {
+						const nestedClause = {
+							nested: { path: node.p, query: { match_all: {} } },
+						};
+						if (value === true) {
+							outFilters.push(nestedClause);
+						} else {
+							outMustNots.push(nestedClause);
+						}
+					}
+				} else if (node.k === "range") {
+					const base = node.i;
+					const bounds = {};
+					let any = false;
+					if (input[base + "Gte"] != null) {
+						bounds.gte = input[base + "Gte"];
+						any = true;
+					}
+					if (input[base + "Lte"] != null) {
+						bounds.lte = input[base + "Lte"];
+						any = true;
+					}
+					if (input[base + "Gt"] != null) {
+						bounds.gt = input[base + "Gt"];
+						any = true;
+					}
+					if (input[base + "Lt"] != null) {
+						bounds.lt = input[base + "Lt"];
+						any = true;
+					}
+					if (any) {
+						outFilters.push({ range: { [node.f]: bounds } });
+					}
+				}
+			}
+		}
+	}
+
+	for (const _slot of finSlots) {
+		if (finTail > 0) {
+			finTail = finTail - 1;
+			const item = finSlots[finTail];
+			for (const clause of item.childFilters) {
+				item.parentFilters.push({
+					nested: {
+						path: item.path,
+						query: { bool: { filter: [clause] } },
+					},
+				});
+			}
+			for (const clause of item.childMustNots) {
+				item.parentMustNots.push({
+					nested: {
+						path: item.path,
+						query: { bool: { filter: [clause] } },
+					},
+				});
+			}
+		}
+	}
+}
+`;
 }
 
 /**
@@ -735,6 +1110,9 @@ export const __test = {
 	renderResolver,
 	renderPrepareFunction,
 	renderSearchFunction,
+	renderMonolithicResolver,
 	renderAggsBlock,
 	renderResponseAggregations,
+	DEFAULT_MINIFY,
+	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
 };

@@ -84,6 +84,7 @@ export async function $onEmit(
 	const packageName = context.options["package-name"];
 	const packageVersion = context.options["package-version"];
 	const graphqlOptions = context.options.graphql;
+	const resolverFiles: EmittedResolverFile[] = [];
 	if (graphqlOptions?.emit) {
 		const pageOptions = {
 			defaultPageSize: graphqlOptions["default-page-size"] ?? 20,
@@ -92,9 +93,13 @@ export async function $onEmit(
 		const resolverOptions = {
 			...pageOptions,
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
+			// Default `minify: false` until terser-vs-APPSYNC_JS shape mismatch
+			// is root-caused (issue #112 in-situ probe). Verbose monolithic
+			// emission is stable and still fits the 32K cap with headroom.
+			minify: graphqlOptions.minify ?? false,
+			monolithicThresholdBytes:
+				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
 		};
-
-		const resolverFiles: EmittedResolverFile[] = [];
 
 		for (const projection of resolved) {
 			const sdlFile = emitGraphQLSdl(context.program, projection, pageOptions);
@@ -103,7 +108,10 @@ export async function $onEmit(
 				content: sdlFile.content,
 			});
 
-			const resolverFile = emitGraphQLResolver(projection, resolverOptions);
+			const resolverFile = await emitGraphQLResolver(
+				projection,
+				resolverOptions,
+			);
 			resolverFiles.push(resolverFile);
 			await emitFile(context.program, {
 				path: resolvePath(context.emitterOutputDir, resolverFile.fileName),
@@ -137,6 +145,7 @@ export async function $onEmit(
 			packageVersion,
 			resolved,
 			graphqlArtifacts,
+			graphqlOptions?.emit ? resolverFiles : undefined,
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "package.json"),
@@ -233,10 +242,15 @@ function generateGraphQLManifest(
 ): string {
 	const resolvers = projections.map((projection, i) => {
 		const resolver = resolverFiles[i];
+		// `mode` (issue #112) tells the consumer which AppSync resolver kind
+		// to wire — UNIT for `monolithic`, PIPELINE for `pipeline`. The
+		// `functions` array is empty under `monolithic` and ignored by the
+		// consumer in that case.
 		return {
 			projection: projection.projectionModel.name,
 			indexName: projection.indexName,
 			queryFieldName: resolver.queryFieldName,
+			mode: resolver.mode,
 			resolverFile: resolver.fileName,
 			sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,
 			functions: resolver.functions.map((fn) => ({
@@ -312,6 +326,7 @@ function generatePackageJson(
 	packageVersion: string,
 	projections: ResolvedProjection[],
 	graphqlProjections?: ResolvedProjection[],
+	resolverFiles?: EmittedResolverFile[],
 ): string {
 	const artifactExports: Record<string, string> = {};
 
@@ -323,12 +338,29 @@ function generatePackageJson(
 	if (graphqlProjections) {
 		artifactExports["./graphql-resolvers.json"] = "./graphql-resolvers.json";
 		artifactExports["./graphql-resolvers.js"] = "./graphql-resolvers.js";
+		const filesByName = new Map<string, EmittedResolverFile>();
+		if (resolverFiles) {
+			for (let i = 0; i < graphqlProjections.length; i++) {
+				filesByName.set(
+					graphqlProjections[i].projectionModel.name,
+					resolverFiles[i],
+				);
+			}
+		}
 		for (const projection of graphqlProjections) {
 			const kebab = toKebabCase(projection.projectionModel.name);
 			artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
 			artifactExports[`./${kebab}-resolver.js`] = `./${kebab}-resolver.js`;
-			artifactExports[`./${kebab}-fn-prepare.js`] = `./${kebab}-fn-prepare.js`;
-			artifactExports[`./${kebab}-fn-search.js`] = `./${kebab}-fn-search.js`;
+			// Pipeline functions (prepare/search) only exist on the disk for
+			// projections emitted in pipeline mode (issue #112). Monolithic
+			// projections collapse those into the resolver file. Only export
+			// what's actually present.
+			const file = filesByName.get(projection.projectionModel.name);
+			if (file && file.mode === "pipeline") {
+				artifactExports[`./${kebab}-fn-prepare.js`] =
+					`./${kebab}-fn-prepare.js`;
+				artifactExports[`./${kebab}-fn-search.js`] = `./${kebab}-fn-search.js`;
+			}
 		}
 	}
 
