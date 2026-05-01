@@ -24,6 +24,27 @@ function makeProjection(
 	} as unknown as ResolvedProjection;
 }
 
+/**
+ * Mirrors how buildVirtualSubProjection in projection.ts assembles a
+ * sub-projection for a nested struct: projectionModel and sourceModel
+ * reference the same model object. emit-graphql-sdl uses that identity
+ * to distinguish virtual struct sub-projections (which need a `type X`
+ * block emitted in the parent SDL) from explicit SearchProjection<T>
+ * sub-projections (which already have their own SDL file).
+ */
+function makeVirtualSubProjection(
+	name: string,
+	fields: ResolvedProjection["fields"],
+): ResolvedProjection {
+	const model = { name } as unknown as ResolvedProjection["projectionModel"];
+	return {
+		projectionModel: model,
+		sourceModel: model,
+		indexName: "",
+		fields,
+	} as unknown as ResolvedProjection;
+}
+
 function makeField(
 	overrides: Partial<{
 		name: string;
@@ -227,6 +248,161 @@ describe("emitGraphQLSdl", () => {
 
 		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
 		assert.ok(result.content.includes("tags: [TagSearchDoc!]!"));
+	});
+
+	it("emits `type <Name>` block for nested struct virtual sub-projections referenced from response shape", () => {
+		// Issue: when a projection references a nested struct (e.g. Address)
+		// via @searchInfer auto-recursion, only `input AddressSearchFilter`
+		// was emitted — no `type Address`. AppSync schema validation rejects
+		// the assembled SDL because the response field type is undefined.
+		const addressVirtual = makeVirtualSubProjection("Address", [
+			makeField({
+				name: "country",
+				type: { kind: "Scalar", name: "string" } as unknown as Type,
+			}),
+			makeField({
+				name: "city",
+				type: { kind: "Scalar", name: "string" } as unknown as Type,
+			}),
+		]);
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "location",
+					subProjection: addressVirtual,
+					optional: true,
+					type: { kind: "Model", name: "Address" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(
+			result.content.includes("location: Address\n"),
+			"response field references nested type by name",
+		);
+		assert.ok(
+			result.content.match(/^type Address \{/m),
+			"emits `type Address { ... }` block",
+		);
+		assert.ok(result.content.includes("country: String!"));
+		assert.ok(result.content.includes("city: String!"));
+	});
+
+	it("emits nested struct types only once when referenced via multiple paths", () => {
+		const addressVirtual = makeVirtualSubProjection("Address", [
+			makeField({
+				name: "country",
+				type: { kind: "Scalar", name: "string" } as unknown as Type,
+			}),
+		]);
+
+		const personVirtual = makeVirtualSubProjection("PersonRecord", [
+			makeField({
+				name: "address",
+				subProjection: addressVirtual,
+				optional: true,
+				type: { kind: "Model", name: "Address" } as unknown as Type,
+			}),
+		]);
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "location",
+					subProjection: addressVirtual,
+					optional: true,
+					type: { kind: "Model", name: "Address" } as unknown as Type,
+				}),
+				makeField({
+					name: "person",
+					subProjection: personVirtual,
+					optional: true,
+					type: { kind: "Model", name: "PersonRecord" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		const addressBlocks = result.content.match(/^type Address \{/gm) ?? [];
+		assert.equal(
+			addressBlocks.length,
+			1,
+			"Address must be emitted exactly once even when reachable via two paths",
+		);
+		assert.ok(result.content.match(/^type PersonRecord \{/m));
+	});
+
+	it("recurses into nested struct sub-projections to emit transitively referenced struct types", () => {
+		const addressVirtual = makeVirtualSubProjection("Address", [
+			makeField({
+				name: "country",
+				type: { kind: "Scalar", name: "string" } as unknown as Type,
+			}),
+		]);
+
+		const personVirtual = makeVirtualSubProjection("PersonRecord", [
+			makeField({
+				name: "address",
+				subProjection: addressVirtual,
+				optional: true,
+				type: { kind: "Model", name: "Address" } as unknown as Type,
+			}),
+		]);
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "person",
+					subProjection: personVirtual,
+					optional: true,
+					type: { kind: "Model", name: "PersonRecord" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(
+			result.content.match(/^type PersonRecord \{/m),
+			"directly-referenced nested type emitted",
+		);
+		assert.ok(
+			result.content.match(/^type Address \{/m),
+			"transitively-referenced nested type emitted",
+		);
+	});
+
+	it("does not emit `type <Name>` block for explicit SearchProjection<T> sub-projections", () => {
+		// Explicit SearchProjection<T> models (e.g. TagSearchDoc) get their
+		// own SDL file via emitGraphQLSdl. Re-emitting the type block from
+		// every parent projection would create duplicates after assembly.
+		const explicitSub = makeProjection({
+			name: "TagSearchDoc",
+			sourceName: "Tag",
+		});
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: explicitSub,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		const tagBlocks = result.content.match(/^type TagSearchDoc \{/gm) ?? [];
+		assert.equal(
+			tagBlocks.length,
+			0,
+			"explicit projection sub-types must not be re-emitted in the parent SDL",
+		);
 	});
 });
 

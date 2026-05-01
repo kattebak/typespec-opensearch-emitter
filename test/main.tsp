@@ -45,3 +45,17 @@ model PetPublicSearchDoc is SearchProjection<Pet> {
 	@keyword
 	name: string;
 }
+
+@searchInfer
+model Address {
+	@keyword country: string;
+	@keyword city: string;
+}
+
+model Person {
+	@keyword id: string;
+	@searchable address?: Address;
+}
+
+@searchInfer
+model PersonSearchDoc is SearchProjection<Person> {}
