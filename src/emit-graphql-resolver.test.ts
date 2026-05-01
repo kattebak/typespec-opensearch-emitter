@@ -1403,6 +1403,260 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			"nested exists clause missing",
 		);
 	});
+
+	// Issue #110: a SearchFilter input that traverses two levels of nested
+	// struct (e.g. `locations.address.country` on a counterparty projection,
+	// where `locations` is @nested and `address` is a non-@nested struct
+	// sub-projection) was silently dropped. The SDL accepted the input but
+	// the prepare function emitted no clause, so OS returned the unfiltered
+	// total instead of the filtered subset.
+	it("buildQuery walks non-@nested struct (object kind) inside a @nested array — locations.address.country (issue #110)", () => {
+		const addressSubProjection = {
+			projectionModel: { name: "AddressSearchDoc" },
+			sourceModel: { name: "Address" },
+			indexName: "addresses",
+			fields: [
+				makeField({
+					name: "country",
+					keyword: true,
+					filterables: ["term"],
+				}),
+				makeField({
+					name: "city",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const locationSubProjection = {
+			projectionModel: { name: "LocationSearchDoc" },
+			sourceModel: { name: "Location" },
+			indexName: "locations",
+			fields: [
+				makeField({
+					name: "type",
+					keyword: true,
+					filterables: ["term"],
+				}),
+				makeField({
+					name: "address",
+					subProjection: addressSubProjection,
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			fields: [
+				makeField({
+					name: "locations",
+					nested: true,
+					subProjection: locationSubProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const buildQuery = loadBuildQuery(
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+		);
+
+		const result = buildQuery(undefined, undefined, {
+			locations: { address: { country: "PT" } },
+		});
+
+		assert.deepEqual(result, {
+			bool: {
+				filter: [
+					{
+						nested: {
+							path: "locations",
+							query: {
+								bool: {
+									filter: [
+										{
+											term: { "locations.address.country": "PT" },
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		});
+	});
+
+	// Issue #110: same hazard, two-level @nested. Outer finalize used to run
+	// before inner finalize had populated its parent's child-clause array,
+	// silently dropping the inner term.
+	it("buildQuery walks @nested inside @nested — addresses.country wrapped in two nested clauses", () => {
+		const addressSubProjection = {
+			projectionModel: { name: "AddressSearchDoc" },
+			sourceModel: { name: "Address" },
+			indexName: "addresses",
+			fields: [
+				makeField({
+					name: "country",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const locationSubProjection = {
+			projectionModel: { name: "LocationSearchDoc" },
+			sourceModel: { name: "Location" },
+			indexName: "locations",
+			fields: [
+				makeField({
+					name: "addresses",
+					nested: true,
+					subProjection: addressSubProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "locations",
+					nested: true,
+					subProjection: locationSubProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const buildQuery = loadBuildQuery(
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+		);
+
+		const result = buildQuery(undefined, undefined, {
+			locations: { addresses: { country: "PT" } },
+		});
+
+		assert.deepEqual(result, {
+			bool: {
+				filter: [
+					{
+						nested: {
+							path: "locations",
+							query: {
+								bool: {
+									filter: [
+										{
+											nested: {
+												path: "locations.addresses",
+												query: {
+													bool: {
+														filter: [
+															{
+																term: {
+																	"locations.addresses.country": "PT",
+																},
+															},
+														],
+													},
+												},
+											},
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		});
+	});
+
+	// Issue #110: term_negate inside an object-in-nested descent must end up
+	// on bool.must_not at the outer query level (mirrors the term path).
+	it("buildQuery routes term_negate from inside object-in-nested to outer bool.must_not", () => {
+		const addressSubProjection = {
+			projectionModel: { name: "AddressSearchDoc" },
+			sourceModel: { name: "Address" },
+			indexName: "addresses",
+			fields: [
+				makeField({
+					name: "country",
+					keyword: true,
+					filterables: ["term_negate"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const locationSubProjection = {
+			projectionModel: { name: "LocationSearchDoc" },
+			sourceModel: { name: "Location" },
+			indexName: "locations",
+			fields: [
+				makeField({
+					name: "address",
+					subProjection: addressSubProjection,
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "locations",
+					nested: true,
+					subProjection: locationSubProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const buildQuery = loadBuildQuery(
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
+		);
+
+		const result = buildQuery(undefined, undefined, {
+			locations: { address: { countryNot: "PT" } },
+		});
+
+		assert.deepEqual(result, {
+			bool: {
+				must_not: [
+					{
+						nested: {
+							path: "locations",
+							query: {
+								bool: {
+									filter: [
+										{
+											term: { "locations.address.country": "PT" },
+										},
+									],
+								},
+							},
+						},
+					},
+				],
+			},
+		});
+	});
 });
 
 describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
