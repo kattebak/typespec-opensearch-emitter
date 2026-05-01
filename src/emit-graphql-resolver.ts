@@ -1,8 +1,4 @@
-import {
-	type AggregationEntry,
-	collectAggregations,
-	NESTED_INNER_AGG_NAME,
-} from "./aggregations.js";
+import { type AggregationEntry, collectAggregations } from "./aggregations.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
 import {
 	buildSearchFilterShape,
@@ -15,10 +11,28 @@ import type {
 } from "./projection.js";
 import { toKebabCase } from "./utils.js";
 
-export interface EmittedResolverFile {
+export type PipelineFunctionDataSource = "OPENSEARCH" | "NONE";
+
+export interface EmittedPipelineFunction {
+	name: string;
 	fileName: string;
 	content: string;
+	dataSource: PipelineFunctionDataSource;
+}
+
+export interface EmittedResolverFile {
 	queryFieldName: string;
+	/** Resolver-level file (`request`/`response` orchestration). */
+	fileName: string;
+	content: string;
+	/**
+	 * Pipeline functions in execution order. Consumers wire these as AppSync
+	 * Functions and reference them on a PIPELINE Resolver. Splitting the work
+	 * across functions keeps each file's APPSYNC_JS code under the 32 KB
+	 * per-function cap, which a single-resolver shape would exceed on wide
+	 * @searchInfer projections (issue #105).
+	 */
+	functions: EmittedPipelineFunction[];
 }
 
 export interface ResolverOptions {
@@ -29,7 +43,7 @@ export interface ResolverOptions {
 
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
 // APPSYNC_JS does not honor self-extending Array iteration, so the emitted
-// resolver pre-allocates this many slots as a literal. Set well above any
+// function pre-allocates this many slots as a literal. Set well above any
 // realistic SearchFilter shape; runtime util.error fires if exceeded.
 const FILTER_WORK_SLOT_COUNT = 256;
 
@@ -39,7 +53,7 @@ export function emitGraphQLResolver(
 ): EmittedResolverFile {
 	const typeName = projection.projectionModel.name;
 	const queryFieldName = toGraphQLQueryFieldName(typeName);
-	const fileName = `${toKebabCase(typeName)}-resolver.js`;
+	const baseName = toKebabCase(typeName);
 
 	const textFields = projection.fields
 		.filter(
@@ -59,19 +73,34 @@ export function emitGraphQLResolver(
 	const aggregations = collectAggregations(projection);
 	const searchFilterShape = buildSearchFilterShape(projection);
 
-	const content = renderResolver(
-		projection.indexName,
+	const prepareContent = renderPrepareFunction(
 		textFields,
 		keywordFields,
 		aggregations,
 		searchFilterShape,
 		options,
 	);
+	const searchContent = renderSearchFunction(projection.indexName);
+	const resolverContent = renderResolver(aggregations, options);
 
 	return {
-		fileName,
-		content,
 		queryFieldName,
+		fileName: `${baseName}-resolver.js`,
+		content: resolverContent,
+		functions: [
+			{
+				name: "prepare",
+				fileName: `${baseName}-fn-prepare.js`,
+				content: prepareContent,
+				dataSource: "NONE",
+			},
+			{
+				name: "search",
+				fileName: `${baseName}-fn-search.js`,
+				content: searchContent,
+				dataSource: "OPENSEARCH",
+			},
+		],
 	};
 }
 
@@ -88,8 +117,63 @@ function hasTextType(field: ResolvedProjectionField): boolean {
 	return type.kind === "String";
 }
 
+/**
+ * Pipeline resolver "before/after" code. The `request` exports here become the
+ * pipeline's before-mapping; `response` is the after-mapping that runs after
+ * all functions complete. The OS response lives at `ctx.prev.result` after
+ * the OS-datasource function in the pipeline returns.
+ */
 function renderResolver(
-	indexName: string,
+	aggregations: AggregationEntry[],
+	options: ResolverOptions,
+): string {
+	const responseAggregationsPreamble =
+		renderResponseAggregationsPreamble(aggregations);
+	const responseAggregations = renderResponseAggregations(aggregations);
+
+	return `import { util } from "@aws-appsync/utils";
+
+export function request(ctx) {
+	return {};
+}
+
+export function response(ctx) {
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type);
+	}
+
+	const parsedBody = ctx.prev.result;
+	const hits = parsedBody.hits.hits;
+	const totalHits = parsedBody.hits.total.value;
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+
+	const hasNextPage = hits.length > size;
+	const edges = hits.slice(0, size).map((hit) => ({
+		node: hit._source,
+		cursor: util.base64Encode(JSON.stringify(hit.sort)),
+	}));
+${responseAggregationsPreamble}
+	return {
+		edges,
+		totalCount: totalHits,${responseAggregations}
+		pageInfo: {
+			hasNextPage,
+			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+		},
+	};
+}
+`;
+}
+
+/**
+ * Pipeline function on a NONE datasource. Builds the OS query body from
+ * `ctx.args` (FILTER_SPEC walk + aggs assembly) and stashes it for the next
+ * function to send. Holds the bulk of the request-side code: keeping it in
+ * its own function keeps the resolver-level after-mapping (response shape +
+ * aggregation mapping) under the 32 KB per-file APPSYNC_JS cap (issue #105).
+ */
+function renderPrepareFunction(
 	textFields: string[],
 	keywordFields: string[],
 	aggregations: AggregationEntry[],
@@ -99,9 +183,12 @@ function renderResolver(
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const aggsBlock = renderAggsBlock(aggregations);
-	const responseAggregations = renderResponseAggregations(aggregations);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
-	const slotsLiteral = `[${"undefined,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
+	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
+	// — saves ~5 bytes per slot. The walker never reads these init values; it
+	// gates work on the head < tail FIFO indexes (real items are written into
+	// slots[tail] before tail advances).
+	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -126,38 +213,12 @@ export function request(ctx) {
 		body.search_after = searchAfter;
 	}
 
-	return {
-		operation: "GET",
-		path: \`/${indexName}/_search\`,
-		params: { body },
-	};
+	ctx.stash.queryBody = body;
+	return { payload: null };
 }
 
 export function response(ctx) {
-	if (ctx.error) {
-		return util.error(ctx.error.message, ctx.error.type);
-	}
-
-	const parsedBody = ctx.result;
-	const hits = parsedBody.hits.hits;
-	const totalHits = parsedBody.hits.total.value;
-	const args = ctx.args;
-	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
-
-	const hasNextPage = hits.length > size;
-	const edges = hits.slice(0, size).map((hit) => ({
-		node: hit._source,
-		cursor: util.base64Encode(JSON.stringify(hit.sort)),
-	}));
-
-	return {
-		edges,
-		totalCount: totalHits,${responseAggregations}
-		pageInfo: {
-			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
-		},
-	};
+	return ctx.result;
 }
 
 function buildQuery(queryText, filter, searchFilter) {
@@ -274,9 +335,9 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 				const outMustNots = item.outMustNots;
 
 				// FILTER_SPEC nodes use compact keys to fit under AppSync's 32 KB
-				// resolver code cap (issue #99): i=inputName, k=kind, f=field,
+				// per-function code cap (issue #99): i=inputName, k=kind, f=field,
 				// p=path, c=children. See stringifyNode in the emitter. Range
-				// kind carries one entry per field; the resolver expands the
+				// kind carries one entry per field; the function expands the
 				// four bound inputs (i+"Gte"/Lte/Gt/Lt) at iteration time
 				// (issue #101).
 				for (const node of spec) {
@@ -287,7 +348,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 							const childMustNots = [];
 							if (tail + 2 > slots.length) {
 								util.error(
-									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS resolver",
+									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
 								);
 							}
 							slots[tail] = {
@@ -312,7 +373,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 						if (value != null) {
 							if (tail + 1 > slots.length) {
 								util.error(
-									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS resolver",
+									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
 								);
 							}
 							slots[tail] = {
@@ -387,6 +448,27 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 `;
 }
 
+/**
+ * Pipeline function on the OPENSEARCH datasource. Reads the pre-built body
+ * from `ctx.stash.queryBody` (set by the prepare function) and issues the
+ * OS HTTP request. Tiny on purpose — the heavy filter/aggs construction
+ * lives in the prepare function where it has its own 32 KB budget.
+ */
+function renderSearchFunction(indexName: string): string {
+	return `export function request(ctx) {
+	return {
+		operation: "GET",
+		path: "/${indexName}/_search",
+		params: { body: ctx.stash.queryBody },
+	};
+}
+
+export function response(ctx) {
+	return ctx.result;
+}
+`;
+}
+
 function renderFilterSpecLiteral(shape: SearchFilterShape | undefined): string {
 	if (!shape) {
 		return "[]";
@@ -401,8 +483,8 @@ function stringifySpec(nodes: FilterSpecNode[]): string {
 
 function stringifyNode(node: FilterSpecNode): string {
 	// FILTER_SPEC entries use single-letter keys to keep wide projections
-	// under AppSync's 32 KB resolver-code cap (issue #99). The reader is
-	// applyFilterSpec inside the emitted resolver; keys must match there:
+	// under AppSync's 32 KB per-function code cap (issue #99). The reader is
+	// applyFilterSpec inside the emitted prepare function; keys must match there:
 	//   i = inputName, k = kind, f = field, p = path, c = children, b = bound.
 	const i = JSON.stringify(node.inputName);
 	if (node.kind === "nested") {
@@ -427,17 +509,55 @@ function renderAggsBlock(aggregations: AggregationEntry[]): string {
 		return "";
 	}
 
-	const lines = aggregations.map((entry) => renderAggLine(entry));
+	// Group aggs by nested path so each path emits ONE `nested` wrapper with all
+	// child aggs inside, instead of one wrapper per agg. Saves a per-agg
+	// `{ nested: { path: "..." }, aggs: { inner: ... } }` skeleton (~50 bytes
+	// per nested agg) on wide projections (issue #105).
+	//
+	// Aggregations carry a per-projection-unique `aggName` (e.g. `byCounterpartyId`).
+	// If the same aggName appears more than once (which can happen when a
+	// projection spreads the same field/aggregation twice), APPSYNC_JS rejects
+	// the resulting object literal at deploy time (TS1117 — duplicate keys).
+	// Dedupe here, first-wins.
+	const flatLines: string[] = [];
+	const flatSeen = new Set<string>();
+	const byPath = new Map<string, AggregationEntry[]>();
+	const seenInPath = new Map<string, Set<string>>();
+	for (const entry of aggregations) {
+		if (!entry.nestedPath) {
+			if (flatSeen.has(entry.aggName)) continue;
+			flatSeen.add(entry.aggName);
+			flatLines.push(`\t\t${entry.aggName}: ${renderAggInner(entry)},`);
+			continue;
+		}
+		const seen = seenInPath.get(entry.nestedPath) ?? new Set<string>();
+		if (seen.has(entry.aggName)) continue;
+		seen.add(entry.aggName);
+		seenInPath.set(entry.nestedPath, seen);
+		const list = byPath.get(entry.nestedPath);
+		if (list) {
+			list.push(entry);
+		} else {
+			byPath.set(entry.nestedPath, [entry]);
+		}
+	}
 
+	const groupLines: string[] = [];
+	for (const [path, group] of byPath) {
+		const inner = group
+			.map((e) => `${e.aggName}: ${renderAggInner(e)}`)
+			.join(", ");
+		groupLines.push(
+			`\t\t${nestedAggGroupKey(path)}: { nested: { path: ${JSON.stringify(path)} }, aggs: { ${inner} } },`,
+		);
+	}
+
+	const lines = [...flatLines, ...groupLines];
 	return `\n\t\taggs: {\n${lines.join("\n")}\n\t\t},`;
 }
 
-function renderAggLine(entry: AggregationEntry): string {
-	const inner = renderAggInner(entry);
-	if (entry.nestedPath) {
-		return `\t\t${entry.aggName}: { nested: { path: ${JSON.stringify(entry.nestedPath)} }, aggs: { ${NESTED_INNER_AGG_NAME}: ${inner} } },`;
-	}
-	return `\t\t${entry.aggName}: ${inner},`;
+function nestedAggGroupKey(nestedPath: string): string {
+	return `_${nestedPath.replace(/\./g, "_")}`;
 }
 
 function renderAggInner(entry: AggregationEntry): string {
@@ -480,22 +600,49 @@ function renderAggInner(entry: AggregationEntry): string {
 	return `{ ${aggType}: { field: ${fieldLit} } }`;
 }
 
+function renderResponseAggregationsPreamble(
+	aggregations: AggregationEntry[],
+): string {
+	if (aggregations.length === 0) {
+		return "";
+	}
+	// Hoist `parsedBody.aggregations` and per-nested-path subtrees into short
+	// locals so per-agg lines stay compact. With many nested aggs the
+	// difference dominates resolver size; together with nested-path grouping
+	// this keeps wide @searchInfer projections under AppSync's 32 KB cap
+	// (issue #105).
+	const lines = ["\tconst _a = parsedBody.aggregations || {};"];
+	const seen = new Set<string>();
+	for (const entry of aggregations) {
+		if (!entry.nestedPath || seen.has(entry.nestedPath)) continue;
+		seen.add(entry.nestedPath);
+		const groupKey = nestedAggGroupKey(entry.nestedPath);
+		lines.push(`\tconst _a${groupKey} = _a.${groupKey} || {};`);
+	}
+	return lines.join("\n");
+}
+
 function renderResponseAggregations(aggregations: AggregationEntry[]): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
 
-	const lines = aggregations.map((entry) =>
-		renderResponseAggregationLine(entry),
-	);
+	// Match the dedupe in renderAggsBlock — first-wins on duplicate aggName.
+	const seen = new Set<string>();
+	const lines: string[] = [];
+	for (const entry of aggregations) {
+		if (seen.has(entry.aggName)) continue;
+		seen.add(entry.aggName);
+		lines.push(renderResponseAggregationLine(entry));
+	}
 
 	return `\n\t\taggregations: {\n${lines.join("\n")}\n\t\t},`;
 }
 
 function renderResponseAggregationLine(entry: AggregationEntry): string {
 	const path = entry.nestedPath
-		? `parsedBody.aggregations?.${entry.aggName}?.${NESTED_INNER_AGG_NAME}`
-		: `parsedBody.aggregations?.${entry.aggName}`;
+		? `_a${nestedAggGroupKey(entry.nestedPath)}.${entry.aggName}`
+		: `_a.${entry.aggName}`;
 	switch (entry.kind) {
 		case "terms": {
 			const opts = (entry.options ?? {}) as {
@@ -561,6 +708,8 @@ function osAggType(kind: AggregationEntry["kind"]): string {
 export const __test = {
 	hasTextType,
 	renderResolver,
+	renderPrepareFunction,
+	renderSearchFunction,
 	renderAggsBlock,
 	renderResponseAggregations,
 };

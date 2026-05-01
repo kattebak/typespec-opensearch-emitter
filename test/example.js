@@ -16,6 +16,7 @@ test("emits projection metadata for multiple projections", async () => {
 	const parsed = JSON.parse(content);
 
 	assert.deepEqual(parsed.projections.map((x) => x.name).sort(), [
+		"PersonSearchDoc",
 		"PetPublicSearchDoc",
 		"PetSearchDoc",
 		"TagSearchDoc",
@@ -28,6 +29,21 @@ test("emits projection metadata for multiple projections", async () => {
 	assert.ok(nameField);
 	assert.equal(nameField.analyzer, "edge_ngram");
 	assert.equal(nameField.boost, 2);
+});
+
+test("emits `type <Name>` block for nested struct virtual sub-projections referenced from response shape", async () => {
+	const sdl = await readFile(`${OUT_DIR}/person-search-doc.graphql`, "utf8");
+
+	// Response object references the nested struct by name.
+	assert.ok(sdl.includes("address: Address"));
+
+	// `type Address { ... }` block emitted alongside the filter input.
+	assert.ok(sdl.match(/^type Address \{/m));
+	assert.ok(sdl.includes("country: String!"));
+	assert.ok(sdl.includes("city: String!"));
+
+	// Filter input still emitted (regression check).
+	assert.ok(sdl.includes("input AddressSearchFilter {"));
 });
 
 test("emits mapping files with expected field mappings", async () => {
@@ -96,6 +112,10 @@ test("emits graphql aggregation types and resolver block", async () => {
 		`${OUT_DIR}/pet-search-doc-resolver.js`,
 		"utf8",
 	);
+	const prepare = await readFile(
+		`${OUT_DIR}/pet-search-doc-fn-prepare.js`,
+		"utf8",
+	);
 
 	assert.ok(sdl.includes("type TermBucket {"));
 	assert.ok(sdl.includes("type PetSearchAggregations {"));
@@ -104,23 +124,25 @@ test("emits graphql aggregation types and resolver block", async () => {
 	assert.ok(sdl.includes("missingNicknameCount: Int!"));
 	assert.ok(sdl.includes("aggregations: PetSearchAggregations!"));
 
-	assert.ok(resolver.includes("aggs:"));
+	// Aggs request shape lives in the prepare function; response mapping
+	// lives in the resolver after-mapping (pipeline split — issue #105).
+	assert.ok(prepare.includes("aggs:"));
 	assert.ok(
-		resolver.includes('byAlias: { terms: { field: "aliases.keyword" } }'),
+		prepare.includes('byAlias: { terms: { field: "aliases.keyword" } }'),
 	);
 	assert.ok(
-		resolver.includes(
+		prepare.includes(
 			'uniqueAliasCount: { cardinality: { field: "aliases.keyword" } }',
 		),
 	);
 	assert.ok(resolver.includes("aggregations: {"));
-	assert.ok(resolver.includes("parsedBody.aggregations?.byAlias?.buckets"));
+	assert.ok(resolver.includes("_a.byAlias?.buckets"));
 });
 
 test("emits SearchFilter input with filterable kinds and nested sub-filter", async () => {
 	const sdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
-	const resolver = await readFile(
-		`${OUT_DIR}/pet-search-doc-resolver.js`,
+	const prepare = await readFile(
+		`${OUT_DIR}/pet-search-doc-fn-prepare.js`,
 		"utf8",
 	);
 
@@ -138,17 +160,18 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 	assert.ok(sdl.includes("nameNot: String"));
 	assert.ok(sdl.includes("noteExists: Boolean"));
 
-	assert.ok(resolver.includes("const FILTER_SPEC = ["));
-	assert.ok(resolver.includes("applyFilterSpec(FILTER_SPEC, searchFilter"));
-	// FILTER_SPEC entries use compact single-letter keys to fit under
-	// AppSync's 32 KB resolver code cap (issue #99). Range emits ONE
-	// entry per field; the four bound input lookups (Gte/Lte/Gt/Lt) are
-	// done at iteration time inside applyFilterSpec (issue #101).
-	assert.ok(resolver.includes('i:"tags"'));
-	assert.ok(resolver.includes('k:"nested"'));
-	assert.ok(resolver.includes('p:"tags"'));
-	assert.ok(resolver.includes('{i:"rank",k:"range"'));
-	assert.ok(!resolver.includes('"rankGte"'));
+	// FILTER_SPEC + applyFilterSpec live in the prepare function (pipeline
+	// split — issue #105). FILTER_SPEC entries use compact single-letter keys
+	// to fit under AppSync's 32 KB per-function code cap (issue #99). Range
+	// emits ONE entry per field; the four bound input lookups (Gte/Lte/Gt/Lt)
+	// are done at iteration time inside applyFilterSpec (issue #101).
+	assert.ok(prepare.includes("const FILTER_SPEC = ["));
+	assert.ok(prepare.includes("applyFilterSpec(FILTER_SPEC, searchFilter"));
+	assert.ok(prepare.includes('i:"tags"'));
+	assert.ok(prepare.includes('k:"nested"'));
+	assert.ok(prepare.includes('p:"tags"'));
+	assert.ok(prepare.includes('{i:"rank",k:"range"'));
+	assert.ok(!prepare.includes('"rankGte"'));
 });
 
 test("emits nested-aware aggregations on nested sub-projections", async () => {
@@ -157,39 +180,34 @@ test("emits nested-aware aggregations on nested sub-projections", async () => {
 		`${OUT_DIR}/pet-search-doc-resolver.js`,
 		"utf8",
 	);
+	const prepare = await readFile(
+		`${OUT_DIR}/pet-search-doc-fn-prepare.js`,
+		"utf8",
+	);
 
 	assert.ok(sdl.includes("byTagName: [TermBucket!]!"));
 	assert.ok(sdl.includes("uniqueTagNameCount: Int!"));
 	assert.ok(sdl.includes("missingTagNoteCount: Int!"));
 
+	// Nested aggs sharing a path are grouped under a single wrapper
+	// (`_<path>` key) in the request (prepare function); the response
+	// mapping in the resolver after-mapping reads the grouped shape — issue #105.
+	assert.ok(
+		prepare.includes(
+			'_tags: { nested: { path: "tags" }, aggs: { byTagName: { terms: { field: "tags.name" } }, uniqueTagNameCount: { cardinality: { field: "tags.name" } }, missingTagNoteCount: { missing: { field: "tags.note.keyword" } } } }',
+		),
+	);
+	assert.ok(
+		resolver.includes("byTagName: (_a_tags.byTagName?.buckets ?? []).map"),
+	);
 	assert.ok(
 		resolver.includes(
-			'byTagName: { nested: { path: "tags" }, aggs: { inner: { terms: { field: "tags.name" } } } }',
+			"uniqueTagNameCount: _a_tags.uniqueTagNameCount?.value ?? 0",
 		),
 	);
 	assert.ok(
 		resolver.includes(
-			'uniqueTagNameCount: { nested: { path: "tags" }, aggs: { inner: { cardinality: { field: "tags.name" } } } }',
-		),
-	);
-	assert.ok(
-		resolver.includes(
-			'missingTagNoteCount: { nested: { path: "tags" }, aggs: { inner: { missing: { field: "tags.note.keyword" } } } }',
-		),
-	);
-	assert.ok(
-		resolver.includes(
-			"byTagName: (parsedBody.aggregations?.byTagName?.inner?.buckets ?? []).map",
-		),
-	);
-	assert.ok(
-		resolver.includes(
-			"uniqueTagNameCount: parsedBody.aggregations?.uniqueTagNameCount?.inner?.value ?? 0",
-		),
-	);
-	assert.ok(
-		resolver.includes(
-			"missingTagNoteCount: parsedBody.aggregations?.missingTagNoteCount?.inner?.doc_count ?? 0",
+			"missingTagNoteCount: _a_tags.missingTagNoteCount?.doc_count ?? 0",
 		),
 	);
 });

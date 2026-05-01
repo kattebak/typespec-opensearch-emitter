@@ -65,7 +65,7 @@ function liftAggregations(
 }
 
 /**
- * Loads the buildQuery function from a generated resolver source string.
+ * Loads the buildQuery function from a prepare-function source string.
  * Strips the `import { util } from "@aws-appsync/utils"` line, swaps `export`
  * for plain declarations, then evaluates and returns the captured buildQuery.
  */
@@ -87,6 +87,35 @@ function loadBuildQuery(
 	return factory();
 }
 
+/**
+ * Returns a concatenation of every emitted file (resolver-level + each
+ * pipeline function). Lets assertions that don't care WHICH file something
+ * lands in just substring-check the union.
+ */
+function combinedContent(
+	result: ReturnType<typeof emitGraphQLResolver>,
+): string {
+	return [result.content, ...result.functions.map((fn) => fn.content)].join(
+		"\n",
+	);
+}
+
+function prepareFunctionContent(
+	result: ReturnType<typeof emitGraphQLResolver>,
+): string {
+	const fn = result.functions.find((f) => f.name === "prepare");
+	if (!fn) throw new Error("missing prepare function");
+	return fn.content;
+}
+
+function searchFunctionContent(
+	result: ReturnType<typeof emitGraphQLResolver>,
+): string {
+	const fn = result.functions.find((f) => f.name === "search");
+	if (!fn) throw new Error("missing search function");
+	return fn.content;
+}
+
 const defaultOptions = {
 	defaultPageSize: 20,
 	maxPageSize: 100,
@@ -102,6 +131,34 @@ describe("emitGraphQLResolver", () => {
 		assert.equal(result.queryFieldName, "searchPet");
 	});
 
+	it("emits a pipeline shape: resolver + prepare (NONE) + search (OPENSEARCH) functions", () => {
+		const projection = makeProjection({ fields: [] });
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.equal(result.functions.length, 2);
+		assert.deepEqual(
+			result.functions.map((f) => ({ name: f.name, ds: f.dataSource })),
+			[
+				{ name: "prepare", ds: "NONE" },
+				{ name: "search", ds: "OPENSEARCH" },
+			],
+		);
+		assert.equal(result.functions[0].fileName, "pet-search-doc-fn-prepare.js");
+		assert.equal(result.functions[1].fileName, "pet-search-doc-fn-search.js");
+		// Resolver-level file holds the after-mapping (response shape).
+		assert.ok(result.content.includes("export function response"));
+		assert.ok(result.content.includes("ctx.prev.result"));
+		// Prepare function holds the FILTER_SPEC + walker + body assembly,
+		// stashing the OS body for the search function.
+		assert.ok(result.functions[0].content.includes("ctx.stash.queryBody"));
+		// Search function reads the stash and issues the OS HTTP request.
+		assert.ok(result.functions[1].content.includes("ctx.stash.queryBody"));
+		assert.ok(
+			result.functions[1].content.includes('operation: "GET"'),
+			"search function must issue an OpenSearch GET",
+		);
+	});
+
 	it("includes index name in request path", () => {
 		const projection = makeProjection({
 			indexName: "pets_v1",
@@ -109,7 +166,8 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes("/pets_v1/_search"));
+		// Index name lives in the search-datasource pipeline function only.
+		assert.ok(searchFunctionContent(result).includes("/pets_v1/_search"));
 	});
 
 	it("includes text fields in multi_match", () => {
@@ -118,7 +176,7 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes('"name","breed"'));
+		assert.ok(combinedContent(result).includes('"name","breed"'));
 	});
 
 	it("includes keyword fields in filter logic", () => {
@@ -130,7 +188,7 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes('"species","status"'));
+		assert.ok(combinedContent(result).includes('"species","status"'));
 	});
 
 	it("excludes nested and sub-projection fields from text fields", () => {
@@ -147,7 +205,7 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes('["name"]'));
+		assert.ok(combinedContent(result).includes('["name"]'));
 	});
 
 	it("excludes non-searchable filter-only fields from text_fields and keyword_fields but includes them in FILTER_SPEC", () => {
@@ -165,11 +223,11 @@ describe("emitGraphQLResolver", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
-			result.content.includes('fields: ["name"]'),
+			combinedContent(result).includes('fields: ["name"]'),
 			"counterpartyId is not @searchable so must not appear in multi_match fields",
 		);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'{i:"counterpartyId",k:"term",f:"counterpartyId"}',
 			),
 			"FILTER_SPEC must carry the term filter for the non-searchable field (compact-key form)",
@@ -190,9 +248,9 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes('fields: ["name"]'));
+		assert.ok(combinedContent(result).includes('fields: ["name"]'));
 		assert.ok(
-			result.content.includes("byType:"),
+			combinedContent(result).includes("byType:"),
 			"aggregation should still be emitted for non-searchable agg-only field",
 		);
 	});
@@ -205,9 +263,9 @@ describe("emitGraphQLResolver", () => {
 			trackTotalHitsUpTo: 5000,
 		});
 
-		assert.ok(result.content.includes("args.first || 10"));
-		assert.ok(result.content.includes("50)"));
-		assert.ok(result.content.includes("track_total_hits: 5000"));
+		assert.ok(combinedContent(result).includes("args.first || 10"));
+		assert.ok(combinedContent(result).includes("50)"));
+		assert.ok(combinedContent(result).includes("track_total_hits: 5000"));
 	});
 
 	it("uses projectedName for field references", () => {
@@ -216,8 +274,8 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes('"displayName"'));
-		assert.ok(!result.content.includes('"name"'));
+		assert.ok(combinedContent(result).includes('"displayName"'));
+		assert.ok(!combinedContent(result).includes('"name"'));
 	});
 
 	it("has no import statements except aws-appsync/utils", () => {
@@ -226,28 +284,38 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		const imports = result.content
-			.split("\n")
-			.filter((l) => l.startsWith("import "));
-		assert.equal(imports.length, 1);
-		assert.ok(imports[0].includes("@aws-appsync/utils"));
+		// Each emitted file (resolver + each pipeline function) has at most
+		// one import — and only `@aws-appsync/utils`.
+		const allFiles = [
+			result.content,
+			...result.functions.map((f) => f.content),
+		];
+		for (const file of allFiles) {
+			const imports = file.split("\n").filter((l) => l.startsWith("import "));
+			assert.ok(imports.length <= 1);
+			if (imports.length === 1) {
+				assert.ok(imports[0].includes("@aws-appsync/utils"));
+			}
+		}
 	});
 
 	it("falls back to _score desc then _id asc when sortBy arg is omitted", () => {
 		const projection = makeProjection({ fields: [] });
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes('{ _score: "desc" }'));
-		assert.ok(result.content.includes('{ _id: "asc" }'));
+		assert.ok(combinedContent(result).includes('{ _score: "desc" }'));
+		assert.ok(combinedContent(result).includes('{ _id: "asc" }'));
 		// New: resolver routes sort through buildSort(args.sortBy) so callers
 		// can override the fallback.
-		assert.ok(result.content.includes("buildSort(args.sortBy)"));
-		assert.ok(result.content.includes("function buildSort(sortBy)"));
+		assert.ok(combinedContent(result).includes("buildSort(args.sortBy)"));
+		assert.ok(combinedContent(result).includes("function buildSort(sortBy)"));
 	});
 
 	it("buildSort honors sortBy arg with multiple fields, appending _id tie-break", () => {
 		const projection = makeProjection({ fields: [] });
-		const source = emitGraphQLResolver(projection, defaultOptions).content;
+		const source = prepareFunctionContent(
+			emitGraphQLResolver(projection, defaultOptions),
+		);
 		const stripped = source
 			.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
 			.replace(/^export function /gm, "function ");
@@ -279,9 +347,9 @@ describe("emitGraphQLResolver", () => {
 		const projection = makeProjection({ fields: [] });
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes("search_after"));
-		assert.ok(result.content.includes("base64Decode"));
-		assert.ok(result.content.includes("base64Encode"));
+		assert.ok(combinedContent(result).includes("search_after"));
+		assert.ok(combinedContent(result).includes("base64Decode"));
+		assert.ok(combinedContent(result).includes("base64Encode"));
 	});
 
 	it("omits aggs block when no aggregations", () => {
@@ -290,8 +358,8 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(!result.content.includes("aggs:"));
-		assert.ok(!result.content.includes("aggregations:"));
+		assert.ok(!combinedContent(result).includes("aggs:"));
+		assert.ok(!combinedContent(result).includes("aggregations:"));
 	});
 
 	it("emits aggs block in request when fields have aggregations", () => {
@@ -315,12 +383,16 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes("aggs:"));
+		assert.ok(combinedContent(result).includes("aggs:"));
 		assert.ok(
-			result.content.includes('byTag: { terms: { field: "tags.keyword" } }'),
+			combinedContent(result).includes(
+				'byTag: { terms: { field: "tags.keyword" } }',
+			),
 		);
 		assert.ok(
-			result.content.includes('bySpecy: { terms: { field: "species" } }'),
+			combinedContent(result).includes(
+				'bySpecy: { terms: { field: "species" } }',
+			),
 		);
 	});
 
@@ -342,12 +414,12 @@ describe("emitGraphQLResolver", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'uniqueLocationCount: { cardinality: { field: "locations" } }',
 			),
 		);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'missingDescriptionCount: { missing: { field: "description.keyword" } }',
 			),
 		);
@@ -367,13 +439,13 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'byValidFromOverTime: { date_histogram: { field: "validFrom", calendar_interval: "month" } }',
 			),
 		);
 		assert.ok(
-			result.content.includes(
-				"byValidFromOverTime: (parsedBody.aggregations?.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: `${b.key_as_string ?? b.key}`, keyAsString: b.key_as_string ?? null, count: b.doc_count }))",
+			combinedContent(result).includes(
+				"byValidFromOverTime: (_a.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: `${b.key_as_string ?? b.key}`, keyAsString: b.key_as_string ?? null, count: b.doc_count }))",
 			),
 			"date_histogram response must use template-literal coercion (APPSYNC_JS forbids String()) and surface keyAsString",
 		);
@@ -402,13 +474,13 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'byNotionalRange: { range: { field: "notional", ranges: [{"to":1000},{"from":1000,"to":10000},{"from":10000}] } }',
 			),
 		);
 		assert.ok(
-			result.content.includes(
-				"byNotionalRange: (parsedBody.aggregations?.byNotionalRange?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count }))",
+			combinedContent(result).includes(
+				"byNotionalRange: (_a.byNotionalRange?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count }))",
 			),
 		);
 	});
@@ -432,12 +504,12 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }',
 			),
 		);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				", latestValidTo: b.latestValidTo?.value ?? null",
 			),
 		);
@@ -456,13 +528,13 @@ describe("emitGraphQLResolver", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "hits": { top_hits: { size: 5 } } } }',
 			),
 			"terms agg request must include hits sub-agg with top_hits.size",
 		);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				", hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)",
 			),
 			"terms response must unwrap hits.hits._source onto the bucket's hits field",
@@ -489,12 +561,12 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				'aggs: { "latestValidTo": { max: { field: "validTo" } }, "hits": { top_hits: { size: 3 } } }',
 			),
 		);
 		assert.ok(
-			result.content.includes(
+			combinedContent(result).includes(
 				", latestValidTo: b.latestValidTo?.value ?? null, hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)",
 			),
 		);
@@ -518,23 +590,29 @@ describe("emitGraphQLResolver", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
-			result.content.includes('notionalSum: { sum: { field: "notional" } }'),
+			combinedContent(result).includes(
+				'notionalSum: { sum: { field: "notional" } }',
+			),
 		);
 		assert.ok(
-			result.content.includes('notionalAvg: { avg: { field: "notional" } }'),
+			combinedContent(result).includes(
+				'notionalAvg: { avg: { field: "notional" } }',
+			),
 		);
-		assert.ok(result.content.includes('rankMin: { min: { field: "rank" } }'));
-		assert.ok(result.content.includes('rankMax: { max: { field: "rank" } }'));
+		assert.ok(
+			combinedContent(result).includes('rankMin: { min: { field: "rank" } }'),
+		);
+		assert.ok(
+			combinedContent(result).includes('rankMax: { max: { field: "rank" } }'),
+		);
 
 		assert.ok(
-			result.content.includes(
-				"notionalSum: parsedBody.aggregations?.notionalSum?.value ?? null",
+			combinedContent(result).includes(
+				"notionalSum: _a.notionalSum?.value ?? null",
 			),
 		);
 		assert.ok(
-			result.content.includes(
-				"rankMax: parsedBody.aggregations?.rankMax?.value ?? null",
-			),
+			combinedContent(result).includes("rankMax: _a.rankMax?.value ?? null"),
 		);
 	});
 
@@ -574,35 +652,28 @@ describe("emitGraphQLResolver", () => {
 
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
+		// All nested aggs sharing a path are grouped under one wrapper
+		// (`__n_<path>` key) — saves the per-agg `{ nested: ..., aggs: { inner: ... } }`
+		// skeleton on wide projections (issue #105).
 		assert.ok(
-			result.content.includes(
-				'byTagName: { nested: { path: "tags" }, aggs: { inner: { terms: { field: "tags.name" } } } }',
-			),
-		);
-		assert.ok(
-			result.content.includes(
-				'uniqueTagNameCount: { nested: { path: "tags" }, aggs: { inner: { cardinality: { field: "tags.name" } } } }',
-			),
-		);
-		assert.ok(
-			result.content.includes(
-				'missingTagNoteCount: { nested: { path: "tags" }, aggs: { inner: { missing: { field: "tags.note.keyword" } } } }',
+			combinedContent(result).includes(
+				'_tags: { nested: { path: "tags" }, aggs: { byTagName: { terms: { field: "tags.name" } }, uniqueTagNameCount: { cardinality: { field: "tags.name" } }, missingTagNoteCount: { missing: { field: "tags.note.keyword" } } } }',
 			),
 		);
 
 		assert.ok(
-			result.content.includes(
-				"byTagName: (parsedBody.aggregations?.byTagName?.inner?.buckets ?? []).map",
+			combinedContent(result).includes(
+				"byTagName: (_a_tags.byTagName?.buckets ?? []).map",
 			),
 		);
 		assert.ok(
-			result.content.includes(
-				"uniqueTagNameCount: parsedBody.aggregations?.uniqueTagNameCount?.inner?.value ?? 0",
+			combinedContent(result).includes(
+				"uniqueTagNameCount: _a_tags.uniqueTagNameCount?.value ?? 0",
 			),
 		);
 		assert.ok(
-			result.content.includes(
-				"missingTagNoteCount: parsedBody.aggregations?.missingTagNoteCount?.inner?.doc_count ?? 0",
+			combinedContent(result).includes(
+				"missingTagNoteCount: _a_tags.missingTagNoteCount?.doc_count ?? 0",
 			),
 		);
 	});
@@ -624,10 +695,12 @@ describe("emitGraphQLResolver", () => {
 
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes('byTag: { terms: { field: "tags.keyword" } }'),
+			combinedContent(result).includes(
+				'byTag: { terms: { field: "tags.keyword" } }',
+			),
 		);
 		// Aggs for non-@nested fields must not be wrapped in `{ nested: ... }`.
-		assert.ok(!result.content.includes("byTag: { nested:"));
+		assert.ok(!combinedContent(result).includes("byTag: { nested:"));
 	});
 
 	it("emits aggregations mapping in response", () => {
@@ -652,20 +725,18 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(result.content.includes("aggregations: {"));
+		assert.ok(combinedContent(result).includes("aggregations: {"));
 		assert.ok(
-			result.content.includes(
-				"byTag: (parsedBody.aggregations?.byTag?.buckets ?? []).map",
+			combinedContent(result).includes("byTag: (_a.byTag?.buckets ?? []).map"),
+		);
+		assert.ok(
+			combinedContent(result).includes(
+				"uniqueLocationCount: _a.uniqueLocationCount?.value ?? 0",
 			),
 		);
 		assert.ok(
-			result.content.includes(
-				"uniqueLocationCount: parsedBody.aggregations?.uniqueLocationCount?.value ?? 0",
-			),
-		);
-		assert.ok(
-			result.content.includes(
-				"missingDescriptionCount: parsedBody.aggregations?.missingDescriptionCount?.doc_count ?? 0",
+			combinedContent(result).includes(
+				"missingDescriptionCount: _a.missingDescriptionCount?.doc_count ?? 0",
 			),
 		);
 	});
@@ -708,13 +779,15 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
-		assert.ok(result.content.includes("const FILTER_SPEC = ["));
-		assert.ok(result.content.includes('"species"'));
-		assert.ok(result.content.includes('"speciesNot"'));
+		assert.ok(combinedContent(result).includes("const FILTER_SPEC = ["));
+		assert.ok(combinedContent(result).includes('"species"'));
+		assert.ok(combinedContent(result).includes('"speciesNot"'));
 		// Range now emits ONE FILTER_SPEC entry per field (#101); the
 		// resolver expands "rankGte"/"Lte"/"Gt"/"Lt" lookups at runtime.
-		assert.ok(result.content.includes('{i:"rank",k:"range",f:"rank"}'));
-		assert.ok(!result.content.includes('"rankGte"'));
+		assert.ok(
+			combinedContent(result).includes('{i:"rank",k:"range",f:"rank"}'),
+		);
+		assert.ok(!combinedContent(result).includes('"rankGte"'));
 	});
 
 	it("emits an empty FILTER_SPEC when no @filterable fields", () => {
@@ -722,7 +795,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			fields: [makeField({ name: "name" })],
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
-		assert.ok(result.content.includes("const FILTER_SPEC = []"));
+		assert.ok(combinedContent(result).includes("const FILTER_SPEC = []"));
 	});
 
 	it("buildQuery returns match_all when no inputs", () => {
@@ -730,7 +803,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			fields: [makeField({ name: "name" })],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		assert.deepEqual(buildQuery(undefined, undefined, undefined), {
 			match_all: {},
@@ -748,7 +821,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, { species: "cat" });
 		assert.deepEqual(result, {
@@ -769,7 +842,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, {
 			speciesIn: ["cat", "dog"],
@@ -792,7 +865,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, { speciesIn: [] });
 		assert.deepEqual(result, { match_all: {} });
@@ -809,7 +882,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, { speciesNot: "cat" });
 		assert.deepEqual(result, {
@@ -835,7 +908,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, {
 			tags: { name: "vip" },
@@ -872,7 +945,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, {
 			tags: { nameNot: "blocked" },
@@ -904,7 +977,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, {
 			createdAtGte: "2026-01-01",
@@ -934,7 +1007,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 
 		assert.deepEqual(
@@ -967,7 +1040,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery("fluffy", undefined, { species: "cat" }) as {
 			bool: { must: unknown[]; filter: unknown[] };
@@ -989,7 +1062,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, { species: "cat" }, undefined);
 		assert.deepEqual(result, {
@@ -1045,13 +1118,19 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		const forbidden = ["String", "Number", "Boolean", "Array", "Object"];
-		for (const name of forbidden) {
-			const re = new RegExp(`\\b${name}\\s*\\(`);
-			assert.equal(
-				re.test(result.content),
-				false,
-				`emitted resolver must not call \`${name}(...)\` — APPSYNC_JS rejects global coercion calls.\n--- emitted ---\n${result.content}\n--- end ---`,
-			);
+		const allFiles = [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
+		];
+		for (const file of allFiles) {
+			for (const name of forbidden) {
+				const re = new RegExp(`\\b${name}\\s*\\(`);
+				assert.equal(
+					re.test(file.content),
+					false,
+					`emitted ${file.name} must not call \`${name}(...)\` — APPSYNC_JS rejects global coercion calls.\n--- emitted ---\n${file.content}\n--- end ---`,
+				);
+			}
 		}
 	});
 
@@ -1135,8 +1214,13 @@ describe("emitGraphQLResolver search filter DSL", () => {
 
 		const dir = await mkdtemp(join(tmpdir(), "appsync-lint-"));
 		try {
-			const filePath = join(dir, "resolver.js");
-			await writeFile(filePath, result.content);
+			const fileNames = ["resolver.js"];
+			await writeFile(join(dir, "resolver.js"), result.content);
+			for (const fn of result.functions) {
+				const fileName = `${fn.name}.js`;
+				fileNames.push(fileName);
+				await writeFile(join(dir, fileName), fn.content);
+			}
 			// no-recursion is type-aware and needs a real TS project on disk.
 			await writeFile(
 				join(dir, "tsconfig.json"),
@@ -1148,7 +1232,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 						checkJs: false,
 						noEmit: true,
 					},
-					include: ["resolver.js"],
+					include: fileNames,
 				}),
 			);
 
@@ -1172,16 +1256,19 @@ describe("emitGraphQLResolver search filter DSL", () => {
 					},
 				],
 			});
-			const lintResults = await eslint.lintFiles([filePath]);
+			const lintResults = await eslint.lintFiles(
+				fileNames.map((n) => join(dir, n)),
+			);
 			const messages = lintResults.flatMap((r) =>
 				r.messages.map(
-					(m) => `[${m.ruleId ?? "fatal"}] line ${m.line ?? "?"}: ${m.message}`,
+					(m) =>
+						`[${m.ruleId ?? "fatal"}] ${r.filePath.split("/").pop()} line ${m.line ?? "?"}: ${m.message}`,
 				),
 			);
 			assert.deepEqual(
 				messages,
 				[],
-				`@aws-appsync/eslint-plugin reported issues:\n${messages.join("\n")}\n--- emitted resolver ---\n${result.content}`,
+				`@aws-appsync/eslint-plugin reported issues:\n${messages.join("\n")}\n--- emitted resolver ---\n${result.content}\n--- prepare ---\n${result.functions.find((f) => f.name === "prepare")?.content}\n--- search ---\n${result.functions.find((f) => f.name === "search")?.content}`,
 			);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
@@ -1206,7 +1293,9 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes('{i:"tagsExists",k:"nested_exists",p:"tags"}'),
+			combinedContent(result).includes(
+				'{i:"tagsExists",k:"nested_exists",p:"tags"}',
+			),
 			"FILTER_SPEC must carry a nested_exists entry with the path (compact-key form)",
 		);
 	});
@@ -1228,7 +1317,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 
 		const truthy = buildQuery(undefined, undefined, { tagsExists: true });
@@ -1267,7 +1356,7 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			],
 		});
 		const buildQuery = loadBuildQuery(
-			emitGraphQLResolver(projection, defaultOptions).content,
+			prepareFunctionContent(emitGraphQLResolver(projection, defaultOptions)),
 		);
 		const result = buildQuery(undefined, undefined, {
 			species: "cat",
@@ -1313,5 +1402,126 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			),
 			"nested exists clause missing",
 		);
+	});
+});
+
+describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
+	function makeWideSubProjection(
+		name: string,
+		extraFields: Array<ResolvedProjection["fields"][0]> = [],
+	): ResolvedProjection {
+		return {
+			projectionModel: { name: `${name}SearchDoc` },
+			sourceModel: { name },
+			indexName: name.toLowerCase(),
+			fields: [
+				makeField({
+					name: `${lowerFirst(name)}Id`,
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "type",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						"sum",
+						"avg",
+						"min",
+						"max",
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "updatedAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+				...extraFields,
+			],
+		} as unknown as ResolvedProjection;
+	}
+
+	function lowerFirst(s: string): string {
+		return s[0].toLowerCase() + s.slice(1);
+	}
+
+	it("counterparty-shape projection (7 nested sub-models) emits resolver under 32 KB AppSync cap", () => {
+		// Synthetic mirror of the consumer counterparty projection: 7 @nested
+		// sub-models (approvals/relations/locations/contacts/tags/groups/references),
+		// each with id+type+createdAt+updatedAt aggs/filters. Acceptance criterion
+		// from issue #105: counterparty-search-doc-resolver.js was 37,310 bytes
+		// post-#101 — needs to fit under AppSync's 32,768-byte resolver code cap.
+		const subShapes = [
+			"Approval",
+			"Relation",
+			"Location",
+			"Contact",
+			"Tag",
+			"Group",
+			"Reference",
+		];
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			indexName: "counterparties_v1",
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+				makeField({
+					name: "updatedAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+				...subShapes.map((shape) =>
+					makeField({
+						name: `${shape.toLowerCase()}s`,
+						nested: true,
+						subProjection: makeWideSubProjection(shape),
+						filterables: ["exists"],
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				),
+			],
+		});
+
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		// Pipeline resolver: cap is per-file (resolver after-mapping + each
+		// pipeline function), not the sum. Issue #105 acceptance: each emitted
+		// file under AppSync's 32,768-byte cap, with headroom for future growth.
+		const files = [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
+		];
+		for (const file of files) {
+			const bytes = Buffer.byteLength(file.content, "utf8");
+			assert.ok(
+				bytes < 32_768,
+				`wide projection ${file.name} file is ${bytes} bytes; must stay under AppSync's 32,768-byte per-file cap (issue #105). Headroom: ${32_768 - bytes} bytes.`,
+			);
+		}
 	});
 });

@@ -109,6 +109,12 @@ export async function $onEmit(
 				path: resolvePath(context.emitterOutputDir, resolverFile.fileName),
 				content: resolverFile.content,
 			});
+			for (const fn of resolverFile.functions) {
+				await emitFile(context.program, {
+					path: resolvePath(context.emitterOutputDir, fn.fileName),
+					content: fn.content,
+				});
+			}
 		}
 
 		const manifest = generateGraphQLManifest(resolved, resolverFiles);
@@ -233,6 +239,11 @@ function generateGraphQLManifest(
 			queryFieldName: resolver.queryFieldName,
 			resolverFile: resolver.fileName,
 			sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,
+			functions: resolver.functions.map((fn) => ({
+				name: fn.name,
+				file: fn.fileName,
+				dataSource: fn.dataSource,
+			})),
 		};
 	});
 
@@ -316,6 +327,8 @@ function generatePackageJson(
 			const kebab = toKebabCase(projection.projectionModel.name);
 			artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
 			artifactExports[`./${kebab}-resolver.js`] = `./${kebab}-resolver.js`;
+			artifactExports[`./${kebab}-fn-prepare.js`] = `./${kebab}-fn-prepare.js`;
+			artifactExports[`./${kebab}-fn-search.js`] = `./${kebab}-fn-search.js`;
 		}
 	}
 

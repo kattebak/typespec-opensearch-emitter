@@ -40,6 +40,12 @@ export function emitGraphQLSdl(
 	lines.push(renderObjectType(program, projection));
 	lines.push("");
 
+	const nestedStructTypes = renderNestedStructTypes(program, projection);
+	if (nestedStructTypes) {
+		lines.push(nestedStructTypes);
+		lines.push("");
+	}
+
 	const filterType = renderFilterInput(projection);
 	if (filterType) {
 		lines.push(filterType);
@@ -88,6 +94,66 @@ function renderObjectType(
 			return `  ${gqlName}: ${gqlType}${nullable}`;
 		});
 
+	return `type ${typeName} {\n${fieldLines.join("\n")}\n}`;
+}
+
+/**
+ * Emit `type <Name> { ... }` blocks for nested struct models referenced from
+ * the response shape (e.g. `Address`, `EmailRecord`). Without these the
+ * assembled AppSync schema fails validation because field types are not
+ * present.
+ *
+ * Only walks virtual sub-projections (the field's struct type itself, not an
+ * explicit `SearchProjection<T>` instantiation). Explicit projections already
+ * emit their own `<Type> { ... }` block via their own SDL file.
+ */
+function renderNestedStructTypes(
+	program: Program,
+	projection: ResolvedProjection,
+): string | undefined {
+	const blocks: string[] = [];
+	const seen = new Set<string>();
+	collectNestedStructTypes(program, projection, blocks, seen);
+	if (blocks.length === 0) return undefined;
+	return blocks.join("\n\n");
+}
+
+function collectNestedStructTypes(
+	program: Program,
+	projection: ResolvedProjection,
+	out: string[],
+	seen: Set<string>,
+): void {
+	for (const field of projection.fields) {
+		if (!field.searchable) continue;
+		if (!field.subProjection) continue;
+		if (!isVirtualSubProjection(field.subProjection)) continue;
+		const sub = field.subProjection;
+		const name = sub.projectionModel.name;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		out.push(renderVirtualStructType(program, sub));
+		collectNestedStructTypes(program, sub, out, seen);
+	}
+}
+
+function isVirtualSubProjection(sub: ResolvedProjection): boolean {
+	// buildVirtualSubProjection sets projectionModel === sourceModel; explicit
+	// SearchProjection<T> instantiations have distinct projection/source models.
+	return sub.projectionModel === sub.sourceModel;
+}
+
+function renderVirtualStructType(
+	program: Program,
+	sub: ResolvedProjection,
+): string {
+	const typeName = sub.projectionModel.name;
+	const fieldLines = sub.fields.map((field) => {
+		const gqlName = field.projectedName ?? field.name;
+		const gqlType = toGraphQLType(program, field.type, field);
+		const nullable = field.optional ? "" : "!";
+		return `  ${gqlName}: ${gqlType}${nullable}`;
+	});
 	return `type ${typeName} {\n${fieldLines.join("\n")}\n}`;
 }
 
@@ -275,7 +341,15 @@ function renderAggregationTypes(
 	const sharedBucketTypes = new Set<string>();
 	const customBucketTypes: string[] = [];
 
-	const fieldLines = entries.map((entry) => {
+	// Dedupe by aggName — same fieldLine matches the resolver-side dedupe in
+	// renderAggsBlock. Without this, an aggregation declared on a field that
+	// the projection emits twice (e.g. via spread) produces a duplicate-field
+	// SDL block, which AppSync schema validation rejects.
+	const seenAggNames = new Set<string>();
+	const fieldLines: string[] = [];
+	for (const entry of entries) {
+		if (seenAggNames.has(entry.aggName)) continue;
+		seenAggNames.add(entry.aggName);
 		const gqlType = aggregationGraphQLType(entry, sharedBucketTypes);
 		if (entry.kind === "terms" && entry.options) {
 			const opts = entry.options as {
@@ -299,11 +373,12 @@ function renderAggregationTypes(
 						"}",
 					].join("\n"),
 				);
-				return `  ${entry.aggName}: [${bucketTypeName}!]!`;
+				fieldLines.push(`  ${entry.aggName}: [${bucketTypeName}!]!`);
+				continue;
 			}
 		}
-		return `  ${entry.aggName}: ${gqlType}`;
-	});
+		fieldLines.push(`  ${entry.aggName}: ${gqlType}`);
+	}
 
 	const sharedBucketBlocks: string[] = [];
 	if (sharedBucketTypes.has("TermBucket")) {
