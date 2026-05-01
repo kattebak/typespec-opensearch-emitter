@@ -67,7 +67,7 @@ describe("collectFilterables", () => {
 		assert.deepEqual(collectFilterables(projection), []);
 	});
 
-	it("expands range into four bound entries", () => {
+	it("emits a single range entry per field; the resolver expands to 4 bound checks at runtime (issue #101)", () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -79,16 +79,11 @@ describe("collectFilterables", () => {
 		});
 
 		const entries = collectFilterables(projection);
-		assert.equal(entries.length, 4);
-		assert.deepEqual(
-			entries.map((e) => e.inputFieldName),
-			["rankGte", "rankLte", "rankGt", "rankLt"],
-		);
-		for (const entry of entries) {
-			assert.equal(entry.kind, "range");
-			assert.equal(entry.openSearchField, "rank");
-			assert.equal(entry.nestedPath, undefined);
-		}
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].kind, "range");
+		assert.equal(entries[0].inputFieldName, "rank");
+		assert.equal(entries[0].openSearchField, "rank");
+		assert.equal(entries[0].nestedPath, undefined);
 	});
 
 	it("emits term and term_negate as separate input fields", () => {
@@ -249,17 +244,17 @@ describe("buildSearchFilterShape", () => {
 		assert.ok(shape);
 		assert.equal(shape.typeName, "PetSearchFilter");
 		const inputNames = shape.nodes.map((n) => n.inputName);
+		// Range collapses to a single entry; SDL renderer expands the four
+		// bound inputs from it (issue #101).
 		assert.deepEqual(inputNames, [
 			"species",
 			"speciesNot",
 			"nicknameExists",
-			"rankGte",
-			"rankLte",
-			"rankGt",
-			"rankLt",
+			"rank",
 		]);
 		const range = shape.nodes.filter((n) => n.kind === "range");
-		assert.equal(range.length, 4);
+		assert.equal(range.length, 1);
+		assert.equal(range[0].inputName, "rank");
 	});
 
 	it("emits a nested node + a separate sub-shape for @nested sub-projection", () => {

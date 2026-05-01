@@ -711,8 +711,10 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		assert.ok(result.content.includes("const FILTER_SPEC = ["));
 		assert.ok(result.content.includes('"species"'));
 		assert.ok(result.content.includes('"speciesNot"'));
-		assert.ok(result.content.includes('"rankGte"'));
-		assert.ok(result.content.includes('"rankLte"'));
+		// Range now emits ONE FILTER_SPEC entry per field (#101); the
+		// resolver expands "rankGte"/"Lte"/"Gt"/"Lt" lookups at runtime.
+		assert.ok(result.content.includes('{i:"rank",k:"range",f:"rank"}'));
+		assert.ok(!result.content.includes('"rankGte"'));
 	});
 
 	it("emits an empty FILTER_SPEC when no @filterable fields", () => {

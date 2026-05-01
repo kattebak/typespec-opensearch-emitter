@@ -32,10 +32,14 @@ function isReachable(
 	) {
 		return true;
 	}
-	// On a @searchInfer model, every source-model field is reachable unless
-	// the field opts out with @searchSkip. Inference (see inferDirectives)
-	// fills in the filterable/aggregatable axes per field type.
-	return inferOnModel && !isSearchSkip(program, prop);
+	if (isSearchSkip(program, prop)) return false;
+	// On a @searchInfer model, every source-model field is reachable.
+	if (inferOnModel) return true;
+	// Issue #102: even if the parent projection lacks @searchInfer, admit a
+	// field whose type model carries @searchInfer — it'll auto-recurse into
+	// a virtual sub-projection.
+	const typeModel = unwrapStructModel(prop.type);
+	return !!typeModel && isSearchInfer(program, typeModel);
 }
 
 import { reportDiagnostic } from "./lib.js";
@@ -141,9 +145,9 @@ export function resolveProjectionModel(
 		// SearchProjection<T>), build a virtual sub-projection so the parent
 		// SearchFilter can reference <NestedType>SearchFilter.
 		if (
-			inferOnModel &&
 			!field.subProjection &&
-			!isSearchSkip(program, sourceProperty)
+			!isSearchSkip(program, sourceProperty) &&
+			shouldVirtualRecurse(program, field.type, inferOnModel)
 		) {
 			const virtual = buildVirtualSubProjection(
 				program,
@@ -462,6 +466,40 @@ function isNumericRootName(name: string | undefined): boolean {
  * `<fieldName>: <NestedType>SearchFilter`, and FILTER_SPEC dispatch threads
  * the dotted path (or nested wrapper if the field is `@nested`).
  */
+/**
+ * Per #102: a struct field should auto-recurse into a virtual sub-projection
+ * when EITHER (a) the parent's projection model has @searchInfer, OR (b) the
+ * field's underlying model carries @searchInfer itself. Recursion follows
+ * model identity, not the emit root — so an `Address` model with @searchInfer
+ * gets its nested filter input even when emitted inside a parent that lacks
+ * @searchInfer (e.g. an explicit `LocationSearchDoc is SearchProjection<Location>`
+ * embedded in a `@searchInfer`-decorated `CounterpartySearchDoc`).
+ */
+function shouldVirtualRecurse(
+	program: Program,
+	type: Type,
+	parentInfersInferContext: boolean,
+): boolean {
+	if (parentInfersInferContext) return true;
+	const model = unwrapStructModel(type);
+	return !!model && isSearchInfer(program, model);
+}
+
+function unwrapStructModel(type: Type): Model | undefined {
+	if (type.kind !== "Model") return undefined;
+	if (
+		type.name === "Array" &&
+		type.indexer?.value?.kind === "Model" &&
+		type.indexer.value.name !== "Array"
+	) {
+		return type.indexer.value;
+	}
+	if (type.name && type.name !== "Array" && type.properties) {
+		return type;
+	}
+	return undefined;
+}
+
 function buildVirtualSubProjection(
 	program: Program,
 	type: Type,
@@ -571,6 +609,24 @@ function resolveSubProjectionModel(
 			);
 			if (subProj) {
 				field.subProjection = subProj;
+			}
+		}
+
+		// Type-identity recursion (issue #102): even when this projection
+		// model lacks @searchInfer, recurse into a struct field whose own
+		// model carries @searchInfer.
+		if (
+			!field.subProjection &&
+			!isSearchSkip(program, sourceProperty) &&
+			shouldVirtualRecurse(program, field.type, inferOnModel)
+		) {
+			const virtual = buildVirtualSubProjection(
+				program,
+				field.type,
+				new Set([model.name]),
+			);
+			if (virtual) {
+				field.subProjection = virtual;
 			}
 		}
 

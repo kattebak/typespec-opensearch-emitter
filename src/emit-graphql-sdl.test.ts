@@ -453,6 +453,50 @@ describe("emitGraphQLSdl SearchFilter input", () => {
 		assert.ok(!result.content.includes("SearchFilter"));
 	});
 
+	it("emits each <Type>SearchFilter input at most once even when reachable via multiple paths (issue #103)", () => {
+		// Construct a shape where the same nested filter type is reachable
+		// via two different parent fields; without dedup the SDL emits two
+		// `input AddressSearchFilter { ... }` blocks.
+		const addressSub = {
+			projectionModel: { name: "AddressSearchDoc" },
+			sourceModel: { name: "Address" },
+			indexName: "addresses",
+			fields: [
+				makeField({
+					name: "country",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			fields: [
+				makeField({
+					name: "homeAddress",
+					subProjection: addressSub,
+					type: { kind: "Model" } as unknown as Type,
+				}),
+				makeField({
+					name: "billingAddress",
+					subProjection: addressSub,
+					type: { kind: "Model" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		const addressInputCount = (
+			result.content.match(/^input AddressSearchFilter \{/gm) ?? []
+		).length;
+		assert.equal(
+			addressInputCount,
+			1,
+			"AddressSearchFilter must be declared exactly once in the SDL",
+		);
+	});
+
 	it("emits term, term_negate, exists, range fields with proper suffixes", () => {
 		const projection = makeProjection({
 			name: "PetSearchDoc",

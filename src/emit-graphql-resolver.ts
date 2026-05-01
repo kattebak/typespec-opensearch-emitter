@@ -272,11 +272,13 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 				const input = item.input;
 				const outFilters = item.outFilters;
 				const outMustNots = item.outMustNots;
-				const rangeBuckets = {};
 
 				// FILTER_SPEC nodes use compact keys to fit under AppSync's 32 KB
 				// resolver code cap (issue #99): i=inputName, k=kind, f=field,
-				// p=path, c=children, b=bound. See stringifyNode in the emitter.
+				// p=path, c=children. See stringifyNode in the emitter. Range
+				// kind carries one entry per field; the resolver expands the
+				// four bound inputs (i+"Gte"/Lte/Gt/Lt) at iteration time
+				// (issue #101).
 				for (const node of spec) {
 					const value = input[node.i];
 					if (node.k === "nested") {
@@ -354,15 +356,29 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 							}
 						}
 					} else if (node.k === "range") {
-						if (value != null) {
-							const bucket = (rangeBuckets[node.f] = rangeBuckets[node.f] || {});
-							bucket[node.b] = value;
+						const base = node.i;
+						const bounds = {};
+						let any = false;
+						if (input[base + "Gte"] != null) {
+							bounds.gte = input[base + "Gte"];
+							any = true;
+						}
+						if (input[base + "Lte"] != null) {
+							bounds.lte = input[base + "Lte"];
+							any = true;
+						}
+						if (input[base + "Gt"] != null) {
+							bounds.gt = input[base + "Gt"];
+							any = true;
+						}
+						if (input[base + "Lt"] != null) {
+							bounds.lt = input[base + "Lt"];
+							any = true;
+						}
+						if (any) {
+							outFilters.push({ range: { [node.f]: bounds } });
 						}
 					}
-				}
-
-				for (const field in rangeBuckets) {
-					outFilters.push({ range: { [field]: rangeBuckets[field] } });
 				}
 			}
 		}
@@ -401,7 +417,7 @@ function stringifyNode(node: FilterSpecNode): string {
 		return `{i:${i},k:"nested_exists",p:${JSON.stringify(node.path ?? "")}}`;
 	}
 	if (node.kind === "range") {
-		return `{i:${i},k:"range",f:${JSON.stringify(node.field ?? "")},b:${JSON.stringify(node.bound ?? "")}}`;
+		return `{i:${i},k:"range",f:${JSON.stringify(node.field ?? "")}}`;
 	}
 	return `{i:${i},k:${JSON.stringify(node.kind)},f:${JSON.stringify(node.field ?? "")}}`;
 }

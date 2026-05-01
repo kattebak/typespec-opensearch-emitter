@@ -114,7 +114,12 @@ function renderSearchFilterInputs(
 	shape: SearchFilterShape,
 ): string {
 	const blocks: string[] = [];
-	renderSearchFilterShapeRecursive(program, shape, blocks);
+	// Dedup `<Type>SearchFilter` declarations by typeName (issue #103). The
+	// same nested shape can be reachable via multiple paths in the recursion
+	// graph; without dedup the SDL ends up with two `input X { ... }` blocks
+	// for the same X, which is ill-formed.
+	const seen = new Set<string>();
+	renderSearchFilterShapeRecursive(program, shape, blocks, seen);
 	return blocks.join("\n\n");
 }
 
@@ -122,10 +127,13 @@ function renderSearchFilterShapeRecursive(
 	program: Program,
 	shape: SearchFilterShape,
 	out: string[],
+	seen: Set<string>,
 ): void {
+	if (seen.has(shape.typeName)) return;
+	seen.add(shape.typeName);
 	out.push(renderSearchFilterInputBlock(program, shape));
 	for (const sub of shape.nestedShapes) {
-		renderSearchFilterShapeRecursive(program, sub, out);
+		renderSearchFilterShapeRecursive(program, sub, out, seen);
 	}
 }
 
@@ -155,6 +163,16 @@ function renderSearchFilterField(
 	const baseScalar = stripListWrap(gqlType);
 	if (node.kind === "terms") {
 		return `  ${node.inputName}: [${baseScalar}!]`;
+	}
+	if (node.kind === "range") {
+		// FILTER_SPEC carries one entry per range field; SDL still renders
+		// four bound inputs (issue #101).
+		return [
+			`  ${node.inputName}Gte: ${baseScalar}`,
+			`  ${node.inputName}Lte: ${baseScalar}`,
+			`  ${node.inputName}Gt: ${baseScalar}`,
+			`  ${node.inputName}Lt: ${baseScalar}`,
+		].join("\n");
 	}
 	return `  ${node.inputName}: ${baseScalar}`;
 }

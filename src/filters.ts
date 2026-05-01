@@ -80,16 +80,20 @@ function filterableEntriesForField(
 
 	for (const kind of field.filterables ?? []) {
 		if (kind === "range") {
-			for (const bound of RANGE_BOUNDS) {
-				entries.push({
-					field,
-					kind,
-					openSearchField,
-					nestedPath,
-					inputFieldName: `${projectedName}${RANGE_BOUND_SUFFIX[bound]}`,
-					rangeBound: bound,
-				});
-			}
+			// Single FILTER_SPEC entry per range field; the resolver expands
+			// the four bound checks (Gte/Lte/Gt/Lt) at iteration time. Saves
+			// ~3 entries per range-filterable field on wide projections
+			// (issue #101 — keeps the inline FILTER_SPEC under the AppSync
+			// 32 KB cap on the consumer's 8-sub-model shape). The SDL emitter
+			// still renders the four bound input fields by expanding this
+			// single entry — see renderSearchFilterField.
+			entries.push({
+				field,
+				kind,
+				openSearchField,
+				nestedPath,
+				inputFieldName: projectedName,
+			});
 			continue;
 		}
 		entries.push({
