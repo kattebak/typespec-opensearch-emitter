@@ -15,14 +15,26 @@ import {
 	isKeyword,
 	isNested,
 	isSearchable,
+	isSearchInfer,
+	isSearchSkip,
 } from "./decorators.js";
 
-function isReachable(program: Program, prop: ModelProperty): boolean {
-	return (
+function isReachable(
+	program: Program,
+	prop: ModelProperty,
+	inferOnModel: boolean,
+): boolean {
+	if (
 		isSearchable(program, prop) ||
 		hasFilterable(program, prop) ||
 		hasAggregatable(program, prop)
-	);
+	) {
+		return true;
+	}
+	// On a @searchInfer model, every source-model field is reachable unless
+	// the field opts out with @searchSkip. Inference (see inferDirectives)
+	// fills in the filterable/aggregatable axes per field type.
+	return inferOnModel && !isSearchSkip(program, prop);
 }
 
 import { reportDiagnostic } from "./lib.js";
@@ -93,9 +105,11 @@ export function resolveProjectionModel(
 		return undefined;
 	}
 
+	const inferOnModel = isSearchInfer(program, projectionModel);
+
 	const fields: ResolvedProjectionField[] = [];
 	for (const sourceProperty of sourceModel.properties.values()) {
-		if (!isReachable(program, sourceProperty)) {
+		if (!isReachable(program, sourceProperty, inferOnModel)) {
 			continue;
 		}
 
@@ -106,6 +120,7 @@ export function resolveProjectionModel(
 			program,
 			sourceProperty,
 			projectionProperty,
+			inferOnModel,
 		);
 
 		// Check if the projection redeclares this field with a sub-projection type
@@ -139,7 +154,7 @@ export function resolveProjectionModel(
 			const spreadSourceProp = projProp.sourceProperty!;
 
 			// Only include reachable fields from the spread source
-			if (!isReachable(program, spreadSourceProp)) {
+			if (!isReachable(program, spreadSourceProp, inferOnModel)) {
 				continue;
 			}
 
@@ -154,7 +169,12 @@ export function resolveProjectionModel(
 			}
 
 			// Resolve the spread field using the spread source property
-			const field = resolveProjectionField(program, spreadSourceProp, projProp);
+			const field = resolveProjectionField(
+				program,
+				spreadSourceProp,
+				projProp,
+				inferOnModel,
+			);
 
 			// Check for sub-projection on the projection property
 			const subProj = resolveSubProjectionFromType(program, projProp.type);
@@ -167,7 +187,7 @@ export function resolveProjectionModel(
 			continue;
 		}
 
-		if (!sourceProp || !isReachable(program, sourceProp)) {
+		if (!sourceProp || !isReachable(program, sourceProp, inferOnModel)) {
 			// Allow sub-projection fields that reference a valid source field
 			const subProj = resolveSubProjectionFromType(program, projProp.type);
 			if (!subProj || !sourceProp) {
@@ -193,6 +213,7 @@ function resolveProjectionField(
 	program: Program,
 	sourceProperty: ModelProperty,
 	projectionProperty?: ModelProperty,
+	inferOnModel = false,
 ): ResolvedProjectionField {
 	const analyzer =
 		(projectionProperty && getAnalyzer(program, projectionProperty)) ??
@@ -208,35 +229,174 @@ function resolveProjectionField(
 		(projectionProperty && getSearchAs(program, projectionProperty)) ??
 		getSearchAs(program, sourceProperty);
 
-	const aggregations =
+	const explicitAggregations =
 		(projectionProperty &&
 			getAggregatableDirectives(program, projectionProperty)) ??
 		getAggregatableDirectives(program, sourceProperty);
 
-	const filterables =
+	const explicitFilterables =
 		(projectionProperty && getFilterableKinds(program, projectionProperty)) ??
 		getFilterableKinds(program, sourceProperty);
+
+	const fieldType = projectionProperty?.type ?? sourceProperty.type;
+	const keyword =
+		(projectionProperty && isKeyword(program, projectionProperty)) ||
+		isKeyword(program, sourceProperty);
+	const nested =
+		(projectionProperty && isNested(program, projectionProperty)) ||
+		isNested(program, sourceProperty);
+
+	// @searchInfer fills empty axes from the inference table. Explicit
+	// decorators on either axis still win on that axis (the other axis
+	// gets inferred independently). @searchSkip on the source property
+	// suppresses inference entirely.
+	const skipInference = isSearchSkip(program, sourceProperty);
+	const inferred =
+		inferOnModel && !skipInference
+			? inferDirectives(fieldType, { keyword, nested })
+			: undefined;
+
+	const aggregations =
+		explicitAggregations ?? inferred?.aggregations ?? undefined;
+	const filterables = explicitFilterables ?? inferred?.filterables ?? undefined;
 
 	return {
 		name: sourceProperty.name,
 		projectedName: searchAs,
-		type: projectionProperty?.type ?? sourceProperty.type,
+		type: fieldType,
 		optional: projectionProperty?.optional ?? sourceProperty.optional,
 		sourceProperty,
 		projectionProperty,
 		searchable: isSearchable(program, sourceProperty),
-		keyword:
-			(projectionProperty && isKeyword(program, projectionProperty)) ||
-			isKeyword(program, sourceProperty),
-		nested:
-			(projectionProperty && isNested(program, projectionProperty)) ||
-			isNested(program, sourceProperty),
+		keyword,
+		nested,
 		analyzer,
 		boost,
 		ignoreAbove,
 		aggregations,
 		filterables,
 	};
+}
+
+interface InferredDirectives {
+	filterables?: FilterableKind[];
+	aggregations?: AggregationDirective[];
+}
+
+/**
+ * Type-driven defaults for fields on a `@searchInfer` model.
+ *
+ * Per issue #92's inference table:
+ * - utcDateTime / plainDate → range filter, date_histogram(month) agg
+ * - string + @keyword → term/exists filter, terms agg
+ * - free-text string (no @keyword) → none, none
+ * - numeric → range filter, sum/avg/min/max aggs
+ * - boolean → term filter, no agg
+ * - @nested array → exists (path-level) filter, no agg (sub-projection
+ *   carries its own @searchInfer if desired)
+ * - enum / scalar union → term/exists filter, terms agg
+ * - bytes → none, none
+ */
+function inferDirectives(
+	type: Type,
+	flags: { keyword: boolean; nested: boolean },
+): InferredDirectives {
+	if (flags.nested) {
+		return { filterables: ["exists"] };
+	}
+
+	if (type.kind === "Enum") {
+		return {
+			filterables: ["term", "exists"],
+			aggregations: [{ kind: "terms" }],
+		};
+	}
+	if (type.kind === "Union") {
+		return {
+			filterables: ["term", "exists"],
+			aggregations: [{ kind: "terms" }],
+		};
+	}
+	if (type.kind === "Boolean") {
+		return { filterables: ["term"] };
+	}
+	if (type.kind === "Scalar") {
+		const root = scalarRootName(type);
+		if (root === "boolean") return { filterables: ["term"] };
+		if (root === "utcDateTime" || root === "plainDate") {
+			return {
+				filterables: ["range"],
+				aggregations: [
+					{ kind: "date_histogram", options: { interval: "month" } },
+				],
+			};
+		}
+		if (isNumericRootName(root)) {
+			return {
+				filterables: ["range"],
+				aggregations: [
+					{ kind: "sum" },
+					{ kind: "avg" },
+					{ kind: "min" },
+					{ kind: "max" },
+				],
+			};
+		}
+		if (root === "string") {
+			if (flags.keyword) {
+				return {
+					filterables: ["term", "exists"],
+					aggregations: [{ kind: "terms" }],
+				};
+			}
+			// Free-text string — too ambiguous to infer.
+			return {};
+		}
+		if (root === "bytes") return {};
+	}
+	if (type.kind === "String") {
+		// Plain string literal type — same call as string. @keyword tells us
+		// whether to enable term/terms; without it, leave alone.
+		if (flags.keyword) {
+			return {
+				filterables: ["term", "exists"],
+				aggregations: [{ kind: "terms" }],
+			};
+		}
+		return {};
+	}
+	return {};
+}
+
+function scalarRootName(type: Type): string | undefined {
+	let current: Type | undefined = type;
+	while (current && current.kind === "Scalar") {
+		if (!current.baseScalar) return current.name;
+		current = current.baseScalar;
+	}
+	return undefined;
+}
+
+function isNumericRootName(name: string | undefined): boolean {
+	if (!name) return false;
+	return [
+		"int8",
+		"int16",
+		"int32",
+		"int64",
+		"integer",
+		"safeint",
+		"uint8",
+		"uint16",
+		"uint32",
+		"uint64",
+		"float",
+		"float32",
+		"float64",
+		"decimal",
+		"numeric",
+		"number",
+	].includes(name);
 }
 
 /**
@@ -267,9 +427,11 @@ function resolveSubProjectionModel(
 		return undefined;
 	}
 
+	const inferOnModel = isSearchInfer(program, model);
+
 	const fields: ResolvedProjectionField[] = [];
 	for (const sourceProperty of sourceModel.properties.values()) {
-		if (!isReachable(program, sourceProperty)) {
+		if (!isReachable(program, sourceProperty, inferOnModel)) {
 			continue;
 		}
 
@@ -278,6 +440,7 @@ function resolveSubProjectionModel(
 			program,
 			sourceProperty,
 			projectionProperty,
+			inferOnModel,
 		);
 
 		if (projectionProperty) {

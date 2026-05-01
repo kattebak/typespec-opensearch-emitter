@@ -10,6 +10,8 @@ export {
 	$nested,
 	$searchAs,
 	$searchable,
+	$searchInfer,
+	$searchSkip,
 	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
@@ -21,6 +23,8 @@ export {
 	isKeyword,
 	isNested,
 	isSearchable,
+	isSearchInfer,
+	isSearchSkip,
 	namespace,
 } from "./decorators.js";
 export { $onEmit } from "./emitter.js";

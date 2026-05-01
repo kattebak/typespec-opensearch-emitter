@@ -31,6 +31,25 @@ export function isSearchable(program: Program, target: ModelProperty): boolean {
 	return program.stateSet(StateKeys.searchable).has(target);
 }
 
+export function $searchInfer(context: DecoratorContext, target: Model): void {
+	context.program.stateSet(StateKeys.searchInfer).add(target);
+}
+
+export function isSearchInfer(program: Program, target: Model): boolean {
+	return program.stateSet(StateKeys.searchInfer).has(target);
+}
+
+export function $searchSkip(
+	context: DecoratorContext,
+	target: ModelProperty,
+): void {
+	context.program.stateSet(StateKeys.searchSkip).add(target);
+}
+
+export function isSearchSkip(program: Program, target: ModelProperty): boolean {
+	return program.stateSet(StateKeys.searchSkip).has(target);
+}
+
 export function $keyword(
 	context: DecoratorContext,
 	target: ModelProperty,

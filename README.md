@@ -268,6 +268,57 @@ In this example:
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
 | `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub. See [Aggregations](#aggregations-aggregatable) for the option shapes. | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("date_histogram", #{ interval: "month" }) validFrom: utcDateTime;` |
 | `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"exists"`, `"range"`. On a `@nested` array field, `"exists"` becomes a path-level nested-existence check (`true` matches docs with at least one nested element; `false` matches docs with none). | `@filterable("term", "term_negate") status: string;` / `@filterable("exists") @nested tags: Tag[];` |
+| `@searchInfer` | `Model` (projection) | Walks the source model's fields and applies type-driven default `@filterable` / `@aggregatable` capabilities (see [Inference](#searchinfer-type-driven-defaults)). Explicit decorators on a field always win on their axis. | `@searchInfer model TradeSearchDoc is SearchProjection<Trade> {}` |
+| `@searchSkip` | `ModelProperty` | Opts a field out of `@searchInfer` inference. The field is still included in response shape if `@searchable` / `@nested` apply; without those, the field is excluded entirely. | `@searchable @searchSkip auditTrail: string;` |
+
+## `@searchInfer` (type-driven defaults)
+
+Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical search projection. `@searchInfer` is a model-level decorator that walks the source model's properties and applies a default capability set per type:
+
+| Field type | Default `@filterable` | Default `@aggregatable` |
+| --- | --- | --- |
+| `utcDateTime` / `plainDate` | `range` | `date_histogram(month)` |
+| `string` + `@keyword` | `term`, `exists` | `terms` |
+| free-text `string` (no `@keyword`) | (none) | (none) |
+| numeric (`int*`, `float*`, `decimal`, …) | `range` | `sum`, `avg`, `min`, `max` |
+| `boolean` | `term` | (none) |
+| `@nested` array field | `exists` (path-level) | (none — sub-projection carries its own `@searchInfer` if desired) |
+| Enum / scalar union | `term`, `exists` | `terms` |
+| `bytes` | (none) | (none) |
+
+### Override semantics
+
+- **No decorators on the field**: gets the inferred set from the table.
+- **Explicit `@filterable` on the field**: explicit replaces inferred filterables; agg axis still gets inferred.
+- **Explicit `@aggregatable` on the field**: explicit replaces inferred aggregations; filter axis still gets inferred.
+- **`@searchSkip` on the field**: emit nothing on either axis. The field stays in response shape if `@searchable` / `@nested` apply; otherwise it's excluded.
+- **No `@searchInfer` on the model**: existing rules — a field is included only if it carries `@searchable`, `@filterable`, or `@aggregatable`.
+
+```typespec
+model Trade {
+  @searchable id: string;
+  @keyword counterpartyId: string;
+  notional: float64;
+  validFrom: utcDateTime;
+  active: boolean;
+  notes: string;                              // free-text — no inference
+  @searchable @searchSkip auditTrail: string; // in response shape, no filters/aggs
+}
+
+@searchInfer
+model TradeSearchDoc is SearchProjection<Trade> {
+  @filterable("term") notional: float64;     // explicit filter, inferred aggs
+}
+```
+
+In the example above:
+- `id` → no inference (free-text string), but stays in the projection because of `@searchable`.
+- `counterpartyId` → `term`+`exists` filters and `terms` agg (string + `@keyword`).
+- `notional` → explicit `@filterable("term")` replaces inferred `range`; agg axis gets inferred `sum`/`avg`/`min`/`max`.
+- `validFrom` → inferred `range` filter and `date_histogram(month)` agg.
+- `active` → inferred `term` filter, no agg.
+- `notes` → no inference (no `@keyword`).
+- `auditTrail` → in response shape, no filters or aggs.
 
 ## Type mapping
 
