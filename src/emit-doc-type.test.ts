@@ -58,12 +58,20 @@ describe("toKebabCase", () => {
 });
 
 describe("toDocTypeFileName", () => {
-	it("strips -search-doc suffix and re-adds it with .ts", () => {
+	it("kebab-cases the projection model name with .ts", () => {
 		assert.equal(toDocTypeFileName("PetSearchDoc"), "pet-search-doc.ts");
 	});
 
-	it("adds -search-doc.ts if not already present", () => {
-		assert.equal(toDocTypeFileName("PetIndex"), "pet-index-search-doc.ts");
+	it("does NOT append -search-doc to bare model names — emits `<kebab>.ts` so virtual sub-projections don't collide with a sibling top-level projection that shares a kebab base", () => {
+		assert.equal(toDocTypeFileName("PetIndex"), "pet-index.ts");
+	});
+
+	it("emits `counterparty.ts` for a virtual `Counterparty` sub-projection (no collision with sibling `CounterpartySearchDoc` → `counterparty-search-doc.ts`)", () => {
+		assert.equal(toDocTypeFileName("Counterparty"), "counterparty.ts");
+		assert.equal(
+			toDocTypeFileName("CounterpartySearchDoc"),
+			"counterparty-search-doc.ts",
+		);
 	});
 });
 

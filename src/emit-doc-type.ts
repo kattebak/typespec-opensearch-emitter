@@ -226,11 +226,12 @@ function renderUnion(program: Program, union: Union, depth = 0): string {
 }
 
 export function toDocTypeFileName(projectionModelName: string): string {
-	const kebab = toKebabCase(projectionModelName);
-	const base = kebab.endsWith("-search-doc")
-		? kebab.slice(0, -"-search-doc".length)
-		: kebab;
-	return `${base}-search-doc.ts`;
+	// One file per model name. `CounterpartySearchDoc` emits to
+	// `counterparty-search-doc.ts`, `Address` emits to `address.ts`, and
+	// the virtual sub-projection of `Counterparty` (referenced from
+	// `DescribeCounterparty.counterparty`) emits to `counterparty.ts` —
+	// no longer colliding with `counterparty-search-doc.ts`.
+	return `${toKebabCase(projectionModelName)}.ts`;
 }
 
 export const __test = {
