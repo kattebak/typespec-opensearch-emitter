@@ -136,6 +136,25 @@ export function resolveProjectionModel(
 			}
 		}
 
+		// @searchInfer auto-recurses into struct fields (issue #98). When the
+		// field's type resolves to a plain TypeSpec model (no explicit
+		// SearchProjection<T>), build a virtual sub-projection so the parent
+		// SearchFilter can reference <NestedType>SearchFilter.
+		if (
+			inferOnModel &&
+			!field.subProjection &&
+			!isSearchSkip(program, sourceProperty)
+		) {
+			const virtual = buildVirtualSubProjection(
+				program,
+				field.type,
+				new Set([projectionModel.name]),
+			);
+			if (virtual) {
+				field.subProjection = virtual;
+			}
+		}
+
 		fields.push(field);
 	}
 
@@ -434,6 +453,71 @@ function isNumericRootName(name: string | undefined): boolean {
 		"numeric",
 		"number",
 	].includes(name);
+}
+
+/**
+ * Build a virtual sub-projection for a struct or array-of-struct field on a
+ * `@searchInfer` parent (issue #98). Recurses into the model's properties,
+ * applying the inference table to each. The parent's SearchFilter exposes
+ * `<fieldName>: <NestedType>SearchFilter`, and FILTER_SPEC dispatch threads
+ * the dotted path (or nested wrapper if the field is `@nested`).
+ */
+function buildVirtualSubProjection(
+	program: Program,
+	type: Type,
+	visited: Set<string>,
+): ResolvedProjection | undefined {
+	let model: Model | undefined;
+	if (type.kind === "Model") {
+		if (
+			type.name === "Array" &&
+			type.indexer?.value?.kind === "Model" &&
+			type.indexer.value.name !== "Array"
+		) {
+			model = type.indexer.value;
+		} else if (type.name && type.name !== "Array" && type.properties) {
+			model = type;
+		}
+	}
+	if (!model || !model.properties || model.properties.size === 0) {
+		return undefined;
+	}
+	// Skip explicit SearchProjection<T> instantiations — those are handled
+	// by resolveSubProjectionFromType.
+	if (getProjectionSourceModel(program, model)) {
+		return undefined;
+	}
+	if (visited.has(model.name)) {
+		return undefined;
+	}
+	const childVisited = new Set(visited);
+	childVisited.add(model.name);
+
+	const fields: ResolvedProjectionField[] = [];
+	for (const prop of model.properties.values()) {
+		if (isSearchSkip(program, prop)) continue;
+		const field = resolveProjectionField(program, prop, undefined, true);
+		if (!field.subProjection) {
+			const nestedVirtual = buildVirtualSubProjection(
+				program,
+				field.type,
+				childVisited,
+			);
+			if (nestedVirtual) {
+				field.subProjection = nestedVirtual;
+			}
+		}
+		fields.push(field);
+	}
+
+	if (fields.length === 0) return undefined;
+
+	return {
+		projectionModel: model,
+		sourceModel: model,
+		indexName: getIndexName(program, model),
+		fields,
+	};
 }
 
 /**

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import { isSearchable } from "./decorators.js";
+import { emitGraphQLResolver } from "./emit-graphql-resolver.js";
 import { resolveProjectionModel } from "./projection.js";
 import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
@@ -791,6 +792,145 @@ describe("@searchInfer", () => {
 		);
 	});
 
+	it("auto-recurses into struct fields when parent is @searchInfer (issue #98)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Address {
+        @keyword country: string;
+        @keyword city: string;
+        postalCode: string;
+      }
+      model Counterparty {
+        @keyword id: string;
+        address: Address;
+      }
+      @searchInfer
+      model CounterpartySearchDoc is SearchProjection<Counterparty> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("CounterpartySearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const address = resolved.fields.find((f) => f.name === "address");
+		assert.ok(address);
+		assert.ok(
+			address.subProjection,
+			"struct field should get an auto-built virtual sub-projection",
+		);
+		assert.equal(address.subProjection.projectionModel.name, "Address");
+		const subFieldNames = address.subProjection.fields.map((f) => f.name);
+		assert.deepEqual(subFieldNames, ["country", "city", "postalCode"]);
+
+		const country = address.subProjection.fields.find(
+			(f) => f.name === "country",
+		);
+		assert.ok(country);
+		assert.deepEqual(country.filterables, ["term", "terms", "exists"]);
+	});
+
+	it("recurses through @nested struct arrays when parent is @searchInfer", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @keyword tagId: string;
+        @keyword label: string;
+      }
+      model Counterparty {
+        @keyword id: string;
+        @nested tags: Tag[];
+      }
+      @searchInfer
+      model CounterpartySearchDoc is SearchProjection<Counterparty> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("CounterpartySearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const tags = resolved.fields.find((f) => f.name === "tags");
+		assert.ok(tags);
+		assert.equal(tags.nested, true);
+		assert.ok(tags.subProjection);
+		const subFieldNames = tags.subProjection.fields.map((f) => f.name);
+		assert.deepEqual(subFieldNames, ["tagId", "label"]);
+	});
+
+	it("two-level struct recursion with @searchInfer", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Coordinates {
+        latitude: float64;
+        longitude: float64;
+      }
+      model Address {
+        @keyword country: string;
+        coords: Coordinates;
+      }
+      model Place {
+        address: Address;
+      }
+      @searchInfer
+      model PlaceSearchDoc is SearchProjection<Place> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PlaceSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const address = resolved.fields.find((f) => f.name === "address");
+		assert.ok(address?.subProjection);
+		const coords = address.subProjection.fields.find(
+			(f) => f.name === "coords",
+		);
+		assert.ok(coords?.subProjection, "second-level struct recursion");
+		const coordsFieldNames = coords.subProjection.fields.map((f) => f.name);
+		assert.deepEqual(coordsFieldNames, ["latitude", "longitude"]);
+	});
+
+	it("@searchSkip on a struct field opts the entire sub-tree out of recursion", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model SecretBlock {
+        @keyword token: string;
+      }
+      model Counterparty {
+        @keyword id: string;
+        @searchable @searchSkip secret: SecretBlock;
+      }
+      @searchInfer
+      model CounterpartySearchDoc is SearchProjection<Counterparty> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("CounterpartySearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const secret = resolved.fields.find((f) => f.name === "secret");
+		assert.ok(secret, "@searchable field stays in the projection");
+		assert.equal(
+			secret.subProjection,
+			undefined,
+			"@searchSkip suppresses virtual sub-projection",
+		);
+	});
+
 	it("without @searchInfer, fields with no decorators stay excluded", async () => {
 		const runner = await createRunner();
 		await runner.diagnose(`
@@ -813,6 +953,59 @@ describe("@searchInfer", () => {
 		assert.deepEqual(
 			resolved.fields.map((f) => f.name),
 			["name"],
+		);
+	});
+});
+
+describe("emitted resolver size budget", () => {
+	it("stays under AppSync's 32 KB code cap on a wide @searchInfer projection (issue #99)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Address { @keyword country: string; @keyword city: string; postalCode: string; }
+      model Phone { @keyword number: string; @keyword countryCode: string; }
+      model Tag { @keyword tagId: string; @keyword label: string; }
+      model Group { @keyword groupId: string; @keyword name: string; }
+      model Approval { @keyword type: string; validFrom: utcDateTime; validTo: utcDateTime; }
+      model Reference { @keyword refId: string; @keyword source: string; }
+      model Location { address: Address; @keyword name: string; }
+      model Contact { @keyword name: string; phones: Phone[]; }
+      model Counterparty {
+        @keyword id: string;
+        @keyword name: string;
+        notional: float64;
+        rank: int32;
+        active: boolean;
+        createdAt: utcDateTime;
+        @nested locations: Location[];
+        @nested contacts: Contact[];
+        @nested tags: Tag[];
+        @nested groups: Group[];
+        @nested approvals: Approval[];
+        @nested references: Reference[];
+      }
+      @searchInfer
+      model CounterpartySearchDoc is SearchProjection<Counterparty> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("CounterpartySearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+
+		const result = emitGraphQLResolver(resolved, {
+			defaultPageSize: 20,
+			maxPageSize: 100,
+			trackTotalHitsUpTo: 10000,
+		});
+
+		// AppSync APPSYNC_JS hard cap on resolver source code.
+		const APPSYNC_CODE_CAP = 32 * 1024;
+		assert.ok(
+			result.content.length < APPSYNC_CODE_CAP,
+			`emitted resolver is ${result.content.length} bytes — exceeds AppSync's ${APPSYNC_CODE_CAP}-byte cap. Wide projections need further shrink work.`,
 		);
 	});
 });

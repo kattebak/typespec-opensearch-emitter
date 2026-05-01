@@ -305,7 +305,7 @@ describe("buildSearchFilterShape", () => {
 		assert.equal(shape.nestedShapes[0].typeName, "TagSearchFilter");
 	});
 
-	it("inlines non-nested object sub-projections at the parent level", () => {
+	it("emits non-nested object sub-projections as a separate input type with dotted-path children (issue #98)", () => {
 		const ownerSub = {
 			projectionModel: { name: "OwnerSearchDoc" },
 			sourceModel: { name: "Owner" },
@@ -332,10 +332,17 @@ describe("buildSearchFilterShape", () => {
 
 		const shape = buildSearchFilterShape(projection);
 		assert.ok(shape);
-		// owner.name shows up as a flat leaf, not under a nested node.
+		// Parent input has one entry: `owner: OwnerSearchFilter`.
 		assert.equal(shape.nodes.length, 1);
-		assert.equal(shape.nodes[0].kind, "term");
-		assert.equal(shape.nodes[0].inputName, "name");
-		assert.equal(shape.nestedShapes.length, 0);
+		assert.equal(shape.nodes[0].kind, "object");
+		assert.equal(shape.nodes[0].inputName, "owner");
+		assert.equal(shape.nodes[0].nestedTypeName, "OwnerSearchFilter");
+		// Children carry dotted OS field paths.
+		assert.equal(shape.nodes[0].children?.[0].kind, "term");
+		assert.equal(shape.nodes[0].children?.[0].inputName, "name");
+		assert.equal(shape.nodes[0].children?.[0].field, "owner.name");
+		// Sub-shape is emitted as a separate input.
+		assert.equal(shape.nestedShapes.length, 1);
+		assert.equal(shape.nestedShapes[0].typeName, "OwnerSearchFilter");
 	});
 });

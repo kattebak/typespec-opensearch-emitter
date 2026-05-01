@@ -190,18 +190,18 @@ export interface FilterSpecNode {
 	 * applied to a `@nested` array field — the resolver translates it as
 	 * `nested + match_all` (true) or `must_not nested + match_all` (false).
 	 */
-	kind: FilterableKind | "nested" | "nested_exists";
-	/** OpenSearch field path (only set on leaf kinds, not `nested`). */
+	kind: FilterableKind | "nested" | "nested_exists" | "object";
+	/** OpenSearch field path (only set on leaf kinds). */
 	field?: string;
 	/** Source projection field (set on leaf kinds only; SDL renders use this for GraphQL type lookup). */
 	sourceField?: ResolvedProjectionField;
 	/** Nested doc path (set on `nested` and `nested_exists`). */
 	path?: string;
-	/** Children (only set on `nested` kind). */
+	/** Children (set on `nested` and `object`). */
 	children?: FilterSpecNode[];
 	/** Range bound (only set on `kind === "range"`). */
 	bound?: RangeBound;
-	/** GraphQL input type for nested kind (e.g. "TagSearchFilter"). */
+	/** GraphQL input type for `nested` / `object` kinds (e.g. "TagSearchFilter"). */
 	nestedTypeName?: string;
 }
 
@@ -275,9 +275,31 @@ function buildShapeRecursive(
 						});
 					}
 				} else {
-					const subShape = buildShapeRecursive(field.subProjection, parentPath);
-					nodes.push(...subShape.nodes);
-					nestedShapes.push(...subShape.nestedShapes);
+					// Non-`@nested` struct sub-projection: thread the dotted path
+					// into children's OS field paths and emit as a separate input
+					// type (issue #98). The parent's filter input references it as
+					// `<fieldName>: <NestedType>SearchFilter`.
+					const objectPath = joinNestedPath(
+						parentPath,
+						field.projectedName ?? field.name,
+					);
+					const subShape = buildShapeRecursive(field.subProjection, objectPath);
+					if (subShape.nodes.length > 0 || subShape.nestedShapes.length > 0) {
+						const subTypeName = searchFilterTypeName(
+							field.subProjection.projectionModel.name,
+						);
+						nodes.push({
+							inputName: field.projectedName ?? field.name,
+							kind: "object",
+							children: subShape.nodes,
+							nestedTypeName: subTypeName,
+						});
+						nestedShapes.push({
+							typeName: subTypeName,
+							nodes: subShape.nodes,
+							nestedShapes: subShape.nestedShapes,
+						});
+					}
 				}
 			}
 		}

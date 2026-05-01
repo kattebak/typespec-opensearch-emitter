@@ -170,9 +170,9 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			result.content.includes(
-				'inputName: "counterpartyId", kind: "term", field: "counterpartyId"',
+				'{i:"counterpartyId",k:"term",f:"counterpartyId"}',
 			),
-			"FILTER_SPEC must carry the term filter for the non-searchable field",
+			"FILTER_SPEC must carry the term filter for the non-searchable field (compact-key form)",
 		);
 	});
 
@@ -1204,10 +1204,8 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
-			result.content.includes(
-				'inputName: "tagsExists", kind: "nested_exists", path: "tags"',
-			),
-			"FILTER_SPEC must carry a nested_exists entry with the path",
+			result.content.includes('{i:"tagsExists",k:"nested_exists",p:"tags"}'),
+			"FILTER_SPEC must carry a nested_exists entry with the path (compact-key form)",
 		);
 	});
 
