@@ -233,12 +233,46 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(imports[0].includes("@aws-appsync/utils"));
 	});
 
-	it("sorts by _score desc then _id asc", () => {
+	it("falls back to _score desc then _id asc when sortBy arg is omitted", () => {
 		const projection = makeProjection({ fields: [] });
 		const result = emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(result.content.includes('{ _score: "desc" }'));
 		assert.ok(result.content.includes('{ _id: "asc" }'));
+		// New: resolver routes sort through buildSort(args.sortBy) so callers
+		// can override the fallback.
+		assert.ok(result.content.includes("buildSort(args.sortBy)"));
+		assert.ok(result.content.includes("function buildSort(sortBy)"));
+	});
+
+	it("buildSort honors sortBy arg with multiple fields, appending _id tie-break", () => {
+		const projection = makeProjection({ fields: [] });
+		const source = emitGraphQLResolver(projection, defaultOptions).content;
+		const stripped = source
+			.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+			.replace(/^export function /gm, "function ");
+		const buildSort = new Function(`${stripped}\nreturn buildSort;`)() as (
+			sortBy: unknown,
+		) => unknown;
+
+		assert.deepEqual(
+			buildSort([
+				{ field: "createdAt", direction: "DESC" },
+				{ field: "name", direction: "ASC" },
+			]),
+			[{ createdAt: "desc" }, { name: "asc" }, { _id: "asc" }],
+		);
+		// Single field — still gets _id tie-break.
+		assert.deepEqual(buildSort([{ field: "rank", direction: "ASC" }]), [
+			{ rank: "asc" },
+			{ _id: "asc" },
+		]);
+		// Empty / undefined — fallback to _score, _id.
+		assert.deepEqual(buildSort([]), [{ _score: "desc" }, { _id: "asc" }]);
+		assert.deepEqual(buildSort(undefined), [
+			{ _score: "desc" },
+			{ _id: "asc" },
+		]);
 	});
 
 	it("uses search_after for cursor pagination", () => {
@@ -405,6 +439,63 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(
 			result.content.includes(
 				", latestValidTo: b.latestValidTo?.value ?? null",
+			),
+		);
+	});
+
+	it("emits top_hits sub-agg under terms when topHits option is set", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [{ kind: "terms", options: { topHits: 5 } }],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		assert.ok(
+			result.content.includes(
+				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "hits": { top_hits: { size: 5 } } } }',
+			),
+			"terms agg request must include hits sub-agg with top_hits.size",
+		);
+		assert.ok(
+			result.content.includes(
+				", hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)",
+			),
+			"terms response must unwrap hits.hits._source onto the bucket's hits field",
+		);
+	});
+
+	it("emits combined sub-aggs and top_hits when both options are set", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								topHits: 3,
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(
+			result.content.includes(
+				'aggs: { "latestValidTo": { max: { field: "validTo" } }, "hits": { top_hits: { size: 3 } } }',
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				", latestValidTo: b.latestValidTo?.value ?? null, hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)",
 			),
 		);
 	});
@@ -665,6 +756,46 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
+	it("buildQuery emits terms (multi-value) filter as bool.filter[terms]", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["terms"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, {
+			speciesIn: ["cat", "dog"],
+		});
+		assert.deepEqual(result, {
+			bool: {
+				filter: [{ terms: { species: ["cat", "dog"] } }],
+			},
+		});
+	});
+
+	it("buildQuery skips terms filter when array is empty", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["terms"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			emitGraphQLResolver(projection, defaultOptions).content,
+		);
+		const result = buildQuery(undefined, undefined, { speciesIn: [] });
+		assert.deepEqual(result, { match_all: {} });
+	});
+
 	it("buildQuery emits flat term_negate into bool.must_not", () => {
 		const projection = makeProjection({
 			fields: [
@@ -896,11 +1027,13 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				makeField({
 					name: "counterpartyId",
 					keyword: true,
+					filterables: ["term", "terms"],
 					aggregations: [
 						{
 							kind: "terms",
 							options: {
 								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+								topHits: 3,
 							},
 						},
 					],

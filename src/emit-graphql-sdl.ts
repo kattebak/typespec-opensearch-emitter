@@ -58,6 +58,12 @@ export function emitGraphQLSdl(
 		lines.push("");
 	}
 
+	const sortTypes = renderSortTypes(projection);
+	if (sortTypes) {
+		lines.push(sortTypes);
+		lines.push("");
+	}
+
 	lines.push(renderConnectionTypes(typeName, hasAggregations(projection)));
 
 	return {
@@ -147,6 +153,9 @@ function renderSearchFilterField(
 		? toGraphQLType(program, node.sourceField.type, node.sourceField)
 		: "String";
 	const baseScalar = stripListWrap(gqlType);
+	if (node.kind === "terms") {
+		return `  ${node.inputName}: [${baseScalar}!]`;
+	}
 	return `  ${node.inputName}: ${baseScalar}`;
 }
 
@@ -161,6 +170,48 @@ function stripListWrap(gqlType: string): string {
 		return m[1];
 	}
 	return gqlType;
+}
+
+function sortTypeBaseName(projectionName: string): string {
+	return projectionName.replace(/SearchDoc$/, "");
+}
+
+export function sortFieldTypeName(projectionName: string): string {
+	return `${sortTypeBaseName(projectionName)}SortField`;
+}
+
+export function sortInputTypeName(projectionName: string): string {
+	return `${sortTypeBaseName(projectionName)}SortInput`;
+}
+
+function renderSortTypes(projection: ResolvedProjection): string | undefined {
+	const sortableFields = projection.fields.filter((f) => f.sortable);
+	if (sortableFields.length === 0) return undefined;
+
+	const projectionName = projection.projectionModel.name;
+	const fieldTypeName = sortFieldTypeName(projectionName);
+	const inputTypeName = sortInputTypeName(projectionName);
+
+	const fieldNames = sortableFields.map((f) => f.projectedName ?? f.name);
+
+	const blocks: string[] = [];
+	blocks.push(["enum SortDirection {", "  ASC", "  DESC", "}"].join("\n"));
+	blocks.push(
+		[
+			`enum ${fieldTypeName} {`,
+			...fieldNames.map((name) => `  ${name}`),
+			"}",
+		].join("\n"),
+	);
+	blocks.push(
+		[
+			`input ${inputTypeName} {`,
+			`  field: ${fieldTypeName}!`,
+			"  direction: SortDirection!",
+			"}",
+		].join("\n"),
+	);
+	return blocks.join("\n\n");
 }
 
 function renderConnectionTypes(
@@ -208,19 +259,25 @@ function renderAggregationTypes(
 
 	const fieldLines = entries.map((entry) => {
 		const gqlType = aggregationGraphQLType(entry, sharedBucketTypes);
-		if (entry.kind === "terms" && entry.options && "sub" in entry.options) {
-			const sub = entry.options.sub ?? {};
-			if (Object.keys(sub).length > 0) {
+		if (entry.kind === "terms" && entry.options) {
+			const opts = entry.options as {
+				sub?: Record<string, unknown>;
+				topHits?: number;
+			};
+			const sub = opts.sub ?? {};
+			const hasSub = Object.keys(sub).length > 0;
+			const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
+			if (hasSub || hasTopHits) {
 				const bucketTypeName = `${capitalizeFirst(entry.aggName)}Bucket`;
-				const subLines = Object.entries(sub).map(
-					([name]) => `  ${name}: Float`,
-				);
+				const subLines = Object.keys(sub).map((name) => `  ${name}: Float`);
+				const hitsLine = hasTopHits ? [`  hits: [${typeName}!]!`] : [];
 				customBucketTypes.push(
 					[
 						`type ${bucketTypeName} {`,
 						"  key: String!",
 						"  count: Int!",
 						...subLines,
+						...hitsLine,
 						"}",
 					].join("\n"),
 				);

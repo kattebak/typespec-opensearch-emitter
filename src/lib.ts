@@ -89,7 +89,7 @@ export const $lib = createTypeSpecLibrary({
 		"invalid-filterable-kind": {
 			severity: "error",
 			messages: {
-				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, exists, range.`,
+				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, terms, exists, range.`,
 			},
 		},
 		"filterable-requires-kind": {
@@ -127,6 +127,10 @@ export const $lib = createTypeSpecLibrary({
 		searchSkip: {
 			description:
 				"Field-level marker — opt out of @searchInfer inference for this property",
+		},
+		sortable: {
+			description:
+				"Field-level marker — exposes the field on the projection's SortInput",
 		},
 	},
 	emitter: {

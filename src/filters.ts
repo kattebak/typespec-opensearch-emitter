@@ -112,6 +112,8 @@ function filterInputFieldName(
 			return projectedName;
 		case "term_negate":
 			return `${projectedName}Not`;
+		case "terms":
+			return `${projectedName}In`;
 		case "exists":
 			return `${projectedName}Exists`;
 	}

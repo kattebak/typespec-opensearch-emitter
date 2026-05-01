@@ -324,6 +324,25 @@ describe("emitGraphQLSdl aggregations", () => {
 		assert.ok(result.content.includes("byNotionalRange: [RangeBucket!]!"));
 	});
 
+	it("emits per-agg bucket type with hits field when terms has topHits", () => {
+		const projection = makeProjection({
+			name: "TradeSearchDoc",
+			fields: [
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [{ kind: "terms", options: { topHits: 5 } }],
+				}),
+			],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type ByCounterpartyIdBucket {"));
+		assert.ok(result.content.includes("hits: [TradeSearchDoc!]!"));
+		assert.ok(
+			result.content.includes("byCounterpartyId: [ByCounterpartyIdBucket!]!"),
+		);
+	});
+
 	it("emits per-agg bucket type when terms has sub-aggregations", () => {
 		const projection = makeProjection({
 			name: "TradeSearchDoc",
@@ -465,6 +484,80 @@ describe("emitGraphQLSdl SearchFilter input", () => {
 		assert.ok(result.content.includes("rankLte: Int"));
 		assert.ok(result.content.includes("rankGt: Int"));
 		assert.ok(result.content.includes("rankLt: Int"));
+	});
+
+	it("emits SortDirection, <Type>SortField enum, and <Type>SortInput when fields are sortable", () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+				makeField({
+					name: "rank",
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+				makeField({
+					name: "notes",
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+			],
+		});
+		// Mark name + rank sortable but not notes.
+		projection.fields[0].sortable = true;
+		projection.fields[1].sortable = true;
+		projection.fields[2].sortable = false;
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("enum SortDirection {"));
+		assert.ok(result.content.includes("  ASC"));
+		assert.ok(result.content.includes("  DESC"));
+		assert.ok(result.content.includes("enum PetSortField {"));
+		assert.ok(
+			result.content.match(
+				/enum PetSortField \{[\s\S]*name[\s\S]*rank[\s\S]*\}/,
+			),
+		);
+		assert.ok(
+			!result.content.match(/enum PetSortField \{[\s\S]*notes[\s\S]*\}/),
+		);
+		assert.ok(result.content.includes("input PetSortInput {"));
+		assert.ok(result.content.includes("field: PetSortField!"));
+		assert.ok(result.content.includes("direction: SortDirection!"));
+	});
+
+	it("omits sort types when no fields are sortable", () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [makeField({ name: "name" })],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(!result.content.includes("SortDirection"));
+		assert.ok(!result.content.includes("SortField"));
+		assert.ok(!result.content.includes("SortInput"));
+	});
+
+	it("emits terms (multi-value) filter as a list scalar input", () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["terms"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["terms"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+			],
+		});
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("speciesIn: [String!]"));
+		assert.ok(result.content.includes("rankIn: [Int!]"));
 	});
 
 	it("emits a separate SearchFilter input for @nested sub-projection", () => {
