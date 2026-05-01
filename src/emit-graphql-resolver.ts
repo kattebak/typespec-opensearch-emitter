@@ -448,7 +448,11 @@ function renderResponseAggregationLine(entry: AggregationEntry): string {
 		case "max":
 			return `\t\t\t${entry.aggName}: ${path}?.value ?? null,`;
 		case "date_histogram":
-			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key_as_string ?? String(b.key), count: b.doc_count })),`;
+			// Template-literal coercion only — APPSYNC_JS rejects String() at
+			// deploy time, and the eslint-plugin doesn't flag global function
+			// calls. Both `key` and `keyAsString` are surfaced so callers can
+			// access the formatted-date form OS provides for calendar_interval.
+			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: \`\${b.key_as_string ?? b.key}\`, keyAsString: b.key_as_string ?? null, count: b.doc_count })),`;
 		case "range":
 			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count })),`;
 	}

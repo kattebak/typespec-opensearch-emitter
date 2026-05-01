@@ -339,8 +339,9 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			result.content.includes(
-				"byValidFromOverTime: (parsedBody.aggregations?.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: b.key_as_string ?? String(b.key), count: b.doc_count }))",
+				"byValidFromOverTime: (parsedBody.aggregations?.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: `${b.key_as_string ?? b.key}`, keyAsString: b.key_as_string ?? null, count: b.doc_count }))",
 			),
+			"date_histogram response must use template-literal coercion (APPSYNC_JS forbids String()) and surface keyAsString",
 		);
 	});
 
@@ -863,6 +864,60 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				filter: [{ term: { species: "cat" } }],
 			},
 		});
+	});
+
+	it("emitted resolver contains no forbidden global coercion calls (String, Number, Boolean, Array, Object)", () => {
+		// APPSYNC_JS rejects these globals at deploy time even though
+		// @aws-appsync/eslint-plugin doesn't flag them (no rule covers
+		// global function calls). Use template literals (\`${x}\`) for
+		// string coercion and arithmetic / comparisons for the others.
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: [
+						{
+							kind: "range",
+							options: { ranges: [{ to: 1000 }, { from: 1000 }] },
+						},
+						"sum",
+						"avg",
+					],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = emitGraphQLResolver(projection, defaultOptions);
+
+		const forbidden = ["String", "Number", "Boolean", "Array", "Object"];
+		for (const name of forbidden) {
+			const re = new RegExp(`\\b${name}\\s*\\(`);
+			assert.equal(
+				re.test(result.content),
+				false,
+				`emitted resolver must not call \`${name}(...)\` — APPSYNC_JS rejects global coercion calls.\n--- emitted ---\n${result.content}\n--- end ---`,
+			);
+		}
 	});
 
 	it("emitted resolver passes @aws-appsync/eslint-plugin recommended config", async () => {
