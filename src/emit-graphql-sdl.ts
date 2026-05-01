@@ -241,6 +241,7 @@ function renderAggregationTypes(
 			[
 				"type DateHistogramBucket {",
 				"  key: String!",
+				"  keyAsString: String",
 				"  count: Int!",
 				"}",
 			].join("\n"),

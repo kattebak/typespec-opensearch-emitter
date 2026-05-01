@@ -291,6 +291,10 @@ describe("emitGraphQLSdl aggregations", () => {
 		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
 		assert.ok(result.content.includes("type DateHistogramBucket {"));
 		assert.ok(
+			result.content.includes("keyAsString: String"),
+			"DateHistogramBucket must surface keyAsString so callers can read OS's formatted date string",
+		);
+		assert.ok(
 			result.content.includes("byValidFromOverTime: [DateHistogramBucket!]!"),
 		);
 	});
