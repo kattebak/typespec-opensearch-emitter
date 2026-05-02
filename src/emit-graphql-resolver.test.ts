@@ -114,14 +114,12 @@ function searchFunctionContent(result: EmitResult): string {
 
 // Pipeline-mode options for the legacy assertions in this file. Setting the
 // monolithic threshold to 0 forces the emitter into pipeline mode (issue
-// #112) so the existing pipeline-shape tests stay valid; `minify: false`
-// keeps the source readable for substring assertions. Monolithic-mode and
+// #112) so the existing pipeline-shape tests stay valid. Monolithic-mode and
 // threshold-flip tests live further down.
 const defaultOptions = {
 	defaultPageSize: 20,
 	maxPageSize: 100,
 	trackTotalHitsUpTo: 10000,
-	minify: false,
 	monolithicThresholdBytes: 0,
 };
 
@@ -1816,14 +1814,15 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 	});
 });
 
-// Issue #112 — two-stage adaptive emit: minify + threshold-based mode.
+// Issue #112 — two-stage adaptive emit: threshold-based monolithic vs
+// pipeline mode. (Terser-based minify pass was removed; consumers either fit
+// monolithic verbose or fall back to the pipeline split.)
 describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 	const monolithicOptions = {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
-		minify: true,
-		monolithicThresholdBytes: 28000,
+		monolithicThresholdBytes: 32000,
 	};
 
 	it("emits monolithic UNIT shape for a typical projection (mode 'monolithic', no functions)", async () => {
@@ -1884,25 +1883,11 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		);
 	});
 
-	it("respects minify: false (verbose source emission)", async () => {
-		const projection = makeProjection({
-			fields: [makeField({ name: "name" })],
-		});
-		const result = await emitGraphQLResolver(projection, {
-			...monolithicOptions,
-			minify: false,
-		});
-
-		assert.ok(result.content.includes("buildQuery"));
-		assert.ok(result.content.includes("function buildSort"));
-		assert.ok(result.content.includes("\t"));
-	});
-
 	it("counterparty-shape projection fits under threshold in monolithic mode (perf-critical case)", async () => {
 		// Mirrors the wide-projection acceptance test — 7 nested sub-models
 		// with id+type+createdAt+updatedAt aggs/filters. Issue #112 expects
-		// this shape to fit monolithic post-minify (under 28K), unlocking the
-		// ~50ms median latency saving.
+		// this shape to fit monolithic (under 32K), unlocking the ~50ms
+		// median latency saving.
 		const subShapes = [
 			"Approval",
 			"Relation",
@@ -1984,7 +1969,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		assert.ok(bytes < 28_000, "monolithic must fit under threshold");
 	});
 
-	it("pipelines a synthetic wide projection (14 sub-models) even with minify on", async () => {
+	it("pipelines a synthetic wide projection (14 sub-models)", async () => {
 		function lowerFirst(s: string): string {
 			return s[0].toLowerCase() + s.slice(1);
 		}
@@ -2068,7 +2053,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		}
 	});
 
-	it("minified monolithic output passes @aws-appsync/eslint-plugin recommended config", async () => {
+	it("monolithic output passes @aws-appsync/eslint-plugin recommended config", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -2158,7 +2143,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 			assert.deepEqual(
 				messages,
 				[],
-				`@aws-appsync/eslint-plugin reported issues on minified monolithic output:\n${messages.join("\n")}\n--- emitted ---\n${result.content}`,
+				`@aws-appsync/eslint-plugin reported issues on monolithic output:\n${messages.join("\n")}\n--- emitted ---\n${result.content}`,
 			);
 		} finally {
 			await rm(dir, { recursive: true, force: true });

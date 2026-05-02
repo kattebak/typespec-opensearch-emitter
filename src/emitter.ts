@@ -93,10 +93,6 @@ export async function $onEmit(
 		const resolverOptions = {
 			...pageOptions,
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
-			// Default `minify: false` until terser-vs-APPSYNC_JS shape mismatch
-			// is root-caused (issue #112 in-situ probe). Verbose monolithic
-			// emission is stable and still fits the 32K cap with headroom.
-			minify: graphqlOptions.minify ?? false,
 			monolithicThresholdBytes:
 				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
 		};
