@@ -87,6 +87,49 @@ function loadBuildQuery(
 	return factory();
 }
 
+/**
+ * Evaluates a prepare- (or monolithic-) resolver `request(ctx)` and returns
+ * the OS body it stashes/builds. Pipeline `prepare` writes to
+ * `ctx.stash.queryBody`; the monolithic request returns `{ params: { body } }`.
+ * This helper handles both shapes so tests can assert on body contents under
+ * different `ctx.info.selectionSetList` scenarios.
+ */
+function evalRequestBody(
+	resolverSource: string,
+	info: { selectionSetList: string[] },
+	args: Record<string, unknown> = {},
+): Record<string, unknown> {
+	const stripped = resolverSource
+		.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+		.replace(/^export function /gm, "function ");
+	const factory = new Function("util", `${stripped}\nreturn request;`) as (
+		util: unknown,
+	) => (ctx: unknown) => unknown;
+	const utilStub = {
+		base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+		base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+		error: (msg: string) => {
+			throw new Error(msg);
+		},
+	};
+	const request = factory(utilStub);
+	const ctx = {
+		args,
+		info,
+		stash: {} as Record<string, unknown>,
+	};
+	const ret = request(ctx) as { params?: { body?: Record<string, unknown> } };
+	if (ctx.stash.queryBody) {
+		return ctx.stash.queryBody as Record<string, unknown>;
+	}
+	if (ret && ret.params && ret.params.body) {
+		return ret.params.body;
+	}
+	throw new Error(
+		`request function did not produce a body: ret=${JSON.stringify(ret)}, stash=${JSON.stringify(ctx.stash)}`,
+	);
+}
+
 type EmitResult = Awaited<ReturnType<typeof emitGraphQLResolver>>;
 
 /**
@@ -361,6 +404,8 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(!combinedContent(result).includes("aggs:"));
+		assert.ok(!combinedContent(result).includes("body.aggs"));
+		assert.ok(!combinedContent(result).includes("wantsAggs"));
 		assert.ok(!combinedContent(result).includes("aggregations:"));
 	});
 
@@ -385,7 +430,7 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(combinedContent(result).includes("aggs:"));
+		assert.ok(combinedContent(result).includes("body.aggs = {"));
 		assert.ok(
 			combinedContent(result).includes(
 				'byTag: { terms: { field: "tags.keyword" } }',
@@ -395,6 +440,92 @@ describe("emitGraphQLResolver", () => {
 			combinedContent(result).includes(
 				'bySpecy: { terms: { field: "species" } }',
 			),
+		);
+	});
+
+	it("gates body.aggs assignment on ctx.info.selectionSetList containing aggregations", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const combined = combinedContent(result);
+
+		// The wantsAggs gate must check both the bare `aggregations` selection
+		// and any nested `aggregations/...` sub-path. APPSYNC_JS forbids regex
+		// and try/catch — keep the check to plain string comparisons.
+		assert.ok(
+			combined.includes(
+				'ctx.info.selectionSetList.some((p) => p === "aggregations" || p.indexOf("aggregations/") === 0)',
+			),
+			`wantsAggs gate must read ctx.info.selectionSetList; got:\n${combined}`,
+		);
+		assert.ok(
+			combined.includes("if (wantsAggs) {"),
+			"body.aggs assignment must be inside `if (wantsAggs)` block",
+		);
+		// Sanity: the gate appears BEFORE `body.aggs = ` in the request function.
+		const gateIdx = combined.indexOf("if (wantsAggs)");
+		const assignIdx = combined.indexOf("body.aggs = ");
+		assert.ok(gateIdx >= 0 && assignIdx >= 0 && gateIdx < assignIdx);
+	});
+
+	it("request body produced without selecting aggregations contains no aggs key", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: ["edges", "totalCount"],
+		});
+		assert.equal(
+			Object.hasOwn(body, "aggs"),
+			false,
+			`body must NOT contain aggs when caller did not select aggregations; got body=${JSON.stringify(body)}`,
+		);
+	});
+
+	it("request body produced WITH aggregations selection contains the aggs object", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"edges",
+				"totalCount",
+				"aggregations",
+				"aggregations/bySpecy",
+				"aggregations/bySpecy/key",
+			],
+		});
+		assert.ok(
+			body.aggs && typeof body.aggs === "object",
+			`body.aggs must be present when caller selects aggregations; got body=${JSON.stringify(body)}`,
+		);
+		const aggs = body.aggs as Record<string, unknown>;
+		assert.ok(
+			"bySpecy" in aggs,
+			`body.aggs.bySpecy must be present; got aggs=${JSON.stringify(aggs)}`,
 		);
 	});
 
