@@ -5,7 +5,7 @@ import {
 	type FilterSpecNode,
 	type SearchFilterShape,
 } from "./filters.js";
-import { minifyAppsync } from "./minify.js";
+import { internStrings } from "./intern.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -51,31 +51,25 @@ export interface ResolverOptions {
 	maxPageSize: number;
 	trackTotalHitsUpTo: number;
 	/**
-	 * Apply post-emit minification (terser, APPSYNC_JS-safe config). Smaller
-	 * output means more projections fit under `monolithicThresholdBytes`.
-	 * Default: true.
+	 * Apply post-emit string-literal interning (issue #114). Hoists every
+	 * double-quoted string appearing >=2 times in a file into `const _s = [...]`
+	 * and replaces each occurrence with `_s[N]`. APPSYNC_JS-safe by
+	 * construction. Default: true. Replaces the terser-based minify pass —
+	 * terser's general-JS optimizations passed static lint AND the
+	 * `EvaluateCode` API but failed live AppSync on `term`/`range` clauses
+	 * inside a `nested` path; custom interning emits only `const` array
+	 * declarations and indexed reads, neither of which touches that surface.
 	 */
-	minify?: boolean;
+	internStrings?: boolean;
 	/**
 	 * Byte threshold above which a projection's monolithic shape is rejected
 	 * and the pipeline shape is emitted instead. Suggested 28,000 (32K cap
-	 * minus headroom). Measured against the post-minify (or post-render)
-	 * monolithic content.
+	 * minus headroom). Measured against the post-intern monolithic content.
 	 */
 	monolithicThresholdBytes?: number;
 }
 
-// Default `minify: false` until the terser-vs-APPSYNC_JS shape-mismatch bug
-// is root-caused. Empirically: terser's output (with or without mangling)
-// runs cleanly for filters that produce a `match_all` nested clause but fails
-// at AppSync's request-evaluator with `Unable to convert ... to
-// ElasticsearchVersionedConfig` for `term`/`range` clauses inside a nested
-// path — even though the produced JSON body is structurally identical to the
-// verbose form (and OS accepts it directly). Verbose monolithic emission is
-// stable; the byte cost (~25-30% larger) is acceptable for the issue-#112
-// perf win. Consumers who verify their projections in-situ may opt-in to
-// `minify: true`.
-const DEFAULT_MINIFY = false;
+const DEFAULT_INTERN_STRINGS = true;
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
 
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
@@ -110,14 +104,17 @@ export async function emitGraphQLResolver(
 	const aggregations = collectAggregations(projection);
 	const searchFilterShape = buildSearchFilterShape(projection);
 
-	const minifyEnabled = options.minify ?? DEFAULT_MINIFY;
+	const internEnabled = options.internStrings ?? DEFAULT_INTERN_STRINGS;
 	const threshold =
 		options.monolithicThresholdBytes ?? DEFAULT_MONOLITHIC_THRESHOLD_BYTES;
+	const shrink = (src: string): string =>
+		internEnabled ? internStrings(src) : src;
 
 	// Stage 1 of the two-stage emit (issue #112): render the monolithic UNIT
-	// shape first, optionally minify, then measure. Under the threshold we
-	// ship monolithic — saves ~50ms median per query (pipeline-dispatch I/O).
-	// Over the threshold we fall back to the pipeline split (issue #105).
+	// shape first, optionally apply string-interning (issue #114), then
+	// measure. Under the threshold we ship monolithic — saves ~50ms median
+	// per query (pipeline-dispatch I/O). Over the threshold we fall back to
+	// the pipeline split (issue #105).
 	const monolithicRaw = renderMonolithicResolver(
 		textFields,
 		keywordFields,
@@ -126,9 +123,7 @@ export async function emitGraphQLResolver(
 		projection.indexName,
 		options,
 	);
-	const monolithicContent = minifyEnabled
-		? await minifyAppsync(monolithicRaw)
-		: monolithicRaw;
+	const monolithicContent = shrink(monolithicRaw);
 	const monolithicBytes = Buffer.byteLength(monolithicContent, "utf-8");
 
 	if (monolithicBytes <= threshold) {
@@ -155,13 +150,9 @@ export async function emitGraphQLResolver(
 	const searchRaw = renderSearchFunction(projection.indexName);
 	const resolverRaw = renderResolver(aggregations, options);
 
-	const [prepareContent, searchContent, resolverContent] = minifyEnabled
-		? await Promise.all([
-				minifyAppsync(prepareRaw),
-				minifyAppsync(searchRaw),
-				minifyAppsync(resolverRaw),
-			])
-		: [prepareRaw, searchRaw, resolverRaw];
+	const prepareContent = shrink(prepareRaw);
+	const searchContent = shrink(searchRaw);
+	const resolverContent = shrink(resolverRaw);
 
 	return {
 		queryFieldName,
@@ -1113,6 +1104,6 @@ export const __test = {
 	renderMonolithicResolver,
 	renderAggsBlock,
 	renderResponseAggregations,
-	DEFAULT_MINIFY,
+	DEFAULT_INTERN_STRINGS,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
 };

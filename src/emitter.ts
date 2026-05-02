@@ -93,10 +93,11 @@ export async function $onEmit(
 		const resolverOptions = {
 			...pageOptions,
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
-			// Default `minify: false` until terser-vs-APPSYNC_JS shape mismatch
-			// is root-caused (issue #112 in-situ probe). Verbose monolithic
-			// emission is stable and still fits the 32K cap with headroom.
-			minify: graphqlOptions.minify ?? false,
+			// Custom emit-time string interning replaces the terser pass
+			// (issue #114). Default on — APPSYNC_JS-safe by construction;
+			// the runtime-evaluator failure mode that pinned `minify: false`
+			// for terser does not apply (no general-JS rewrites involved).
+			internStrings: graphqlOptions["intern-strings"] ?? true,
 			monolithicThresholdBytes:
 				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
 		};

@@ -9,5 +9,5 @@ options:
       # Force pipeline mode + verbose source for the legacy test assertions
       # (which substring-match the readable pipeline shape). New test
       # tspconfig.monolithic.yaml exercises monolithic mode separately.
-      minify: false
+      intern-strings: false
       monolithic-threshold-bytes: 0

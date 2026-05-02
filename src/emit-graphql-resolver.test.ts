@@ -114,14 +114,14 @@ function searchFunctionContent(result: EmitResult): string {
 
 // Pipeline-mode options for the legacy assertions in this file. Setting the
 // monolithic threshold to 0 forces the emitter into pipeline mode (issue
-// #112) so the existing pipeline-shape tests stay valid; `minify: false`
-// keeps the source readable for substring assertions. Monolithic-mode and
-// threshold-flip tests live further down.
+// #112) so the existing pipeline-shape tests stay valid; `internStrings:
+// false` keeps the source readable for substring assertions (issue #114).
+// Monolithic-mode and threshold-flip tests live further down.
 const defaultOptions = {
 	defaultPageSize: 20,
 	maxPageSize: 100,
 	trackTotalHitsUpTo: 10000,
-	minify: false,
+	internStrings: false,
 	monolithicThresholdBytes: 0,
 };
 
@@ -1816,13 +1816,14 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 	});
 });
 
-// Issue #112 — two-stage adaptive emit: minify + threshold-based mode.
-describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
+// Issue #112 — two-stage adaptive emit: shrink + threshold-based mode.
+// Issue #114 swapped the shrink pass from terser to custom string interning.
+describe("emitGraphQLResolver two-stage emit (issues #112, #114)", () => {
 	const monolithicOptions = {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
-		minify: true,
+		internStrings: true,
 		monolithicThresholdBytes: 28000,
 	};
 
@@ -1884,25 +1885,28 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		);
 	});
 
-	it("respects minify: false (verbose source emission)", async () => {
+	it("respects internStrings: false (verbose source emission)", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" })],
 		});
 		const result = await emitGraphQLResolver(projection, {
 			...monolithicOptions,
-			minify: false,
+			internStrings: false,
 		});
 
 		assert.ok(result.content.includes("buildQuery"));
 		assert.ok(result.content.includes("function buildSort"));
 		assert.ok(result.content.includes("\t"));
+		// No `_s = [...]` table when interning is disabled.
+		assert.ok(!result.content.includes("const _s = ["));
 	});
 
 	it("counterparty-shape projection fits under threshold in monolithic mode (perf-critical case)", async () => {
 		// Mirrors the wide-projection acceptance test — 7 nested sub-models
 		// with id+type+createdAt+updatedAt aggs/filters. Issue #112 expects
-		// this shape to fit monolithic post-minify (under 28K), unlocking the
-		// ~50ms median latency saving.
+		// this shape to fit monolithic post-shrink (under 28K), unlocking
+		// the ~50ms median latency saving. Issue #114: shrink = string
+		// interning, not terser.
 		const subShapes = [
 			"Approval",
 			"Relation",
@@ -1984,7 +1988,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		assert.ok(bytes < 28_000, "monolithic must fit under threshold");
 	});
 
-	it("pipelines a synthetic wide projection (14 sub-models) even with minify on", async () => {
+	it("pipelines a synthetic wide projection (14 sub-models) even with interning on", async () => {
 		function lowerFirst(s: string): string {
 			return s[0].toLowerCase() + s.slice(1);
 		}
@@ -2068,7 +2072,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		}
 	});
 
-	it("minified monolithic output passes @aws-appsync/eslint-plugin recommended config", async () => {
+	it("interned monolithic output passes @aws-appsync/eslint-plugin recommended config", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -2158,7 +2162,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 			assert.deepEqual(
 				messages,
 				[],
-				`@aws-appsync/eslint-plugin reported issues on minified monolithic output:\n${messages.join("\n")}\n--- emitted ---\n${result.content}`,
+				`@aws-appsync/eslint-plugin reported issues on interned monolithic output:\n${messages.join("\n")}\n--- emitted ---\n${result.content}`,
 			);
 		} finally {
 			await rm(dir, { recursive: true, force: true });
