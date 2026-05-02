@@ -182,7 +182,7 @@ function renderMonolithicResolver(
 ): string {
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
-	const aggsBlock = renderAggsBlock(aggregations);
+	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 	const responseAggregationsPreamble =
@@ -205,13 +205,13 @@ export function request(ctx) {
 		size: size + 1,
 		track_total_hits: ${options.trackTotalHitsUpTo},
 		sort,
-		query,${aggsBlock}
+		query,
 	};
 
 	if (searchAfter) {
 		body.search_after = searchAfter;
 	}
-
+${aggsAssignment}
 	return {
 		operation: "GET",
 		path: "/${indexName}/_search",
@@ -524,7 +524,7 @@ function renderPrepareFunction(
 ): string {
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
-	const aggsBlock = renderAggsBlock(aggregations);
+	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
 	// — saves ~5 bytes per slot. The walker never reads these init values; it
@@ -548,13 +548,13 @@ export function request(ctx) {
 		size: size + 1,
 		track_total_hits: ${options.trackTotalHitsUpTo},
 		sort,
-		query,${aggsBlock}
+		query,
 	};
 
 	if (searchAfter) {
 		body.search_after = searchAfter;
 	}
-
+${aggsAssignment}
 	ctx.stash.queryBody = body;
 	return { payload: null };
 }
@@ -871,21 +871,56 @@ function stringifyNode(node: FilterSpecNode): string {
 	return `{i:${i},k:${JSON.stringify(node.kind)},f:${JSON.stringify(node.field ?? "")}}`;
 }
 
-function renderAggsBlock(aggregations: AggregationEntry[]): string {
+/**
+ * Emits a runtime block that conditionally assigns `body.aggs = { ... }` only
+ * when the GraphQL caller selected the `aggregations` field. APPSYNC_JS exposes
+ * `ctx.info.selectionSetList` as an array of dot-paths into the selection set;
+ * we gate on `aggregations` itself or any nested `aggregations/...` path.
+ *
+ * Skipping the aggs block when not requested avoids OS executing every nested
+ * aggregation defined on the doc type for every `searchX(first: 0) { totalCount }`
+ * style probe — a 3 KB+ body shrinks back to a few bytes and OS does no
+ * aggregation work. Returns "" when the projection has no aggregations at all.
+ */
+function renderAggsAssignment(
+	aggregations: AggregationEntry[],
+	indent: string,
+): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
+	const aggsBody = renderAggsObjectLiteral(aggregations, indent);
+	return `${indent}const wantsAggs = ctx.info.selectionSetList.some((p) => p === "aggregations" || p.indexOf("aggregations/") === 0);
+${indent}if (wantsAggs) {
+${indent}\tbody.aggs = ${aggsBody};
+${indent}}
+`;
+}
 
-	// Group aggs by nested path so each path emits ONE `nested` wrapper with all
-	// child aggs inside, instead of one wrapper per agg. Saves a per-agg
-	// `{ nested: { path: "..." }, aggs: { inner: ... } }` skeleton (~50 bytes
-	// per nested agg) on wide projections (issue #105).
-	//
-	// Aggregations carry a per-projection-unique `aggName` (e.g. `byCounterpartyId`).
-	// If the same aggName appears more than once (which can happen when a
-	// projection spreads the same field/aggregation twice), APPSYNC_JS rejects
-	// the resulting object literal at deploy time (TS1117 — duplicate keys).
-	// Dedupe here, first-wins.
+/**
+ * Builds the `{ byTagName: ..., byApprovalType: ..., _tags: { nested: ... } }`
+ * object literal that goes on the right-hand side of `body.aggs = ...`.
+ *
+ * Group aggs by nested path so each path emits ONE `nested` wrapper with all
+ * child aggs inside, instead of one wrapper per agg. Saves a per-agg
+ * `{ nested: { path: "..." }, aggs: { inner: ... } }` skeleton (~50 bytes
+ * per nested agg) on wide projections (issue #105).
+ *
+ * Aggregations carry a per-projection-unique `aggName` (e.g. `byCounterpartyId`).
+ * If the same aggName appears more than once (which can happen when a
+ * projection spreads the same field/aggregation twice), APPSYNC_JS rejects
+ * the resulting object literal at deploy time (TS1117 — duplicate keys).
+ * Dedupe here, first-wins.
+ */
+function renderAggsObjectLiteral(
+	aggregations: AggregationEntry[],
+	indent: string,
+): string {
+	if (aggregations.length === 0) {
+		return "{}";
+	}
+
+	const inner = `${indent}\t`;
 	const flatLines: string[] = [];
 	const flatSeen = new Set<string>();
 	const byPath = new Map<string, AggregationEntry[]>();
@@ -894,7 +929,7 @@ function renderAggsBlock(aggregations: AggregationEntry[]): string {
 		if (!entry.nestedPath) {
 			if (flatSeen.has(entry.aggName)) continue;
 			flatSeen.add(entry.aggName);
-			flatLines.push(`\t\t${entry.aggName}: ${renderAggInner(entry)},`);
+			flatLines.push(`${inner}${entry.aggName}: ${renderAggInner(entry)},`);
 			continue;
 		}
 		const seen = seenInPath.get(entry.nestedPath) ?? new Set<string>();
@@ -911,16 +946,16 @@ function renderAggsBlock(aggregations: AggregationEntry[]): string {
 
 	const groupLines: string[] = [];
 	for (const [path, group] of byPath) {
-		const inner = group
+		const innerEntries = group
 			.map((e) => `${e.aggName}: ${renderAggInner(e)}`)
 			.join(", ");
 		groupLines.push(
-			`\t\t${nestedAggGroupKey(path)}: { nested: { path: ${JSON.stringify(path)} }, aggs: { ${inner} } },`,
+			`${inner}${nestedAggGroupKey(path)}: { nested: { path: ${JSON.stringify(path)} }, aggs: { ${innerEntries} } },`,
 		);
 	}
 
 	const lines = [...flatLines, ...groupLines];
-	return `\n\t\taggs: {\n${lines.join("\n")}\n\t\t},`;
+	return `{\n${lines.join("\n")}\n${indent}}`;
 }
 
 function nestedAggGroupKey(nestedPath: string): string {
@@ -994,7 +1029,7 @@ function renderResponseAggregations(aggregations: AggregationEntry[]): string {
 		return "";
 	}
 
-	// Match the dedupe in renderAggsBlock — first-wins on duplicate aggName.
+	// Match the dedupe in renderAggsObjectLiteral — first-wins on duplicate aggName.
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const entry of aggregations) {
@@ -1078,7 +1113,8 @@ export const __test = {
 	renderPrepareFunction,
 	renderSearchFunction,
 	renderMonolithicResolver,
-	renderAggsBlock,
+	renderAggsAssignment,
+	renderAggsObjectLiteral,
 	renderResponseAggregations,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
 };
