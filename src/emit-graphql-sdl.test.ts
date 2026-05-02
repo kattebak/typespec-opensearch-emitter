@@ -706,6 +706,53 @@ describe("emitGraphQLSdl SearchFilter input", () => {
 		assert.ok(result.content.includes("rankLt: Int"));
 	});
 
+	it("emits int64 range filter inputs as String to avoid Int32 overflow on 64-bit values (e.g. epoch-ms timestamps ~1.7T)", () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int64" } as unknown as Type,
+				}),
+				makeField({
+					name: "updatedAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int64" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("createdAtGte: String"));
+		assert.ok(result.content.includes("createdAtLte: String"));
+		assert.ok(result.content.includes("createdAtGt: String"));
+		assert.ok(result.content.includes("createdAtLt: String"));
+		assert.ok(result.content.includes("updatedAtGte: String"));
+		assert.ok(!result.content.includes("createdAtGte: Int"));
+		assert.ok(!result.content.includes("updatedAtGte: Int"));
+		// Response type for int64 fields is unchanged (still Int) — out of scope
+		// for this fix; only filter inputs overflow at GraphQL parse time.
+		assert.ok(result.content.match(/createdAt: Int(?!\w)/));
+	});
+
+	it("preserves Int for int32 range filter inputs (only int64 / uint64 are remapped)", () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			fields: [
+				makeField({
+					name: "score",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("scoreGte: Int"));
+		assert.ok(result.content.includes("scoreLte: Int"));
+	});
+
 	it("emits SortDirection, <Type>SortField enum, and <Type>SortInput when fields are sortable", () => {
 		const projection = makeProjection({
 			name: "PetSearchDoc",
