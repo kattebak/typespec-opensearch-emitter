@@ -6,12 +6,22 @@ export interface GraphQLEmitterOptions {
 	"max-page-size"?: number;
 	"track-total-hits-up-to"?: number;
 	/**
-	 * Apply post-emit minification (terser, APPSYNC_JS-safe config) before the
-	 * monolithic-vs-pipeline byte check. Default: true. Disable for verbose
-	 * source emission (easier CloudWatch trace inspection at the cost of more
-	 * projections falling into pipeline mode). Issue #112.
+	 * @deprecated Replaced by `intern-strings` (issue #114). Kept on the
+	 * options schema for tspconfig back-compat — the emitter ignores it.
+	 * Custom emit-time string interning replaces terser as the byte-shrink
+	 * mechanism: deterministic, APPSYNC_JS-safe by construction, no
+	 * runtime-evaluator surprises on `term`/`range` clauses inside `nested`
+	 * paths.
 	 */
 	minify?: boolean;
+	/**
+	 * Apply post-emit string-literal interning before the monolithic-vs-pipeline
+	 * byte check. Default: true. Hoists every double-quoted string appearing
+	 * >=2 times in a file into `const _s = [...]` and replaces each occurrence
+	 * with `_s[N]`. APPSYNC_JS-safe by construction (only `const` array decl
+	 * + indexed reads). Issue #114.
+	 */
+	"intern-strings"?: boolean;
 	/**
 	 * Byte threshold for the monolithic-vs-pipeline switch. Above the
 	 * threshold a projection emits as a 3-function pipeline; at or below it
@@ -188,6 +198,11 @@ export const $lib = createTypeSpecLibrary({
 							type: "boolean",
 							nullable: true,
 							default: false,
+						},
+						"intern-strings": {
+							type: "boolean",
+							nullable: true,
+							default: true,
 						},
 						"monolithic-threshold-bytes": {
 							type: "number",
