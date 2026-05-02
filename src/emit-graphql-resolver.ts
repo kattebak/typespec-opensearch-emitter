@@ -5,7 +5,6 @@ import {
 	type FilterSpecNode,
 	type SearchFilterShape,
 } from "./filters.js";
-import { minifyAppsync } from "./minify.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -51,31 +50,13 @@ export interface ResolverOptions {
 	maxPageSize: number;
 	trackTotalHitsUpTo: number;
 	/**
-	 * Apply post-emit minification (terser, APPSYNC_JS-safe config). Smaller
-	 * output means more projections fit under `monolithicThresholdBytes`.
-	 * Default: true.
-	 */
-	minify?: boolean;
-	/**
 	 * Byte threshold above which a projection's monolithic shape is rejected
 	 * and the pipeline shape is emitted instead. Suggested 28,000 (32K cap
-	 * minus headroom). Measured against the post-minify (or post-render)
-	 * monolithic content.
+	 * minus headroom). Measured against the rendered monolithic content.
 	 */
 	monolithicThresholdBytes?: number;
 }
 
-// Default `minify: false` until the terser-vs-APPSYNC_JS shape-mismatch bug
-// is root-caused. Empirically: terser's output (with or without mangling)
-// runs cleanly for filters that produce a `match_all` nested clause but fails
-// at AppSync's request-evaluator with `Unable to convert ... to
-// ElasticsearchVersionedConfig` for `term`/`range` clauses inside a nested
-// path — even though the produced JSON body is structurally identical to the
-// verbose form (and OS accepts it directly). Verbose monolithic emission is
-// stable; the byte cost (~25-30% larger) is acceptable for the issue-#112
-// perf win. Consumers who verify their projections in-situ may opt-in to
-// `minify: true`.
-const DEFAULT_MINIFY = false;
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
 
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
@@ -110,15 +91,14 @@ export async function emitGraphQLResolver(
 	const aggregations = collectAggregations(projection);
 	const searchFilterShape = buildSearchFilterShape(projection);
 
-	const minifyEnabled = options.minify ?? DEFAULT_MINIFY;
 	const threshold =
 		options.monolithicThresholdBytes ?? DEFAULT_MONOLITHIC_THRESHOLD_BYTES;
 
 	// Stage 1 of the two-stage emit (issue #112): render the monolithic UNIT
-	// shape first, optionally minify, then measure. Under the threshold we
-	// ship monolithic — saves ~50ms median per query (pipeline-dispatch I/O).
-	// Over the threshold we fall back to the pipeline split (issue #105).
-	const monolithicRaw = renderMonolithicResolver(
+	// shape and measure. Under the threshold we ship monolithic — saves ~50ms
+	// median per query (pipeline-dispatch I/O). Over the threshold we fall
+	// back to the pipeline split (issue #105).
+	const monolithicContent = renderMonolithicResolver(
 		textFields,
 		keywordFields,
 		aggregations,
@@ -126,9 +106,6 @@ export async function emitGraphQLResolver(
 		projection.indexName,
 		options,
 	);
-	const monolithicContent = minifyEnabled
-		? await minifyAppsync(monolithicRaw)
-		: monolithicRaw;
 	const monolithicBytes = Buffer.byteLength(monolithicContent, "utf-8");
 
 	if (monolithicBytes <= threshold) {
@@ -141,27 +118,17 @@ export async function emitGraphQLResolver(
 		};
 	}
 
-	// Pipeline fallback. Each function gets the same Stage 1 treatment so
-	// per-function size stays tight against the per-file 32 KB cap (issue
-	// #105). The resolver-level file holds the after-mapping; prepare runs
-	// on NONE, search on OPENSEARCH.
-	const prepareRaw = renderPrepareFunction(
+	// Pipeline fallback. The resolver-level file holds the after-mapping;
+	// prepare runs on NONE, search on OPENSEARCH (issue #105).
+	const prepareContent = renderPrepareFunction(
 		textFields,
 		keywordFields,
 		aggregations,
 		searchFilterShape,
 		options,
 	);
-	const searchRaw = renderSearchFunction(projection.indexName);
-	const resolverRaw = renderResolver(aggregations, options);
-
-	const [prepareContent, searchContent, resolverContent] = minifyEnabled
-		? await Promise.all([
-				minifyAppsync(prepareRaw),
-				minifyAppsync(searchRaw),
-				minifyAppsync(resolverRaw),
-			])
-		: [prepareRaw, searchRaw, resolverRaw];
+	const searchContent = renderSearchFunction(projection.indexName);
+	const resolverContent = renderResolver(aggregations, options);
 
 	return {
 		queryFieldName,
@@ -1113,6 +1080,5 @@ export const __test = {
 	renderMonolithicResolver,
 	renderAggsBlock,
 	renderResponseAggregations,
-	DEFAULT_MINIFY,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
 };

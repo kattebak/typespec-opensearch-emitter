@@ -6,13 +6,6 @@ export interface GraphQLEmitterOptions {
 	"max-page-size"?: number;
 	"track-total-hits-up-to"?: number;
 	/**
-	 * Apply post-emit minification (terser, APPSYNC_JS-safe config) before the
-	 * monolithic-vs-pipeline byte check. Default: true. Disable for verbose
-	 * source emission (easier CloudWatch trace inspection at the cost of more
-	 * projections falling into pipeline mode). Issue #112.
-	 */
-	minify?: boolean;
-	/**
 	 * Byte threshold for the monolithic-vs-pipeline switch. Above the
 	 * threshold a projection emits as a 3-function pipeline; at or below it
 	 * emits as a single UNIT resolver. Default: 28000 (32K AppSync per-file
@@ -183,11 +176,6 @@ export const $lib = createTypeSpecLibrary({
 							type: "number",
 							nullable: true,
 							default: 10000,
-						},
-						minify: {
-							type: "boolean",
-							nullable: true,
-							default: false,
 						},
 						"monolithic-threshold-bytes": {
 							type: "number",
