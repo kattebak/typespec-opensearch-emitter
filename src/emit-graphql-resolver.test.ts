@@ -438,7 +438,7 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				'bySpecy: { terms: { field: "species" } }',
+				'bySpecies: { terms: { field: "species" } }',
 			),
 		);
 	});
@@ -514,8 +514,8 @@ describe("emitGraphQLResolver", () => {
 				"edges",
 				"totalCount",
 				"aggregations",
-				"aggregations/bySpecy",
-				"aggregations/bySpecy/key",
+				"aggregations/bySpecies",
+				"aggregations/bySpecies/key",
 			],
 		});
 		assert.ok(
@@ -524,8 +524,8 @@ describe("emitGraphQLResolver", () => {
 		);
 		const aggs = body.aggs as Record<string, unknown>;
 		assert.ok(
-			"bySpecy" in aggs,
-			`body.aggs.bySpecy must be present; got aggs=${JSON.stringify(aggs)}`,
+			"bySpecies" in aggs,
+			`body.aggs.bySpecies must be present; got aggs=${JSON.stringify(aggs)}`,
 		);
 	});
 
@@ -536,6 +536,11 @@ describe("emitGraphQLResolver", () => {
 					name: "locations",
 					keyword: true,
 					aggregations: ["cardinality"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
 				}),
 				makeField({
 					name: "description",
@@ -843,11 +848,21 @@ describe("emitGraphQLResolver", () => {
 					name: "tags",
 					keyword: true,
 					aggregations: ["terms"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
 				}),
 				makeField({
 					name: "locations",
 					keyword: true,
 					aggregations: ["cardinality"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
 				}),
 				makeField({
 					name: "description",
