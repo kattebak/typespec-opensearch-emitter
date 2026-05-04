@@ -123,6 +123,16 @@ test("emits graphql aggregation types and resolver block", async () => {
 	assert.ok(sdl.includes("uniqueAliasCount: Int!"));
 	assert.ok(sdl.includes("missingNicknameCount: Int!"));
 	assert.ok(sdl.includes("aggregations: PetSearchAggregations!"));
+	// Singular scalar field whose name ends in 's' must keep the name verbatim
+	// (issue #119). Pet.species is a scalar string, not Pet.species: string[].
+	assert.ok(
+		sdl.includes("bySpecies: [TermBucket!]!"),
+		`expected bySpecies (preserved) in SDL; got:\n${sdl}`,
+	);
+	assert.ok(
+		!sdl.includes("bySpecy:"),
+		"emitter must not strip trailing 's' from singular fields",
+	);
 
 	// Aggs request shape lives in the prepare function; response mapping
 	// lives in the resolver after-mapping (pipeline split — issue #105).

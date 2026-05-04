@@ -1,3 +1,4 @@
+import type { Type } from "@typespec/compiler";
 import type { AggregationKind, AggregationOptions } from "./decorators.js";
 import type {
 	ResolvedProjection,
@@ -55,6 +56,7 @@ function collectAggregationsRecursive(
 						projectedName,
 						directive.kind,
 						nestedPath,
+						isArrayType(field.type),
 					),
 					openSearchField,
 					useTextType,
@@ -94,8 +96,15 @@ export function aggregationFieldName(
 	fieldName: string,
 	kind: AggregationKind,
 	nestedPath?: string,
+	fieldIsArray = false,
 ): string {
-	const fieldPart = capitalize(singularize(fieldName));
+	// Only collapse a trailing "s" when the source field is itself an array
+	// (tags: Tag[] -> byTag). Singular fields whose name ends in "s"
+	// (status, process, address) keep their name verbatim (byStatus,
+	// byProcess, byAddress).
+	const fieldPart = capitalize(
+		fieldIsArray ? singularize(fieldName) : fieldName,
+	);
 	const prefix = nestedPath ? nestedPathPrefix(nestedPath) : "";
 	const capital = `${prefix}${fieldPart}`;
 	const camel = lowerFirst(capital);
@@ -203,9 +212,18 @@ function isStringLikeType(type: ResolvedProjectionField["type"]): boolean {
 	return false;
 }
 
+function isArrayType(type: Type): boolean {
+	return (
+		type.kind === "Model" &&
+		type.name === "Array" &&
+		type.indexer?.value !== undefined
+	);
+}
+
 export const __test = {
 	aggregationFieldName,
 	singularize,
 	capitalize,
 	isTextField,
+	isArrayType,
 };

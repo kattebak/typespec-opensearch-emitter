@@ -610,6 +610,11 @@ describe("emitGraphQLSdl aggregations", () => {
 					name: "locations",
 					keyword: true,
 					aggregations: ["terms", "cardinality"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Scalar", name: "string" } },
+					} as unknown as Type,
 				}),
 			],
 		});
@@ -617,6 +622,32 @@ describe("emitGraphQLSdl aggregations", () => {
 		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
 		assert.ok(result.content.includes("byLocation: [TermBucket!]!"));
 		assert.ok(result.content.includes("uniqueLocationCount: Int!"));
+	});
+
+	it("preserves singular field names ending in 's' (status, address)", () => {
+		const projection = makeProjection({
+			name: "TradeSearchDoc",
+			fields: [
+				makeField({
+					name: "status",
+					keyword: true,
+					aggregations: ["terms"],
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+				makeField({
+					name: "address",
+					keyword: true,
+					aggregations: ["terms"],
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("byStatus: [TermBucket!]!"));
+		assert.ok(result.content.includes("byAddress: [TermBucket!]!"));
+		assert.ok(!result.content.includes("byStatu:"));
+		assert.ok(!result.content.includes("byAddres:"));
 	});
 });
 

@@ -9,7 +9,25 @@ import {
 } from "./aggregations.js";
 import type { ResolvedProjection } from "./projection.js";
 
-const { aggregationFieldName, singularize, capitalize, isTextField } = __test;
+const {
+	aggregationFieldName,
+	singularize,
+	capitalize,
+	isTextField,
+	isArrayType,
+} = __test;
+
+const stringScalar = { kind: "Scalar", name: "string" } as unknown as Type;
+const arrayOfString = {
+	kind: "Model",
+	name: "Array",
+	indexer: { value: { kind: "Scalar", name: "string" } },
+} as unknown as Type;
+const arrayOfModel = {
+	kind: "Model",
+	name: "Array",
+	indexer: { value: { kind: "Model" } },
+} as unknown as Type;
 
 function makeProjection(
 	overrides: Partial<{
@@ -61,18 +79,37 @@ function liftAggregations(
 }
 
 describe("aggregationFieldName", () => {
-	it("emits byField for terms with plural drop", () => {
-		assert.equal(aggregationFieldName("tags", "terms"), "byTag");
-		assert.equal(aggregationFieldName("groups", "terms"), "byGroup");
-		assert.equal(aggregationFieldName("locations", "terms"), "byLocation");
+	it("emits byField for terms with plural drop on array fields", () => {
+		assert.equal(
+			aggregationFieldName("tags", "terms", undefined, true),
+			"byTag",
+		);
+		assert.equal(
+			aggregationFieldName("groups", "terms", undefined, true),
+			"byGroup",
+		);
+		assert.equal(
+			aggregationFieldName("locations", "terms", undefined, true),
+			"byLocation",
+		);
 	});
 
-	it("emits uniqueFieldCount for cardinality", () => {
+	it("preserves singular field names ending in 's' on scalar fields", () => {
+		assert.equal(aggregationFieldName("status", "terms"), "byStatus");
+		assert.equal(aggregationFieldName("address", "terms"), "byAddress");
+		assert.equal(aggregationFieldName("process", "terms"), "byProcess");
+		assert.equal(aggregationFieldName("class", "terms"), "byClass");
+	});
+
+	it("emits uniqueFieldCount for cardinality on array fields", () => {
 		assert.equal(
-			aggregationFieldName("locations", "cardinality"),
+			aggregationFieldName("locations", "cardinality", undefined, true),
 			"uniqueLocationCount",
 		);
-		assert.equal(aggregationFieldName("tags", "cardinality"), "uniqueTagCount");
+		assert.equal(
+			aggregationFieldName("tags", "cardinality", undefined, true),
+			"uniqueTagCount",
+		);
 	});
 
 	it("emits missingFieldCount for missing", () => {
@@ -86,8 +123,11 @@ describe("aggregationFieldName", () => {
 		assert.equal(aggregationFieldName("description", "terms"), "byDescription");
 	});
 
-	it("handles -ies plural", () => {
-		assert.equal(aggregationFieldName("categories", "terms"), "byCategory");
+	it("handles -ies plural on array fields", () => {
+		assert.equal(
+			aggregationFieldName("categories", "terms", undefined, true),
+			"byCategory",
+		);
 	});
 
 	it("emits <field><Sum|Avg|Min|Max> for numeric metric aggs", () => {
@@ -209,6 +249,7 @@ describe("collectAggregations", () => {
 					name: "locations",
 					keyword: true,
 					aggregations: ["terms", "cardinality"],
+					type: arrayOfString,
 				}),
 			],
 		});
@@ -292,6 +333,7 @@ describe("collectAggregations", () => {
 					name: "tags",
 					projectedName: "labels",
 					aggregations: ["terms"],
+					type: arrayOfString,
 				}),
 			],
 		});
@@ -299,6 +341,53 @@ describe("collectAggregations", () => {
 		const entries = collectAggregations(projection);
 		assert.equal(entries[0].openSearchField, "labels.keyword");
 		assert.equal(entries[0].aggName, "byLabel");
+	});
+
+	it("preserves trailing 's' on singular scalar fields (status, address)", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "status",
+					keyword: true,
+					aggregations: ["terms"],
+					type: stringScalar,
+				}),
+				makeField({
+					name: "address",
+					keyword: true,
+					aggregations: ["terms"],
+					type: stringScalar,
+				}),
+				makeField({
+					name: "process",
+					keyword: true,
+					aggregations: ["terms"],
+					type: stringScalar,
+				}),
+			],
+		});
+
+		const entries = collectAggregations(projection);
+		assert.equal(entries.length, 3);
+		assert.equal(entries[0].aggName, "byStatus");
+		assert.equal(entries[1].aggName, "byAddress");
+		assert.equal(entries[2].aggName, "byProcess");
+	});
+
+	it("drops trailing 's' on array (collection) fields", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					keyword: true,
+					aggregations: ["terms"],
+					type: arrayOfString,
+				}),
+			],
+		});
+
+		const entries = collectAggregations(projection);
+		assert.equal(entries[0].aggName, "byTag");
 	});
 });
 
@@ -438,6 +527,33 @@ describe("collectAggregations with nested sub-projections", () => {
 		assert.ok(byTagName, "expected nestedPath prefix from projectedName");
 		assert.equal(byTagName.nestedPath, "labels");
 		assert.equal(byTagName.openSearchField, "labels.name");
+	});
+});
+
+describe("isArrayType", () => {
+	it("returns true for Model Array types", () => {
+		assert.equal(isArrayType(arrayOfString), true);
+		assert.equal(isArrayType(arrayOfModel), true);
+	});
+
+	it("returns false for scalar types", () => {
+		assert.equal(isArrayType(stringScalar), false);
+		assert.equal(
+			isArrayType({ kind: "Scalar", name: "int32" } as unknown as Type),
+			false,
+		);
+	});
+
+	it("returns false for non-Array Model types", () => {
+		assert.equal(
+			isArrayType({ kind: "Model", name: "Address" } as unknown as Type),
+			false,
+		);
+	});
+
+	it("returns false for non-Model kinds", () => {
+		assert.equal(isArrayType({ kind: "Enum" } as unknown as Type), false);
+		assert.equal(isArrayType({ kind: "Boolean" } as unknown as Type), false);
 	});
 });
 
