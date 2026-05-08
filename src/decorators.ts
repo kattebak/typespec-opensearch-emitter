@@ -61,6 +61,34 @@ export function isSortable(program: Program, target: ModelProperty): boolean {
 	return program.stateSet(StateKeys.sortable).has(target);
 }
 
+export function $graphqlDirectives(
+	context: DecoratorContext,
+	target: Model,
+	...directives: string[]
+): void {
+	// Declared as variadic in tsp/main.tsp because TypeSpec parses a single
+	// `[...]` argument as a tuple TYPE, not an array value (issue #121). The
+	// variadic form mirrors `@aggregatable` / `@filterable` and avoids
+	// forcing callers to use the awkward `#[...]` value-array syntax.
+	context.program
+		.stateMap(StateKeys.graphqlDirectives)
+		.set(target, [...directives]);
+}
+
+/**
+ * Returns the directive override declared on a model via `@graphqlDirectives`,
+ * or `undefined` when none is set. The override is a full replacement of the
+ * emitter's `graphql.directives.default` list — `@graphqlDirectives()`
+ * (zero args) is preserved as `[]` and opts the model out of all directives.
+ * Issue #121.
+ */
+export function getGraphqlDirectives(
+	program: Program,
+	target: Model,
+): string[] | undefined {
+	return program.stateMap(StateKeys.graphqlDirectives).get(target);
+}
+
 export function $keyword(
 	context: DecoratorContext,
 	target: ModelProperty,

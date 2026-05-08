@@ -87,7 +87,16 @@ function liftAggregations(
 	) as ResolvedProjection["fields"][0]["aggregations"];
 }
 
-const dummyProgram = {} as never;
+// emit-graphql-sdl now consults program.stateMap for `@graphqlDirectives`
+// overrides on each emitted Model (issue #121). The pre-existing tests don't
+// exercise overrides, but the lookup runs unconditionally — so the stub must
+// answer "no override" rather than throwing on a missing stateMap.
+const dummyProgram = {
+	stateMap: () => ({
+		get: () => undefined,
+		has: () => false,
+	}),
+} as never;
 const defaultOptions = { defaultPageSize: 20, maxPageSize: 100 };
 
 describe("emitGraphQLSdl", () => {
@@ -939,5 +948,194 @@ describe("toGraphQLQueryFieldName", () => {
 
 	it("handles names without SearchDoc suffix", () => {
 		assert.equal(toGraphQLQueryFieldName("Inventory"), "searchInventory");
+	});
+});
+
+describe("emitGraphQLSdl directives (issue #121)", () => {
+	it("emits no directive suffix when options.directives is unset (default behavior unchanged)", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					filterables: ["term"],
+					aggregations: ["terms"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		// No `@` directives anywhere in the emitted SDL.
+		assert.ok(
+			!result.content.includes("@aws"),
+			"default emit must not contain any @aws_* directives",
+		);
+		// Type headers are bare.
+		assert.ok(result.content.includes("type PetSearchDoc {\n"));
+		assert.ok(result.content.includes("type PetSearchDocConnection {\n"));
+		assert.ok(result.content.includes("type PetSearchDocEdge {\n"));
+		assert.ok(result.content.includes("type PageInfo {\n"));
+	});
+
+	it("appends global default directives to every response-path type", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, {
+			...defaultOptions,
+			directives: ["@aws_cognito_user_pools", "@aws_iam"],
+		});
+
+		// Doc, Connection, Edge, PageInfo, Aggregations, TermBucket all carry
+		// the directive suffix — AppSync rejects the response otherwise.
+		assert.ok(
+			result.content.includes(
+				"type PetSearchDoc @aws_cognito_user_pools @aws_iam {",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"type PetSearchDocConnection @aws_cognito_user_pools @aws_iam {",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"type PetSearchDocEdge @aws_cognito_user_pools @aws_iam {",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"type PageInfo @aws_cognito_user_pools @aws_iam {",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"type PetSearchAggregations @aws_cognito_user_pools @aws_iam {",
+			),
+		);
+		assert.ok(
+			result.content.includes(
+				"type TermBucket @aws_cognito_user_pools @aws_iam {",
+			),
+		);
+	});
+
+	it("does not append directives to input types (filter/sort) — only response-path types need them", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "name",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		});
+		// Mark name sortable.
+		projection.fields[0].sortable = true;
+
+		const result = emitGraphQLSdl(dummyProgram, projection, {
+			...defaultOptions,
+			directives: ["@aws_iam"],
+		});
+
+		// AppSync auth-mode walk only follows the response path; argument types
+		// do not need directives. Keeping inputs bare also avoids tripping over
+		// AppSync's stricter directive placement rules on input/enum types.
+		assert.ok(result.content.includes("input PetSearchDocFilter {\n"));
+		assert.ok(result.content.includes("input PetSortInput {\n"));
+		assert.ok(result.content.includes("enum PetSortField {\n"));
+		assert.ok(result.content.includes("enum SortDirection {\n"));
+		assert.ok(!result.content.match(/input \w+ @aws_iam/));
+		assert.ok(!result.content.match(/enum \w+ @aws_iam/));
+	});
+
+	it("renders directive list in the order provided", () => {
+		const projection = makeProjection({ fields: [] });
+		const result = emitGraphQLSdl(dummyProgram, projection, {
+			...defaultOptions,
+			directives: ["@aws_iam", "@aws_cognito_user_pools"],
+		});
+		assert.ok(
+			result.content.includes(
+				"type PetSearchDoc @aws_iam @aws_cognito_user_pools {",
+			),
+			"directives must render in the configured order",
+		);
+	});
+
+	it("empty directives array is equivalent to undefined (no suffix)", () => {
+		const projection = makeProjection({ fields: [] });
+		const result = emitGraphQLSdl(dummyProgram, projection, {
+			...defaultOptions,
+			directives: [],
+		});
+		assert.ok(result.content.includes("type PetSearchDoc {\n"));
+		assert.ok(!result.content.includes("@"));
+	});
+});
+
+describe("resolveDirectives (issue #121)", () => {
+	it("returns the model's @graphqlDirectives override when set", () => {
+		// Mirror how stateMap resolves: a fake program with a stateMap that
+		// returns the override for our specific Model identity.
+		const model = { name: "Pet" } as never;
+		const override = ["@aws_iam"];
+		const program = {
+			stateMap: () => ({
+				get: (m: unknown) => (m === model ? override : undefined),
+				has: (m: unknown) => m === model,
+			}),
+		} as never;
+
+		const result = __test.resolveDirectives(program, model, [
+			"@aws_cognito_user_pools",
+		]);
+		assert.deepEqual(result, ["@aws_iam"]);
+	});
+
+	it("falls back to defaults when the model has no override", () => {
+		const model = { name: "Pet" } as never;
+		const program = {
+			stateMap: () => ({
+				get: () => undefined,
+				has: () => false,
+			}),
+		} as never;
+		const result = __test.resolveDirectives(program, model, ["@aws_iam"]);
+		assert.deepEqual(result, ["@aws_iam"]);
+	});
+
+	it("treats an empty-array override as opt-out (full replacement, not fall-through)", () => {
+		// Issue #121 — `@graphqlDirectives([])` is the documented opt-out path
+		// for a single model when a global default is configured. Returning
+		// defaults here would defeat that.
+		const model = { name: "Pet" } as never;
+		const program = {
+			stateMap: () => ({
+				get: (m: unknown) => (m === model ? [] : undefined),
+				has: (m: unknown) => m === model,
+			}),
+		} as never;
+		const result = __test.resolveDirectives(program, model, ["@aws_iam"]);
+		assert.deepEqual(result, []);
+	});
+
+	it("returns empty array when both override and defaults are absent", () => {
+		const model = { name: "Pet" } as never;
+		const program = {
+			stateMap: () => ({
+				get: () => undefined,
+				has: () => false,
+			}),
+		} as never;
+		const result = __test.resolveDirectives(program, model, undefined);
+		assert.deepEqual(result, []);
 	});
 });

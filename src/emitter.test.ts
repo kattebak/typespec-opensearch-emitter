@@ -386,6 +386,58 @@ describe("generateGraphQLEntryPoint", () => {
 	});
 });
 
+describe("generateGraphQLManifest queryFieldDirectives (issue #121)", () => {
+	const projection = {
+		projectionModel: { name: "PetSearchDoc" },
+		sourceModel: { name: "Pet" },
+		indexName: "pets_v1",
+		fields: [],
+	} as unknown as ResolvedProjection;
+
+	const resolverFile = {
+		queryFieldName: "searchPet",
+		mode: "monolithic",
+		fileName: "pet-search-doc-resolver.js",
+		content: "",
+		functions: [],
+	};
+
+	it("omits queryFieldDirectives entirely when no directives apply (default behavior)", () => {
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest([projection], [resolverFile]),
+		);
+		assert.equal(manifest.resolvers.length, 1);
+		// Field must not be present at all so unaffected manifests stay
+		// byte-identical to pre-issue-121 emit.
+		assert.ok(!("queryFieldDirectives" in manifest.resolvers[0]));
+	});
+
+	it("includes queryFieldDirectives when the projection resolves to a non-empty list", () => {
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest(
+				[projection],
+				[resolverFile],
+				[["@aws_cognito_user_pools", "@aws_iam"]],
+			),
+		);
+		assert.deepEqual(manifest.resolvers[0].queryFieldDirectives, [
+			"@aws_cognito_user_pools",
+			"@aws_iam",
+		]);
+	});
+
+	it("omits queryFieldDirectives when the projection resolves to an empty list (model opted out)", () => {
+		// Projection-level `@graphqlDirectives([])` opts out of a globally
+		// configured default. The manifest should reflect "no directives" by
+		// omitting the field, not by carrying an empty array — that lets the
+		// consumer treat presence as the signal.
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest([projection], [resolverFile], [[]]),
+		);
+		assert.ok(!("queryFieldDirectives" in manifest.resolvers[0]));
+	});
+});
+
 describe("isTemplateDeclaration", () => {
 	it("returns true when model node has templateParameters", () => {
 		const model = {

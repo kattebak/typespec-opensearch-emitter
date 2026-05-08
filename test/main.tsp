@@ -13,6 +13,11 @@ model Tag {
 	@searchable @aggregatable("missing") @filterable("exists") note?: string;
 }
 
+// Issue #121 — per-model directive override. With no `directives.default`
+// configured at the emitter level, this projection alone gets the directive
+// applied to its response-path types and Query field; the other three
+// projections in this fixture stay bare.
+@graphqlDirectives("@aws_cognito_user_pools", "@aws_iam")
 model TagSearchDoc is SearchProjection<Tag> {}
 
 model Pet {

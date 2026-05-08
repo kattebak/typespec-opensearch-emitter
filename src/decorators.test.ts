@@ -7,6 +7,7 @@ import {
 	getAnalyzer,
 	getBoost,
 	getFilterableKinds,
+	getGraphqlDirectives,
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
@@ -441,5 +442,62 @@ describe("decorators", () => {
 
 		const codes = diagnostics.map((x) => x.code);
 		assert.equal(hasDiagnosticCode(codes, "invalid-filterable-kind"), true);
+	});
+
+	it("captures @graphqlDirectives on a model (issue #121)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      @graphqlDirectives("@aws_cognito_user_pools", "@aws_iam")
+      model Product {
+        @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+		assert.deepEqual(getGraphqlDirectives(runner.program, product), [
+			"@aws_cognito_user_pools",
+			"@aws_iam",
+		]);
+	});
+
+	it("preserves an empty @graphqlDirectives list (opt-out form)", async () => {
+		// `@graphqlDirectives()` (zero args) is the documented way to opt a
+		// single model out of a globally configured directive default. The
+		// state map must carry the empty array verbatim — collapsing it to
+		// undefined would silently fall back to the global default.
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      @graphqlDirectives()
+      model Product {
+        @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+		assert.deepEqual(getGraphqlDirectives(runner.program, product), []);
+	});
+
+	it("returns undefined when @graphqlDirectives is not declared", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const product = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product");
+		assert.ok(product);
+		assert.equal(getGraphqlDirectives(runner.program, product), undefined);
 	});
 });
