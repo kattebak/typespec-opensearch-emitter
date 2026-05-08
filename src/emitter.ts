@@ -14,7 +14,7 @@ import {
 	type EmittedResolverFile,
 	emitGraphQLResolver,
 } from "./emit-graphql-resolver.js";
-import { emitGraphQLSdl } from "./emit-graphql-sdl.js";
+import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
 import { emitMapping } from "./emit-mapping.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
@@ -86,12 +86,15 @@ export async function $onEmit(
 	const graphqlOptions = context.options.graphql;
 	const resolverFiles: EmittedResolverFile[] = [];
 	if (graphqlOptions?.emit) {
+		const directiveDefaults = graphqlOptions.directives?.default;
 		const pageOptions = {
 			defaultPageSize: graphqlOptions["default-page-size"] ?? 20,
 			maxPageSize: graphqlOptions["max-page-size"] ?? 100,
+			directives: directiveDefaults,
 		};
 		const resolverOptions = {
-			...pageOptions,
+			defaultPageSize: pageOptions.defaultPageSize,
+			maxPageSize: pageOptions.maxPageSize,
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
 			monolithicThresholdBytes:
 				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
@@ -121,7 +124,24 @@ export async function $onEmit(
 			}
 		}
 
-		const manifest = generateGraphQLManifest(resolved, resolverFiles);
+		// Issue #121 — Query field directives go in the manifest, not the SDL
+		// fragment. The fragment carries response-path types only; consumers
+		// assemble the Query type from the manifest's queryFieldName + (now)
+		// queryFieldDirectives. Resolved per-projection so each entry sees the
+		// projection's own `@graphqlDirectives` override.
+		const queryFieldDirectivesByProjection = resolved.map((projection) =>
+			resolveDirectives(
+				context.program,
+				projection.projectionModel,
+				directiveDefaults,
+			),
+		);
+
+		const manifest = generateGraphQLManifest(
+			resolved,
+			resolverFiles,
+			queryFieldDirectivesByProjection,
+		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
 			content: manifest,
@@ -235,17 +255,25 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 function generateGraphQLManifest(
 	projections: ResolvedProjection[],
 	resolverFiles: EmittedResolverFile[],
+	queryFieldDirectives?: string[][],
 ): string {
 	const resolvers = projections.map((projection, i) => {
 		const resolver = resolverFiles[i];
+		const directives = queryFieldDirectives?.[i];
 		// `mode` (issue #112) tells the consumer which AppSync resolver kind
 		// to wire — UNIT for `monolithic`, PIPELINE for `pipeline`. The
 		// `functions` array is empty under `monolithic` and ignored by the
-		// consumer in that case.
+		// consumer in that case. `queryFieldDirectives` (issue #121) — when
+		// non-empty, lists GraphQL directives the consumer must attach to
+		// the Query field (e.g. AppSync auth modes); omitted entirely when
+		// no directives apply so unaffected manifests stay byte-identical.
 		return {
 			projection: projection.projectionModel.name,
 			indexName: projection.indexName,
 			queryFieldName: resolver.queryFieldName,
+			...(directives && directives.length > 0
+				? { queryFieldDirectives: directives }
+				: {}),
 			mode: resolver.mode,
 			resolverFile: resolver.fileName,
 			sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,

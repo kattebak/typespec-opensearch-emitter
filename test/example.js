@@ -222,6 +222,72 @@ test("emits nested-aware aggregations on nested sub-projections", async () => {
 	);
 });
 
+test("emits @graphqlDirectives on response-path types and surfaces them in the manifest (issue #121)", async () => {
+	const sdl = await readFile(`${OUT_DIR}/tag-search-doc.graphql`, "utf8");
+	const manifest = JSON.parse(
+		await readFile(`${OUT_DIR}/graphql-resolvers.json`, "utf8"),
+	);
+
+	// Every type along the response path gets the directive — AppSync rejects
+	// the response otherwise. PageInfo lives in the same SDL fragment so it
+	// gets the same suffix; consumers dedupe across fragments.
+	assert.ok(
+		sdl.includes("type TagSearchDoc @aws_cognito_user_pools @aws_iam {"),
+	);
+	assert.ok(
+		sdl.includes(
+			"type TagSearchDocConnection @aws_cognito_user_pools @aws_iam {",
+		),
+	);
+	assert.ok(
+		sdl.includes("type TagSearchDocEdge @aws_cognito_user_pools @aws_iam {"),
+	);
+	assert.ok(sdl.includes("type PageInfo @aws_cognito_user_pools @aws_iam {"));
+	assert.ok(
+		sdl.includes(
+			"type TagSearchAggregations @aws_cognito_user_pools @aws_iam {",
+		),
+	);
+	assert.ok(sdl.includes("type TermBucket @aws_cognito_user_pools @aws_iam {"));
+	// Input types (filters) sit on argument paths; AppSync auth doesn't walk
+	// them, and the issue scope is response-path only.
+	assert.ok(sdl.includes("input TagSearchDocFilter {\n"));
+
+	// Manifest carries the directive list on the affected projection only;
+	// untouched projections keep the pre-issue-121 manifest shape.
+	const tagEntry = manifest.resolvers.find(
+		(r) => r.projection === "TagSearchDoc",
+	);
+	assert.ok(tagEntry);
+	assert.deepEqual(tagEntry.queryFieldDirectives, [
+		"@aws_cognito_user_pools",
+		"@aws_iam",
+	]);
+	const petEntry = manifest.resolvers.find(
+		(r) => r.projection === "PetSearchDoc",
+	);
+	assert.ok(petEntry);
+	assert.ok(
+		!("queryFieldDirectives" in petEntry),
+		"projections without an override must omit queryFieldDirectives",
+	);
+});
+
+test("does not apply directives to other projections' SDL fragments (per-model scoping)", async () => {
+	// Confirm the override is scoped to the decorated projection — AppSync
+	// schemas often mix auth modes per-projection, so a directive bleeding
+	// into a sibling fragment would silently widen access.
+	const petSdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
+	const personSdl = await readFile(
+		`${OUT_DIR}/person-search-doc.graphql`,
+		"utf8",
+	);
+	assert.ok(!petSdl.includes("@aws_cognito_user_pools"));
+	assert.ok(!petSdl.includes("@aws_iam"));
+	assert.ok(!personSdl.includes("@aws_cognito_user_pools"));
+	assert.ok(!personSdl.includes("@aws_iam"));
+});
+
 test("generated output compiles and exports constants", async () => {
 	await writeFile(
 		`${OUT_DIR}/tsconfig.json`,

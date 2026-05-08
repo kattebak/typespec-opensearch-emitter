@@ -1,5 +1,16 @@
 import { createTypeSpecLibrary, paramMessage } from "@typespec/compiler";
 
+export interface GraphQLDirectivesOptions {
+	/**
+	 * Directives applied to every emitted GraphQL type along the response path
+	 * (Doc, Connection, Edge, PageInfo, Aggregations, bucket types, nested
+	 * struct types) and to the Query field declared in the manifest. Used for
+	 * AppSync auth modes — e.g. `["@aws_cognito_user_pools", "@aws_iam"]`.
+	 * Per-model `@graphqlDirectives(...)` overrides this list. Issue #121.
+	 */
+	default?: string[];
+}
+
 export interface GraphQLEmitterOptions {
 	emit?: boolean;
 	"default-page-size"?: number;
@@ -12,6 +23,7 @@ export interface GraphQLEmitterOptions {
 	 * cap minus headroom). Issue #112.
 	 */
 	"monolithic-threshold-bytes"?: number;
+	directives?: GraphQLDirectivesOptions;
 }
 
 export interface OpenSearchEmitterOptions {
@@ -139,6 +151,10 @@ export const $lib = createTypeSpecLibrary({
 			description:
 				"Field-level marker — exposes the field on the projection's SortInput",
 		},
+		graphqlDirectives: {
+			description:
+				"GraphQL directives to attach to the model's emitted SDL (e.g. AppSync auth modes)",
+		},
 	},
 	emitter: {
 		options: {
@@ -181,6 +197,18 @@ export const $lib = createTypeSpecLibrary({
 							type: "number",
 							nullable: true,
 							default: 32000,
+						},
+						directives: {
+							type: "object",
+							nullable: true,
+							properties: {
+								default: {
+									type: "array",
+									items: { type: "string" },
+									nullable: true,
+								},
+							},
+							additionalProperties: false,
 						},
 					},
 					additionalProperties: false,

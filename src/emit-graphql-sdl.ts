@@ -5,7 +5,11 @@ import {
 	collectAggregations,
 	hasAggregations,
 } from "./aggregations.js";
-import { getSearchAs, isSearchable } from "./decorators.js";
+import {
+	getGraphqlDirectives,
+	getSearchAs,
+	isSearchable,
+} from "./decorators.js";
 import {
 	buildSearchFilterShape,
 	type FilterSpecNode,
@@ -25,6 +29,35 @@ export interface EmittedGraphQLFile {
 export interface GraphQLOptions {
 	defaultPageSize: number;
 	maxPageSize: number;
+	/**
+	 * Directives applied to every emitted response-path type (Doc, Connection,
+	 * Edge, PageInfo, Aggregations, bucket types, nested struct types). Each
+	 * string is rendered verbatim after the type name (e.g.
+	 * `["@aws_cognito_user_pools", "@aws_iam"]`). Per-model
+	 * `@graphqlDirectives(...)` overrides this list per-model. Issue #121.
+	 */
+	directives?: string[];
+}
+
+/**
+ * Resolves the directive list to apply to a type emitted from `model`. When
+ * the model declares `@graphqlDirectives(...)`, that list is used verbatim
+ * (full replacement of `defaults`); empty array opts the model out entirely.
+ * Falls back to `defaults` when no override is declared.
+ */
+export function resolveDirectives(
+	program: Program,
+	model: Model,
+	defaults: string[] | undefined,
+): string[] {
+	const override = getGraphqlDirectives(program, model);
+	if (override !== undefined) return override;
+	return defaults ?? [];
+}
+
+function directiveSuffix(directives: readonly string[]): string {
+	if (directives.length === 0) return "";
+	return ` ${directives.join(" ")}`;
 }
 
 export function emitGraphQLSdl(
@@ -35,12 +68,26 @@ export function emitGraphQLSdl(
 	const typeName = projection.projectionModel.name;
 	const fileName = `${toKebabCase(typeName)}.graphql`;
 
+	// Issue #121 — directives apply to every response-path type. Resolve at the
+	// projection level so the projection's own `@graphqlDirectives` overrides
+	// the global default for everything emitted from this SDL file *except*
+	// nested struct types, which look up their own model's override.
+	const projectionDirectives = resolveDirectives(
+		program,
+		projection.projectionModel,
+		options.directives,
+	);
+
 	const lines: string[] = [];
 
-	lines.push(renderObjectType(program, projection));
+	lines.push(renderObjectType(program, projection, projectionDirectives));
 	lines.push("");
 
-	const nestedStructTypes = renderNestedStructTypes(program, projection);
+	const nestedStructTypes = renderNestedStructTypes(
+		program,
+		projection,
+		options.directives,
+	);
 	if (nestedStructTypes) {
 		lines.push(nestedStructTypes);
 		lines.push("");
@@ -60,7 +107,9 @@ export function emitGraphQLSdl(
 
 	const aggEntries = collectAggregations(projection);
 	if (aggEntries.length > 0) {
-		lines.push(renderAggregationTypes(typeName, aggEntries));
+		lines.push(
+			renderAggregationTypes(typeName, aggEntries, projectionDirectives),
+		);
 		lines.push("");
 	}
 
@@ -70,7 +119,13 @@ export function emitGraphQLSdl(
 		lines.push("");
 	}
 
-	lines.push(renderConnectionTypes(typeName, hasAggregations(projection)));
+	lines.push(
+		renderConnectionTypes(
+			typeName,
+			hasAggregations(projection),
+			projectionDirectives,
+		),
+	);
 
 	return {
 		fileName,
@@ -81,6 +136,7 @@ export function emitGraphQLSdl(
 function renderObjectType(
 	program: Program,
 	projection: ResolvedProjection,
+	directives: readonly string[] = [],
 ): string {
 	const typeName = projection.projectionModel.name;
 	// Filter-only / aggregatable-only fields exist in the OpenSearch index for
@@ -94,7 +150,7 @@ function renderObjectType(
 			return `  ${gqlName}: ${gqlType}${nullable}`;
 		});
 
-	return `type ${typeName} {\n${fieldLines.join("\n")}\n}`;
+	return `type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
 }
 
 /**
@@ -110,10 +166,11 @@ function renderObjectType(
 function renderNestedStructTypes(
 	program: Program,
 	projection: ResolvedProjection,
+	defaults: string[] | undefined,
 ): string | undefined {
 	const blocks: string[] = [];
 	const seen = new Set<string>();
-	collectNestedStructTypes(program, projection, blocks, seen);
+	collectNestedStructTypes(program, projection, blocks, seen, defaults);
 	if (blocks.length === 0) return undefined;
 	return blocks.join("\n\n");
 }
@@ -123,6 +180,7 @@ function collectNestedStructTypes(
 	projection: ResolvedProjection,
 	out: string[],
 	seen: Set<string>,
+	defaults: string[] | undefined,
 ): void {
 	for (const field of projection.fields) {
 		if (!field.searchable) continue;
@@ -132,8 +190,17 @@ function collectNestedStructTypes(
 		const name = sub.projectionModel.name;
 		if (seen.has(name)) continue;
 		seen.add(name);
-		out.push(renderVirtualStructType(program, sub));
-		collectNestedStructTypes(program, sub, out, seen);
+		// Issue #121 — each nested struct type can carry its own
+		// @graphqlDirectives override; a user might want a different auth
+		// scope for `Address` than for the parent projection. Falls back to
+		// the global default when the struct itself is undecorated.
+		const subDirectives = resolveDirectives(
+			program,
+			sub.projectionModel,
+			defaults,
+		);
+		out.push(renderVirtualStructType(program, sub, subDirectives));
+		collectNestedStructTypes(program, sub, out, seen, defaults);
 	}
 }
 
@@ -146,6 +213,7 @@ function isVirtualSubProjection(sub: ResolvedProjection): boolean {
 function renderVirtualStructType(
 	program: Program,
 	sub: ResolvedProjection,
+	directives: readonly string[] = [],
 ): string {
 	const typeName = sub.projectionModel.name;
 	const fieldLines = sub.fields.map((field) => {
@@ -154,7 +222,7 @@ function renderVirtualStructType(
 		const nullable = field.optional ? "" : "!";
 		return `  ${gqlName}: ${gqlType}${nullable}`;
 	});
-	return `type ${typeName} {\n${fieldLines.join("\n")}\n}`;
+	return `type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
 }
 
 function renderFilterInput(projection: ResolvedProjection): string | undefined {
@@ -301,6 +369,7 @@ function renderSortTypes(projection: ResolvedProjection): string | undefined {
 function renderConnectionTypes(
 	typeName: string,
 	includeAggregations: boolean,
+	directives: readonly string[] = [],
 ): string {
 	const aggregationsTypeReference = includeAggregations
 		? `  aggregations: ${aggregationsTypeName(typeName)}!`
@@ -313,17 +382,23 @@ function renderConnectionTypes(
 		"  pageInfo: PageInfo!",
 	];
 
+	// Connection / Edge / PageInfo all sit on the response path; AppSync's
+	// auth-mode walk rejects the response when any traversed type lacks the
+	// directive. PageInfo is also emitted in every SDL fragment, so the same
+	// directive set is repeated across fragments — consumers dedupe at
+	// schema-assembly time. Issue #121.
+	const suffix = directiveSuffix(directives);
 	const lines = [
-		`type ${typeName}Connection {`,
+		`type ${typeName}Connection${suffix} {`,
 		...connectionFields,
 		"}",
 		"",
-		`type ${typeName}Edge {`,
+		`type ${typeName}Edge${suffix} {`,
 		`  node: ${typeName}!`,
 		"  cursor: String!",
 		"}",
 		"",
-		"type PageInfo {",
+		`type PageInfo${suffix} {`,
 		"  hasNextPage: Boolean!",
 		"  endCursor: String",
 		"}",
@@ -335,8 +410,10 @@ function renderConnectionTypes(
 function renderAggregationTypes(
 	typeName: string,
 	entries: AggregationEntry[],
+	directives: readonly string[] = [],
 ): string {
 	const aggregationsType = aggregationsTypeName(typeName);
+	const suffix = directiveSuffix(directives);
 
 	const sharedBucketTypes = new Set<string>();
 	const customBucketTypes: string[] = [];
@@ -365,7 +442,7 @@ function renderAggregationTypes(
 				const hitsLine = hasTopHits ? [`  hits: [${typeName}!]!`] : [];
 				customBucketTypes.push(
 					[
-						`type ${bucketTypeName} {`,
+						`type ${bucketTypeName}${suffix} {`,
 						"  key: String!",
 						"  count: Int!",
 						...subLines,
@@ -383,13 +460,18 @@ function renderAggregationTypes(
 	const sharedBucketBlocks: string[] = [];
 	if (sharedBucketTypes.has("TermBucket")) {
 		sharedBucketBlocks.push(
-			["type TermBucket {", "  key: String!", "  count: Int!", "}"].join("\n"),
+			[
+				`type TermBucket${suffix} {`,
+				"  key: String!",
+				"  count: Int!",
+				"}",
+			].join("\n"),
 		);
 	}
 	if (sharedBucketTypes.has("DateHistogramBucket")) {
 		sharedBucketBlocks.push(
 			[
-				"type DateHistogramBucket {",
+				`type DateHistogramBucket${suffix} {`,
 				"  key: String!",
 				"  keyAsString: String",
 				"  count: Int!",
@@ -400,7 +482,7 @@ function renderAggregationTypes(
 	if (sharedBucketTypes.has("RangeBucket")) {
 		sharedBucketBlocks.push(
 			[
-				"type RangeBucket {",
+				`type RangeBucket${suffix} {`,
 				"  key: String!",
 				"  from: Float",
 				"  to: Float",
@@ -413,7 +495,7 @@ function renderAggregationTypes(
 	const lines = [
 		...sharedBucketBlocks,
 		...customBucketTypes,
-		`type ${aggregationsType} {`,
+		`type ${aggregationsType}${suffix} {`,
 		...fieldLines,
 		"}",
 	];
@@ -570,6 +652,7 @@ export const __test = {
 	renderFilterInput,
 	renderConnectionTypes,
 	renderAggregationTypes,
+	resolveDirectives,
 	toGraphQLType,
 	toGraphQLQueryFieldName,
 };
