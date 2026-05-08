@@ -155,6 +155,10 @@ export const $lib = createTypeSpecLibrary({
 			description:
 				"GraphQL directives to attach to the model's emitted SDL (e.g. AppSync auth modes)",
 		},
+		searchProjection: {
+			description:
+				"Marks a SearchProjection<T> model as a top-level projection (gets a Query field, resolver, OS index, manifest entry); undecorated SearchProjection<T> models are nested-only (issue #123)",
+		},
 	},
 	emitter: {
 		options: {

@@ -61,6 +61,25 @@ export function isSortable(program: Program, target: ModelProperty): boolean {
 	return program.stateSet(StateKeys.sortable).has(target);
 }
 
+export function $searchProjection(
+	context: DecoratorContext,
+	target: Model,
+): void {
+	context.program.stateSet(StateKeys.searchProjection).add(target);
+}
+
+/**
+ * True when the model is marked `@searchProjection` — the gate (issue #123)
+ * for top-level emission. Models that pass this check get a Query field,
+ * resolver, mapping, OS index entry, and manifest entry. `is SearchProjection<T>`
+ * models that don't pass this check are treated as nested-only types: they
+ * still emit an SDL fragment so siblings can reference them, but no
+ * top-level wiring. Naming is purely cosmetic.
+ */
+export function isSearchProjection(program: Program, target: Model): boolean {
+	return program.stateSet(StateKeys.searchProjection).has(target);
+}
+
 export function $graphqlDirectives(
 	context: DecoratorContext,
 	target: Model,
