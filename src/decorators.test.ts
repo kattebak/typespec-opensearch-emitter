@@ -15,6 +15,7 @@ import {
 	isKeyword,
 	isNested,
 	isSearchable,
+	isSearchProjection,
 } from "./decorators.js";
 import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
@@ -499,5 +500,46 @@ describe("decorators", () => {
 			.models.get("Product");
 		assert.ok(product);
 		assert.equal(getGraphqlDirectives(runner.program, product), undefined);
+	});
+
+	it("captures @searchProjection on a model (issue #123)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+      @searchProjection
+      model ProductSearchDoc is SearchProjection<Product> {}
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const ns = runner.program.getGlobalNamespaceType();
+		const decorated = ns.models.get("ProductSearchDoc");
+		const undecorated = ns.models.get("Product");
+		assert.ok(decorated);
+		assert.ok(undecorated);
+		assert.equal(isSearchProjection(runner.program, decorated), true);
+		// Source models without the decorator are not top-level projections.
+		assert.equal(isSearchProjection(runner.program, undecorated), false);
+	});
+
+	it("treats `is SearchProjection<T>` without @searchProjection as nested-only (issue #123)", async () => {
+		// The bug class fixed by issue #123: name-based detection used to
+		// promote any `*SearchDoc` model to top-level, including ones meant
+		// only as nested types. The decorator is the only signal now.
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Approval {
+        @searchable @keyword type: string;
+      }
+      model ApprovalSearchDoc is SearchProjection<Approval> {}
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const model = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ApprovalSearchDoc");
+		assert.ok(model);
+		assert.equal(isSearchProjection(runner.program, model), false);
 	});
 });

@@ -5,6 +5,7 @@ import type {
 	Program,
 } from "@typespec/compiler";
 import { emitFile, resolvePath } from "@typespec/compiler";
+import { isSearchProjection } from "./decorators.js";
 import {
 	collectSubProjections,
 	emitDocType,
@@ -43,7 +44,21 @@ export async function $onEmit(
 		.map((model) => resolveProjectionModel(context.program, model))
 		.filter((x): x is ResolvedProjection => x !== undefined);
 
-	for (const projection of resolved) {
+	// Issue #123 — `is SearchProjection<T>` declares a projection-shaped type;
+	// `@searchProjection` is the additional gate for *top-level* emission
+	// (Query field, resolver, OS index, manifest entry). Undecorated models
+	// are nested-only: they still get a doc type and a stripped SDL fragment
+	// so siblings can reference them, but no top-level wiring. This is a
+	// breaking change for fixtures relying on the old name-based behavior.
+	const topLevel = resolved.filter((projection) =>
+		isSearchProjection(context.program, projection.projectionModel),
+	);
+	const nestedOnly = resolved.filter(
+		(projection) =>
+			!isSearchProjection(context.program, projection.projectionModel),
+	);
+
+	for (const projection of topLevel) {
 		const docTypeFile = emitDocType(context.program, projection);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, docTypeFile.fileName),
@@ -70,7 +85,24 @@ export async function $onEmit(
 		});
 	}
 
-	const indexFile = emitIndex(resolved);
+	// Doc types for nested-only projections: still emit the TS interface so
+	// downstream code can name the shape. No mapping (no backing OS index).
+	for (const projection of nestedOnly) {
+		const docTypeFile = emitDocType(context.program, projection);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, docTypeFile.fileName),
+			content: docTypeFile.content,
+		});
+		for (const subProj of collectSubProjections(projection)) {
+			const subDocTypeFile = emitDocType(context.program, subProj);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, subDocTypeFile.fileName),
+				content: subDocTypeFile.content,
+			});
+		}
+	}
+
+	const indexFile = emitIndex(topLevel);
 	await emitFile(context.program, {
 		path: resolvePath(context.emitterOutputDir, indexFile.fileName),
 		content: indexFile.content,
@@ -78,7 +110,7 @@ export async function $onEmit(
 
 	await emitFile(context.program, {
 		path: resolvePath(context.emitterOutputDir, outputFile),
-		content: `${JSON.stringify(serializeProjections(resolved), null, 2)}\n`,
+		content: `${JSON.stringify(serializeProjections(topLevel), null, 2)}\n`,
 	});
 
 	const packageName = context.options["package-name"];
@@ -100,7 +132,8 @@ export async function $onEmit(
 				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
 		};
 
-		for (const projection of resolved) {
+		// Top-level projections get the full SDL + resolver + manifest entry.
+		for (const projection of topLevel) {
 			const sdlFile = emitGraphQLSdl(context.program, projection, pageOptions);
 			await emitFile(context.program, {
 				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
@@ -124,12 +157,26 @@ export async function $onEmit(
 			}
 		}
 
+		// Nested-only: stripped SDL fragment so parent projections that
+		// reference the type by name get a definition in the assembled
+		// schema. No resolver, no manifest entry — issue #123.
+		for (const projection of nestedOnly) {
+			const sdlFile = emitGraphQLSdl(context.program, projection, {
+				...pageOptions,
+				topLevel: false,
+			});
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
+				content: sdlFile.content,
+			});
+		}
+
 		// Issue #121 — Query field directives go in the manifest, not the SDL
 		// fragment. The fragment carries response-path types only; consumers
 		// assemble the Query type from the manifest's queryFieldName + (now)
 		// queryFieldDirectives. Resolved per-projection so each entry sees the
 		// projection's own `@graphqlDirectives` override.
-		const queryFieldDirectivesByProjection = resolved.map((projection) =>
+		const queryFieldDirectivesByProjection = topLevel.map((projection) =>
 			resolveDirectives(
 				context.program,
 				projection.projectionModel,
@@ -138,7 +185,7 @@ export async function $onEmit(
 		);
 
 		const manifest = generateGraphQLManifest(
-			resolved,
+			topLevel,
 			resolverFiles,
 			queryFieldDirectivesByProjection,
 		);
@@ -155,13 +202,18 @@ export async function $onEmit(
 	}
 
 	if (packageName && packageVersion) {
-		const graphqlArtifacts = graphqlOptions?.emit ? resolved : undefined;
+		// `topLevel` for graphql artifacts (issue #123): nested-only projections
+		// have only an SDL fragment, no resolver / pipeline / mapping, so they
+		// don't merit a separate exports entry. The fragment is still needed,
+		// though — track it via `nestedOnly` so the .graphql file gets exported.
+		const graphqlArtifacts = graphqlOptions?.emit ? topLevel : undefined;
 		const packageJsonContent = generatePackageJson(
 			packageName,
 			packageVersion,
-			resolved,
+			topLevel,
 			graphqlArtifacts,
 			graphqlOptions?.emit ? resolverFiles : undefined,
+			graphqlOptions?.emit ? nestedOnly : undefined,
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "package.json"),
@@ -351,6 +403,7 @@ function generatePackageJson(
 	projections: ResolvedProjection[],
 	graphqlProjections?: ResolvedProjection[],
 	resolverFiles?: EmittedResolverFile[],
+	nestedOnlyGraphqlProjections?: ResolvedProjection[],
 ): string {
 	const artifactExports: Record<string, string> = {};
 
@@ -384,6 +437,15 @@ function generatePackageJson(
 				artifactExports[`./${kebab}-fn-prepare.js`] =
 					`./${kebab}-fn-prepare.js`;
 				artifactExports[`./${kebab}-fn-search.js`] = `./${kebab}-fn-search.js`;
+			}
+		}
+		// Nested-only projections (issue #123): SDL fragment only — no resolver,
+		// no pipeline functions, no mapping. The fragment must still be
+		// exported so consumers' schema-assembly tooling can read it.
+		if (nestedOnlyGraphqlProjections) {
+			for (const projection of nestedOnlyGraphqlProjections) {
+				const kebab = toKebabCase(projection.projectionModel.name);
+				artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
 			}
 		}
 	}

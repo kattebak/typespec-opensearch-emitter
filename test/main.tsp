@@ -17,6 +17,7 @@ model Tag {
 // configured at the emitter level, this projection alone gets the directive
 // applied to its response-path types and Query field; the other three
 // projections in this fixture stay bare.
+@searchProjection
 @graphqlDirectives("@aws_cognito_user_pools", "@aws_iam")
 model TagSearchDoc is SearchProjection<Tag> {}
 
@@ -35,17 +36,33 @@ model Pet {
 	@searchable stock: int64;
 	@searchable score: float64;
 	@searchable active: boolean;
+	@searchable approvals: Approval[];
 	internalNotes: string;
 }
 
+@searchProjection
 @indexName("pets_v1")
 model PetSearchDoc is SearchProjection<Pet> {
 	@analyzer("edge_ngram") @boost(2.0)
 	name: string;
 
 	@nested tags: TagSearchDoc[];
+
+	// Issue #123 — nested-only reference. ApprovalSearchDoc has no
+	// @searchProjection and so emits a stripped SDL fragment + doc type
+	// (for use as an array element), but no Query field, no resolver, no
+	// OS index, no manifest entry.
+	approvals: ApprovalSearchDoc[];
 }
 
+model Approval {
+	@searchable @keyword type: string;
+	@searchable @keyword grantedBy: string;
+}
+
+model ApprovalSearchDoc is SearchProjection<Approval> {}
+
+@searchProjection
 model PetPublicSearchDoc is SearchProjection<Pet> {
 	@keyword
 	name: string;
@@ -62,5 +79,6 @@ model Person {
 	@searchable address?: Address;
 }
 
+@searchProjection
 @searchInfer
 model PersonSearchDoc is SearchProjection<Person> {}

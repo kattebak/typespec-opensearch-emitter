@@ -37,6 +37,15 @@ export interface GraphQLOptions {
 	 * `@graphqlDirectives(...)` overrides this list per-model. Issue #121.
 	 */
 	directives?: string[];
+	/**
+	 * When false, emit the minimal SDL needed to reference this projection
+	 * from a parent: the response object type and any virtual struct types
+	 * it contains. Skips Connection/Edge/PageInfo, Filter / SearchFilter,
+	 * Sort and Aggregations — none of those are reachable without a Query
+	 * field returning the projection. Used for `is SearchProjection<T>`
+	 * models that lack `@searchProjection` (issue #123). Default: true.
+	 */
+	topLevel?: boolean;
 }
 
 /**
@@ -79,6 +88,7 @@ export function emitGraphQLSdl(
 	);
 
 	const lines: string[] = [];
+	const topLevel = options.topLevel !== false;
 
 	lines.push(renderObjectType(program, projection, projectionDirectives));
 	lines.push("");
@@ -91,6 +101,22 @@ export function emitGraphQLSdl(
 	if (nestedStructTypes) {
 		lines.push(nestedStructTypes);
 		lines.push("");
+	}
+
+	// Stop here for nested-only projections (issue #123). Without a Query
+	// field on the parent the Filter / SearchFilter / Sort / Aggregations /
+	// Connection / Edge / PageInfo blocks are unreachable — emitting them
+	// would just bloat the assembled schema with dead types.
+	if (!topLevel) {
+		// Drop the trailing blank line so nested-only files end with the last
+		// rendered type block plus a single newline.
+		while (lines.length > 0 && lines[lines.length - 1] === "") {
+			lines.pop();
+		}
+		return {
+			fileName,
+			content: `${lines.join("\n")}\n`,
+		};
 	}
 
 	const filterType = renderFilterInput(projection);

@@ -222,6 +222,65 @@ test("emits nested-aware aggregations on nested sub-projections", async () => {
 	);
 });
 
+test("nested-only projections emit a stripped SDL fragment + doc type, no top-level wiring (issue #123)", async () => {
+	// ApprovalSearchDoc is `is SearchProjection<Approval>` but lacks
+	// `@searchProjection`; it is referenced by PetSearchDoc as an array
+	// element. The fix here: emit just the response object so the parent's
+	// `approvals: [ApprovalSearchDoc!]!` reference resolves, and skip the
+	// top-level concepts that would imply a Query field / OS index that
+	// doesn't exist (the original AppSync "Not Found" trap).
+	const sdl = await readFile(`${OUT_DIR}/approval-search-doc.graphql`, "utf8");
+	assert.ok(sdl.includes("type ApprovalSearchDoc {"));
+	assert.ok(sdl.includes("type: String!"));
+	assert.ok(sdl.includes("grantedBy: String!"));
+	// No Connection / Edge / PageInfo — those exist only to pair with a
+	// Query field returning a Connection.
+	assert.ok(!sdl.includes("ApprovalSearchDocConnection"));
+	assert.ok(!sdl.includes("ApprovalSearchDocEdge"));
+	assert.ok(!sdl.includes("PageInfo"));
+	// No filter / sort inputs either — same logic.
+	assert.ok(!sdl.includes("ApprovalSearchDocFilter"));
+	assert.ok(!sdl.includes("ApprovalSearchFilter"));
+	assert.ok(!sdl.includes("ApprovalSortInput"));
+
+	// Doc type still emitted — useful as a TS shape for the array element.
+	const docType = await readFile(`${OUT_DIR}/approval-search-doc.ts`, "utf8");
+	assert.ok(docType.includes("ApprovalSearchDoc"));
+
+	// Manifest must NOT contain a searchApproval entry — this is the
+	// original bug. The downstream resolver would target the non-existent
+	// `approval_search_doc` index and AppSync would return "Not Found".
+	const manifest = JSON.parse(
+		await readFile(`${OUT_DIR}/graphql-resolvers.json`, "utf8"),
+	);
+	const names = manifest.resolvers.map((r) => r.queryFieldName);
+	assert.ok(
+		!names.includes("searchApproval"),
+		"nested-only projections must not appear in the resolver manifest",
+	);
+	assert.ok(names.includes("searchPet"), "top-level projections still listed");
+
+	// No mapping JSON either (no backing OS index).
+	await assert.rejects(
+		readFile(`${OUT_DIR}/approval-search-doc-search-mapping.json`, "utf8"),
+		"nested-only projections must not emit a mapping file",
+	);
+	// No resolver file.
+	await assert.rejects(
+		readFile(`${OUT_DIR}/approval-search-doc-resolver.js`, "utf8"),
+		"nested-only projections must not emit a resolver",
+	);
+
+	// PetSearchDoc references the type via the array element.
+	const petSdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
+	assert.ok(petSdl.includes("approvals: [ApprovalSearchDoc!]!"));
+
+	// And the index.ts must NOT export an APPROVAL_SEARCH_DOC_INDEX_NAME
+	// constant — there's no index to reference.
+	const indexTs = await readFile(`${OUT_DIR}/index.ts`, "utf8");
+	assert.ok(!indexTs.includes("APPROVAL_SEARCH_DOC_INDEX_NAME"));
+});
+
 test("emits @graphqlDirectives on response-path types and surfaces them in the manifest (issue #121)", async () => {
 	const sdl = await readFile(`${OUT_DIR}/tag-search-doc.graphql`, "utf8");
 	const manifest = JSON.parse(

@@ -951,6 +951,90 @@ describe("toGraphQLQueryFieldName", () => {
 	});
 });
 
+describe("emitGraphQLSdl topLevel: false stripped emit (issue #123)", () => {
+	it("emits only the response object type — no Filter / Sort / Aggregations / Connection / Edge / PageInfo", () => {
+		// Nested-only projections need just enough SDL for parents'
+		// `field: TypeName` references to resolve. The Connection / Edge /
+		// PageInfo trio only exists to pair with a Query field returning
+		// `TypeNameConnection` — irrelevant when there's no Query field.
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "type",
+					keyword: true,
+					filterables: ["term"],
+					aggregations: ["terms"],
+				}),
+				makeField({ name: "grantedBy", keyword: true }),
+			],
+		});
+		// Mark a field sortable too — the stripped emit must skip the sort
+		// blocks even when they would otherwise be rendered.
+		projection.fields[0].sortable = true;
+
+		const result = emitGraphQLSdl(dummyProgram, projection, {
+			...defaultOptions,
+			topLevel: false,
+		});
+
+		assert.ok(result.content.includes("type PetSearchDoc {"));
+		assert.ok(result.content.includes("type: String!"));
+		assert.ok(result.content.includes("grantedBy: String!"));
+		// All the top-level-only blocks must be absent.
+		assert.ok(!result.content.includes("Connection"));
+		assert.ok(!result.content.includes("Edge"));
+		assert.ok(!result.content.includes("PageInfo"));
+		assert.ok(!result.content.includes("Filter"));
+		assert.ok(!result.content.includes("Aggregations"));
+		assert.ok(!result.content.includes("TermBucket"));
+		assert.ok(!result.content.includes("SortDirection"));
+		assert.ok(!result.content.includes("SortInput"));
+	});
+
+	it("still emits virtual struct types reachable from the projection", () => {
+		// A nested-only projection that contains a virtual sub-projection
+		// (struct type) still needs that struct type emitted in the same
+		// fragment — its parent has no idea about the inner struct.
+		const addressVirtual = makeVirtualSubProjection("Address", [
+			makeField({
+				name: "country",
+				type: { kind: "Scalar", name: "string" } as unknown as Type,
+			}),
+		]);
+		const projection = makeProjection({
+			name: "PersonRecord",
+			fields: [
+				makeField({
+					name: "address",
+					subProjection: addressVirtual,
+					optional: true,
+					type: { kind: "Model", name: "Address" } as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(dummyProgram, projection, {
+			...defaultOptions,
+			topLevel: false,
+		});
+		assert.ok(result.content.match(/^type PersonRecord \{/m));
+		assert.ok(result.content.match(/^type Address \{/m));
+		// And nothing more.
+		assert.ok(!result.content.includes("Connection"));
+		assert.ok(!result.content.includes("PageInfo"));
+	});
+
+	it("topLevel: true (default) keeps full emit unchanged", () => {
+		// Regression: a nearby code path adds `if (!topLevel) return early`
+		// after rendering the object type. Confirm the default path still
+		// reaches Connection / PageInfo on a bare-minimum projection.
+		const projection = makeProjection({ fields: [] });
+		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
+		assert.ok(result.content.includes("type PetSearchDocConnection {"));
+		assert.ok(result.content.includes("type PageInfo {"));
+	});
+});
+
 describe("emitGraphQLSdl directives (issue #121)", () => {
 	it("emits no directive suffix when options.directives is unset (default behavior unchanged)", () => {
 		const projection = makeProjection({
