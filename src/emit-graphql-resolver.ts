@@ -88,6 +88,24 @@ export async function emitGraphQLResolver(
 		.filter((f) => f.searchable && f.keyword)
 		.map((f) => f.projectedName ?? f.name);
 
+	// Sortable fields that map to OpenSearch `text` (string, no @keyword,
+	// no nested, no sub-projection). OpenSearch refuses to sort on `text`
+	// — the request fails with `UserIllegalArgumentException: Text fields
+	// are not optimised for operations that require per-document field
+	// data ...`. The emit-mapping layer always adds a `.keyword` subfield
+	// for these (see emit-mapping.ts mapString), so the resolver suffixes
+	// `.keyword` on the sort target at runtime. Closes #126.
+	const textSortFields = projection.fields
+		.filter(
+			(f) =>
+				f.sortable &&
+				!f.keyword &&
+				!f.nested &&
+				!f.subProjection &&
+				hasTextType(f),
+		)
+		.map((f) => f.projectedName ?? f.name);
+
 	const aggregations = collectAggregations(projection);
 	const searchFilterShape = buildSearchFilterShape(projection);
 
@@ -101,6 +119,7 @@ export async function emitGraphQLResolver(
 	const monolithicContent = renderMonolithicResolver(
 		textFields,
 		keywordFields,
+		textSortFields,
 		aggregations,
 		searchFilterShape,
 		projection.indexName,
@@ -123,6 +142,7 @@ export async function emitGraphQLResolver(
 	const prepareContent = renderPrepareFunction(
 		textFields,
 		keywordFields,
+		textSortFields,
 		aggregations,
 		searchFilterShape,
 		options,
@@ -175,6 +195,7 @@ function hasTextType(field: ResolvedProjectionField): boolean {
 function renderMonolithicResolver(
 	textFields: string[],
 	keywordFields: string[],
+	textSortFields: string[],
 	aggregations: AggregationEntry[],
 	searchFilterShape: SearchFilterShape | undefined,
 	indexName: string,
@@ -182,6 +203,7 @@ function renderMonolithicResolver(
 ): string {
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
+	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
@@ -287,6 +309,8 @@ function buildQuery(queryText, filter, searchFilter) {
 	};
 }
 
+const TEXT_SORT_FIELDS = ${textSortFieldsLiteral};
+
 function buildSort(sortBy) {
 	const fallback = [{ _score: "desc" }, { _id: "asc" }];
 	if (!sortBy || sortBy.length === 0) {
@@ -296,7 +320,13 @@ function buildSort(sortBy) {
 	for (const entry of sortBy) {
 		if (entry && entry.field) {
 			const direction = entry.direction === "ASC" ? "asc" : "desc";
-			out.push({ [entry.field]: direction });
+			// OpenSearch refuses to sort on \`text\` fields. The emit-mapping
+			// layer always adds a \`.keyword\` subfield for sortable text
+			// fields, so target that subfield at runtime.
+			const target = TEXT_SORT_FIELDS.indexOf(entry.field) >= 0
+				? entry.field + ".keyword"
+				: entry.field;
+			out.push({ [target]: direction });
 		}
 	}
 	out.push({ _id: "asc" });
@@ -518,12 +548,14 @@ ${responseAggregationsPreamble}
 function renderPrepareFunction(
 	textFields: string[],
 	keywordFields: string[],
+	textSortFields: string[],
 	aggregations: AggregationEntry[],
 	searchFilterShape: SearchFilterShape | undefined,
 	options: ResolverOptions,
 ): string {
 	const textFieldsLiteral = JSON.stringify(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
+	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
@@ -604,6 +636,8 @@ function buildQuery(queryText, filter, searchFilter) {
 	};
 }
 
+const TEXT_SORT_FIELDS = ${textSortFieldsLiteral};
+
 function buildSort(sortBy) {
 	const fallback = [{ _score: "desc" }, { _id: "asc" }];
 	if (!sortBy || sortBy.length === 0) {
@@ -613,7 +647,13 @@ function buildSort(sortBy) {
 	for (const entry of sortBy) {
 		if (entry && entry.field) {
 			const direction = entry.direction === "ASC" ? "asc" : "desc";
-			out.push({ [entry.field]: direction });
+			// OpenSearch refuses to sort on \`text\` fields. The emit-mapping
+			// layer always adds a \`.keyword\` subfield for sortable text
+			// fields, so target that subfield at runtime.
+			const target = TEXT_SORT_FIELDS.indexOf(entry.field) >= 0
+				? entry.field + ".keyword"
+				: entry.field;
+			out.push({ [target]: direction });
 		}
 	}
 	// Always tie-break on _id for stable cursor pagination.
