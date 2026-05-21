@@ -388,6 +388,148 @@ describe("emitGraphQLResolver", () => {
 		]);
 	});
 
+	it("buildSort suffixes .keyword on @sortable text fields, leaves keyword/numeric/date/boolean fields untouched (closes #126)", async () => {
+		// Matrix of sortable fields:
+		//   name           — text (string, no @keyword) → must sort on name.keyword
+		//   counterpartyId — keyword string             → sort on bare path
+		//   notional       — numeric                    → sort on bare path
+		//   validFrom      — date                       → sort on bare path
+		//   active         — boolean                    → sort on bare path
+		// OpenSearch rejects sort against a `text` field with
+		// UserIllegalArgumentException, so the resolver must target the
+		// `.keyword` subfield that emit-mapping always attaches to text fields.
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "name",
+					searchable: true,
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					searchable: true,
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+				makeField({
+					name: "notional",
+					searchable: true,
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+				}),
+				makeField({
+					name: "validFrom",
+					searchable: true,
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+				}),
+				makeField({
+					name: "active",
+					searchable: true,
+					type: { kind: "Scalar", name: "boolean" } as unknown as Type,
+				}),
+			],
+		});
+		// Mark all five sortable. makeField does not expose `sortable`, so set it
+		// directly on the field shape.
+		for (const f of projection.fields) {
+			(f as unknown as { sortable: boolean }).sortable = true;
+		}
+
+		const source = prepareFunctionContent(
+			await emitGraphQLResolver(projection, defaultOptions),
+		);
+		const stripped = source
+			.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+			.replace(/^export function /gm, "function ");
+		const buildSort = new Function(`${stripped}\nreturn buildSort;`)() as (
+			sortBy: unknown,
+		) => unknown;
+
+		// text field → .keyword suffix
+		assert.deepEqual(buildSort([{ field: "name", direction: "ASC" }]), [
+			{ "name.keyword": "asc" },
+			{ _id: "asc" },
+		]);
+		// @keyword string → bare path
+		assert.deepEqual(
+			buildSort([{ field: "counterpartyId", direction: "DESC" }]),
+			[{ counterpartyId: "desc" }, { _id: "asc" }],
+		);
+		// numeric / date / boolean → bare path
+		assert.deepEqual(buildSort([{ field: "notional", direction: "DESC" }]), [
+			{ notional: "desc" },
+			{ _id: "asc" },
+		]);
+		assert.deepEqual(buildSort([{ field: "validFrom", direction: "ASC" }]), [
+			{ validFrom: "asc" },
+			{ _id: "asc" },
+		]);
+		assert.deepEqual(buildSort([{ field: "active", direction: "ASC" }]), [
+			{ active: "asc" },
+			{ _id: "asc" },
+		]);
+
+		// Multi-field sortBy: each entry routes independently.
+		assert.deepEqual(
+			buildSort([
+				{ field: "name", direction: "ASC" },
+				{ field: "notional", direction: "DESC" },
+				{ field: "counterpartyId", direction: "ASC" },
+			]),
+			[
+				{ "name.keyword": "asc" },
+				{ notional: "desc" },
+				{ counterpartyId: "asc" },
+				{ _id: "asc" },
+			],
+		);
+	});
+
+	it("buildSort emits monolithic mode also suffixes .keyword on text sort fields", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "name",
+					searchable: true,
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+			],
+		});
+		(projection.fields[0] as unknown as { sortable: boolean }).sortable = true;
+
+		// Default options (no monolithicThresholdBytes override) → monolithic mode.
+		const result = await emitGraphQLResolver(projection, {
+			defaultPageSize: 20,
+			maxPageSize: 100,
+			trackTotalHitsUpTo: 10000,
+		});
+		assert.equal(result.mode, "monolithic");
+		// The TEXT_SORT_FIELDS literal must include "name", and the buildSort
+		// body must consult it.
+		assert.ok(result.content.includes('TEXT_SORT_FIELDS = ["name"]'));
+		assert.ok(result.content.includes('".keyword"'));
+	});
+
+	it("buildSort leaves text fields that aren't @sortable out of TEXT_SORT_FIELDS", async () => {
+		// A text field that's only @searchable (not @sortable) is still mapped
+		// as text+.keyword by emit-mapping, but it should NOT appear in
+		// TEXT_SORT_FIELDS — the GraphQL schema won't expose it as a sort
+		// option, and we don't want the resolver to silently rewrite a sort
+		// path the caller crafted by hand.
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "notes",
+					searchable: true,
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+			],
+		});
+		// sortable left as false (default).
+
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		assert.ok(combinedContent(result).includes("TEXT_SORT_FIELDS = []"));
+	});
+
 	it("uses search_after for cursor pagination", async () => {
 		const projection = makeProjection({ fields: [] });
 		const result = await emitGraphQLResolver(projection, defaultOptions);
