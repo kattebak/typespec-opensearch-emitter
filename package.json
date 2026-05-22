@@ -4,6 +4,10 @@
 	"description": "TypeSpec emitter for OpenSearch projections",
 	"type": "module",
 	"main": "dist/index.js",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/kattebak/typespec-opensearch-emitter.git"
+	},
 	"publishConfig": {
 		"access": "public"
 	},
