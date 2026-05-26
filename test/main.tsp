@@ -43,7 +43,9 @@ model Pet {
 @searchProjection
 @indexName("pets_v1")
 model PetSearchDoc is SearchProjection<Pet> {
-	@analyzer("edge_ngram") @boost(2.0)
+	// Issue #130 — prefix/match query the analyzed (edge_ngram) field, NOT the
+	// `.keyword` sub-field, so partial / begins-with matching works.
+	@analyzer("edge_ngram") @boost(2.0) @filterable("prefix", "match")
 	name: string;
 
 	@nested tags: TagSearchDoc[];

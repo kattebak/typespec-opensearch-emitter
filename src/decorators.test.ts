@@ -416,6 +416,26 @@ describe("decorators", () => {
 		]);
 	});
 
+	it("stores analyzed-field @filterable kinds prefix and match (issue #130)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @filterable("prefix", "match") @searchable name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const name = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("name");
+		assert.ok(name);
+		assert.deepEqual(getFilterableKinds(runner.program, name), [
+			"prefix",
+			"match",
+		]);
+	});
+
 	it("returns undefined when @filterable not used", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

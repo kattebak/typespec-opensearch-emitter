@@ -182,6 +182,30 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 	assert.ok(prepare.includes('p:"tags"'));
 	assert.ok(prepare.includes('{i:"rank",k:"range"'));
 	assert.ok(!prepare.includes('"rankGte"'));
+
+	// Issue #130 — analyzed-field filter kinds. The projection's `name` field
+	// carries @analyzer("edge_ngram") @filterable("prefix", "match").
+	//
+	// (a) GraphQL: the SearchFilter input gains String operators for the
+	//     analyzed field.
+	assert.ok(sdl.includes("namePrefix: String"));
+	assert.ok(sdl.includes("nameMatch: String"));
+
+	// (b) FILTER_SPEC targets the ANALYZED field (`name`), NOT `name.keyword` —
+	//     so the edge-ngram analyzer is exercised by the query (bypasses the
+	//     needsKeywordSuffix routing applied to term/terms/range).
+	assert.ok(prepare.includes('{i:"namePrefix",k:"prefix",f:"name"}'));
+	assert.ok(prepare.includes('{i:"nameMatch",k:"match",f:"name"}'));
+	assert.ok(!prepare.includes('f:"name.keyword"'));
+
+	// (c) The resolver emits `prefix` / `match` OpenSearch queries (not a
+	//     `.keyword` term).
+	assert.ok(
+		prepare.includes("outFilters.push({ prefix: { [node.f]: value } })"),
+	);
+	assert.ok(
+		prepare.includes("outFilters.push({ match: { [node.f]: value } })"),
+	);
 });
 
 test("emits nested-aware aggregations on nested sub-projections", async () => {

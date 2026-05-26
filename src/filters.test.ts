@@ -119,6 +119,27 @@ describe("collectFilterables", () => {
 		assert.equal(entries[0].openSearchField, "nickname.keyword");
 	});
 
+	it("prefix/match target the analyzed field, never .keyword (issue #130)", () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "name",
+					// Non-keyword analyzed text string field: term would route to
+					// `.keyword`, but prefix/match must hit the analyzed field.
+					filterables: ["term", "prefix", "match"],
+					type: { kind: "Scalar", name: "string" } as unknown as Type,
+				}),
+			],
+		});
+		const entries = collectFilterables(projection);
+		const byInput = Object.fromEntries(
+			entries.map((e) => [e.inputFieldName, e.openSearchField]),
+		);
+		assert.equal(byInput.name, "name.keyword"); // term still exact-match
+		assert.equal(byInput.namePrefix, "name"); // analyzed field, no suffix
+		assert.equal(byInput.nameMatch, "name"); // analyzed field, no suffix
+	});
+
 	it("uses bare field for keyword fields", () => {
 		const projection = makeProjection({
 			fields: [

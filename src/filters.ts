@@ -13,8 +13,11 @@ export interface FilterableEntry {
 	 * GraphQL input field name on the SearchFilter input type.
 	 *  - term: <field>
 	 *  - term_negate: <field>Not
+	 *  - terms: <field>In
 	 *  - exists: <field>Exists
 	 *  - range: <field>Gte / <field>Lte / <field>Gt / <field>Lt (one entry per bound)
+	 *  - prefix: <field>Prefix
+	 *  - match: <field>Match
 	 */
 	inputFieldName: string;
 	/**
@@ -73,12 +76,20 @@ function filterableEntriesForField(
 ): FilterableEntry[] {
 	const entries: FilterableEntry[] = [];
 	const projectedName = field.projectedName ?? field.name;
-	const fieldPart = needsKeywordSuffix(field)
-		? `${projectedName}.keyword`
-		: projectedName;
-	const openSearchField = nestedPath ? `${nestedPath}.${fieldPart}` : fieldPart;
 
 	for (const kind of field.filterables ?? []) {
+		// prefix/match query the analyzed field directly — never the `.keyword`
+		// sub-field — so the field's @analyzer (e.g. edge-ngram) is exercised
+		// (issue #130). All other kinds keep their exact-match `.keyword`
+		// behaviour via needsKeywordSuffix.
+		const fieldPart =
+			!isAnalyzedKind(kind) && needsKeywordSuffix(field)
+				? `${projectedName}.keyword`
+				: projectedName;
+		const openSearchField = nestedPath
+			? `${nestedPath}.${fieldPart}`
+			: fieldPart;
+
 		if (kind === "range") {
 			// Single FILTER_SPEC entry per range field; the resolver expands
 			// the four bound checks (Gte/Lte/Gt/Lt) at iteration time. Saves
@@ -120,7 +131,20 @@ function filterInputFieldName(
 			return `${projectedName}In`;
 		case "exists":
 			return `${projectedName}Exists`;
+		case "prefix":
+			return `${projectedName}Prefix`;
+		case "match":
+			return `${projectedName}Match`;
 	}
+}
+
+/**
+ * prefix/match are full-text / analyzed-field kinds: they must query the
+ * analyzed field, bypassing the `.keyword` exact-match routing applied to
+ * term/terms/range (issue #130).
+ */
+function isAnalyzedKind(kind: FilterableKind): boolean {
+	return kind === "prefix" || kind === "match";
 }
 
 function joinNestedPath(parent: string | undefined, segment: string): string {
@@ -320,4 +344,5 @@ export const __test = {
 	needsKeywordSuffix,
 	isStringLikeType,
 	filterInputFieldName,
+	isAnalyzedKind,
 };
