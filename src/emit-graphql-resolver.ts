@@ -458,6 +458,14 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 					if (any) {
 						outFilters.push({ range: { [node.f]: bounds } });
 					}
+				} else if (node.k === "prefix") {
+					if (value != null && value !== "") {
+						outFilters.push({ prefix: { [node.f]: value } });
+					}
+				} else if (node.k === "match") {
+					if (value != null && value !== "") {
+						outFilters.push({ match: { [node.f]: value } });
+					}
 				}
 			}
 		}
@@ -819,6 +827,14 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 					}
 					if (any) {
 						outFilters.push({ range: { [node.f]: bounds } });
+					}
+				} else if (node.k === "prefix") {
+					if (value != null && value !== "") {
+						outFilters.push({ prefix: { [node.f]: value } });
+					}
+				} else if (node.k === "match") {
+					if (value != null && value !== "") {
+						outFilters.push({ match: { [node.f]: value } });
 					}
 				}
 			}

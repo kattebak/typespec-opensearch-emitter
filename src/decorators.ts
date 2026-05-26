@@ -637,6 +637,12 @@ export const FILTERABLE_KINDS = [
 	"terms",
 	"exists",
 	"range",
+	// Analyzed-field kinds (issue #130). Unlike term/terms/range these target
+	// the analyzed text field, NOT the `.keyword` sub-field, so an edge-ngram
+	// (or other) analyzer registered via @analyzer is actually exercised by the
+	// generated query.
+	"prefix",
+	"match",
 ] as const;
 export type FilterableKind = (typeof FILTERABLE_KINDS)[number];
 

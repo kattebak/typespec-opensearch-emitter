@@ -108,7 +108,7 @@ export const $lib = createTypeSpecLibrary({
 		"invalid-filterable-kind": {
 			severity: "error",
 			messages: {
-				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, terms, exists, range.`,
+				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, terms, exists, range, prefix, match.`,
 			},
 		},
 		"filterable-requires-kind": {
@@ -137,7 +137,8 @@ export const $lib = createTypeSpecLibrary({
 			description: "Declare aggregation kinds (terms, cardinality, missing)",
 		},
 		filterable: {
-			description: "Declare filter kinds (term, term_negate, exists, range)",
+			description:
+				"Declare filter kinds (term, term_negate, terms, exists, range, prefix, match)",
 		},
 		searchInfer: {
 			description:
