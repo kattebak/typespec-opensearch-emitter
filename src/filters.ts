@@ -1,3 +1,4 @@
+import type { Model } from "@typespec/compiler";
 import type { FilterableKind } from "./decorators.js";
 import type {
 	ResolvedProjection,
@@ -238,6 +239,13 @@ export interface SearchFilterShape {
 	nodes: FilterSpecNode[];
 	/** Sub-projection filter shapes that should also be emitted as input types. */
 	nestedShapes: SearchFilterShape[];
+	/**
+	 * Source model this shape was built from — the diagnostic target when two
+	 * structurally-different shapes collide on the same `typeName`
+	 * (searchfilter-name-collision). Optional because hand-built test shapes and
+	 * stubbed projections may not carry a real Model.
+	 */
+	target?: Model;
 }
 
 export function buildSearchFilterShape(
@@ -300,6 +308,7 @@ function buildShapeRecursive(
 							typeName: nestedTypeName,
 							nodes: subShape.nodes,
 							nestedShapes: subShape.nestedShapes,
+							target: field.subProjection.projectionModel,
 						});
 					}
 				} else {
@@ -326,6 +335,7 @@ function buildShapeRecursive(
 							typeName: subTypeName,
 							nodes: subShape.nodes,
 							nestedShapes: subShape.nestedShapes,
+							target: field.subProjection.projectionModel,
 						});
 					}
 				}
@@ -337,6 +347,7 @@ function buildShapeRecursive(
 		typeName: searchFilterTypeName(projection.projectionModel.name),
 		nodes,
 		nestedShapes,
+		target: projection.projectionModel,
 	};
 }
 

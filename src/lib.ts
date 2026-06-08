@@ -118,6 +118,12 @@ export const $lib = createTypeSpecLibrary({
 					"Decorator @filterable requires at least one filter kind argument.",
 			},
 		},
+		"searchfilter-name-collision": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Two different SearchFilter shapes both resolve to the GraphQL input name "${"typeName"}". This happens when a projection and one of its nested struct models share a base name (e.g. a document "XSearchDoc" with a nested "x: X" field both map to "XSearchFilter"). Rename the nested model (e.g. "XSummary", emitting "XSummarySearchFilter") so each shape gets a distinct input name.`,
+			},
+		},
 	},
 	state: {
 		searchable: { description: "Marks a property as searchable" },
