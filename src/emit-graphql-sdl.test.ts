@@ -99,6 +99,27 @@ const dummyProgram = {
 } as never;
 const defaultOptions = { defaultPageSize: 20, maxPageSize: 100 };
 
+// reportDiagnostic(program, ...) ultimately calls program.reportDiagnostic(diag)
+// (see @typespec/compiler diagnostic-creator). The stub program above never
+// supplies that method because the non-collision paths never report — so for
+// the collision tests use a program that captures diagnostics into an array.
+function makeCapturingProgram(): {
+	program: never;
+	diagnostics: { code: string }[];
+} {
+	const diagnostics: { code: string }[] = [];
+	const program = {
+		stateMap: () => ({
+			get: () => undefined,
+			has: () => false,
+		}),
+		reportDiagnostic: (diag: { code: string }) => {
+			diagnostics.push(diag);
+		},
+	} as never;
+	return { program, diagnostics };
+}
+
 describe("emitGraphQLSdl", () => {
 	it("generates object type from projection fields", () => {
 		const projection = makeProjection({
@@ -710,6 +731,83 @@ describe("emitGraphQLSdl SearchFilter input", () => {
 			addressInputCount,
 			1,
 			"AddressSearchFilter must be declared exactly once in the SDL",
+		);
+	});
+
+	it("reports no diagnostic for the identical-shape-via-two-paths case (#103)", () => {
+		// Same shape as the #103 test, but assert the content-aware dedup does
+		// not mistake the legitimate same-block case for a collision.
+		const addressSub = {
+			projectionModel: { name: "AddressSearchDoc" },
+			sourceModel: { name: "Address" },
+			indexName: "addresses",
+			fields: [
+				makeField({ name: "country", keyword: true, filterables: ["term"] }),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			fields: [
+				makeField({
+					name: "homeAddress",
+					subProjection: addressSub,
+					type: { kind: "Model" } as unknown as Type,
+				}),
+				makeField({
+					name: "billingAddress",
+					subProjection: addressSub,
+					type: { kind: "Model" } as unknown as Type,
+				}),
+			],
+		});
+
+		const { program, diagnostics } = makeCapturingProgram();
+		emitGraphQLSdl(program, projection, defaultOptions);
+		assert.equal(
+			diagnostics.length,
+			0,
+			"identical shape via two paths must dedup silently, not report a collision",
+		);
+	});
+
+	it("fails loud when two different shapes collide on one SearchFilter input name", () => {
+		// Mirrors the real COS failure: a document `CounterpartySearchDoc` with a
+		// non-@nested struct field `counterparty: Counterparty`. The document
+		// projection yields `CounterpartySearchFilter`, and the nested
+		// `Counterparty` struct's filter name is also `CounterpartySearchFilter`
+		// — but with a different shape. Name-only dedup would silently drop one;
+		// content-aware dedup must report a collision instead.
+		const counterpartyStruct = {
+			projectionModel: { name: "Counterparty" },
+			sourceModel: { name: "Counterparty" },
+			indexName: "",
+			// Distinct field set from the document root below.
+			fields: [
+				makeField({ name: "legalName", keyword: true, filterables: ["term"] }),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			fields: [
+				// Root-level filterable → document filter name CounterpartySearchFilter.
+				makeField({ name: "status", keyword: true, filterables: ["term"] }),
+				// Non-@nested struct field whose model is `Counterparty` →
+				// CounterpartySearchFilter, with a different shape.
+				makeField({
+					name: "counterparty",
+					subProjection: counterpartyStruct,
+					type: { kind: "Model" } as unknown as Type,
+				}),
+			],
+		});
+
+		const { program, diagnostics } = makeCapturingProgram();
+		emitGraphQLSdl(program, projection, defaultOptions);
+		assert.ok(
+			diagnostics.some((d) => d.code.endsWith("searchfilter-name-collision")),
+			"a genuine SearchFilter name collision must report searchfilter-name-collision",
 		);
 	});
 

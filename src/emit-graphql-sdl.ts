@@ -1,4 +1,11 @@
-import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
+import {
+	type Model,
+	NoTarget,
+	type Program,
+	type Scalar,
+	type Type,
+	type Union,
+} from "@typespec/compiler";
 import {
 	type AggregationEntry,
 	aggregationsTypeName,
@@ -15,6 +22,7 @@ import {
 	type FilterSpecNode,
 	type SearchFilterShape,
 } from "./filters.js";
+import { reportDiagnostic } from "./lib.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -274,12 +282,17 @@ function renderSearchFilterInputs(
 	shape: SearchFilterShape,
 ): string {
 	const blocks: string[] = [];
-	// Dedup `<Type>SearchFilter` declarations by typeName (issue #103). The
-	// same nested shape can be reachable via multiple paths in the recursion
-	// graph; without dedup the SDL ends up with two `input X { ... }` blocks
-	// for the same X, which is ill-formed.
-	const seen = new Set<string>();
-	renderSearchFilterShapeRecursive(program, shape, blocks, seen);
+	// Dedup `<Type>SearchFilter` declarations by their *rendered content*, not
+	// just by typeName (issue #103, #132). The same nested shape reached via
+	// multiple paths (e.g. `homeAddress` and `billingAddress` both →
+	// `AddressSearchFilter`) renders an identical block — emit it once. But
+	// `searchFilterTypeName` is not injective: a document `XSearchDoc` and a
+	// nested struct `X` both map to `XSearchFilter` while having *different*
+	// shapes. Deduping by name alone silently drops the second shape and leaves
+	// the parent field self-referencing; comparing rendered blocks lets the
+	// legitimate same-shape case dedup while a genuine collision fails loud.
+	const emitted = new Map<string, string>();
+	renderSearchFilterShapeRecursive(program, shape, blocks, emitted);
 	return blocks.join("\n\n");
 }
 
@@ -287,13 +300,27 @@ function renderSearchFilterShapeRecursive(
 	program: Program,
 	shape: SearchFilterShape,
 	out: string[],
-	seen: Set<string>,
+	emitted: Map<string, string>,
 ): void {
-	if (seen.has(shape.typeName)) return;
-	seen.add(shape.typeName);
-	out.push(renderSearchFilterInputBlock(program, shape));
+	const block = renderSearchFilterInputBlock(program, shape);
+	const prior = emitted.get(shape.typeName);
+	if (prior !== undefined) {
+		// Same rendered block ⇒ same shape via two paths (#103): dedup silently
+		// and don't recurse again. A different block ⇒ two distinct shapes claim
+		// one input name — ill-formed SDL, so fail loud and stop this branch.
+		if (prior !== block) {
+			reportDiagnostic(program, {
+				code: "searchfilter-name-collision",
+				format: { typeName: shape.typeName },
+				target: shape.target ?? NoTarget,
+			});
+		}
+		return;
+	}
+	emitted.set(shape.typeName, block);
+	out.push(block);
 	for (const sub of shape.nestedShapes) {
-		renderSearchFilterShapeRecursive(program, sub, out, seen);
+		renderSearchFilterShapeRecursive(program, sub, out, emitted);
 	}
 }
 
