@@ -2,6 +2,7 @@ import type {
 	DecoratorContext,
 	Model,
 	ModelProperty,
+	Operation,
 	Program,
 	Type,
 } from "@typespec/compiler";
@@ -78,6 +79,23 @@ export function $searchProjection(
  */
 export function isSearchProjection(program: Program, target: Model): boolean {
 	return program.stateSet(StateKeys.searchProjection).has(target);
+}
+
+export function $restResolver(
+	context: DecoratorContext,
+	target: Operation,
+): void {
+	context.program.stateSet(StateKeys.restResolver).add(target);
+}
+
+/**
+ * True when the operation is marked `@restResolver` — the opt-in gate
+ * (issue #134) for AppSync JS REST resolver emission. Marked operations get
+ * a Query/Mutation SDL field, a Query.<name>.js / Mutation.<name>.js
+ * resolver, and a manifest entry targeting an HTTP data source.
+ */
+export function isRestResolver(program: Program, target: Operation): boolean {
+	return program.stateSet(StateKeys.restResolver).has(target);
 }
 
 export function $graphqlDirectives(

@@ -1,0 +1,11 @@
+emit:
+  - "@kattebak/typespec-opensearch-emitter"
+options:
+  "@kattebak/typespec-opensearch-emitter":
+    emitter-output-dir: "{cwd}/build/petstore-emit"
+    graphql:
+      emit: true
+    rest:
+      dataSourceName: "HTTP"
+      injectHeaders:
+        x-user-id: "identity.resolverContext.userId"

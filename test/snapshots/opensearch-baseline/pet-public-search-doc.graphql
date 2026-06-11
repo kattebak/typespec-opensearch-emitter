@@ -1,0 +1,74 @@
+type PetPublicSearchDoc {
+  id: String!
+  name: String!
+  species: String!
+  breed: String
+  birthDate: String!
+  createdAt: String!
+  tags: [String!]!
+  owner: String!
+  aliases: [String!]!
+  nickname: String
+  rank: Int!
+  stock: Int!
+  score: Float!
+  active: Boolean!
+  approvals: [String!]!
+}
+
+input PetPublicSearchDocFilter {
+  name: String
+  species: String
+}
+
+input PetPublicSearchFilter {
+  species: String
+  speciesNot: String
+  birthDateGte: String
+  birthDateLte: String
+  birthDateGt: String
+  birthDateLt: String
+  createdAtGte: String
+  createdAtLte: String
+  createdAtGt: String
+  createdAtLt: String
+  nicknameExists: Boolean
+  rankGte: Int
+  rankLte: Int
+  rankGt: Int
+  rankLt: Int
+}
+
+type TermBucket {
+  key: String!
+  count: Int!
+}
+
+type PetPublicSearchAggregations {
+
+  bySpecies: [TermBucket!]!
+
+  byAlias: [TermBucket!]!
+
+  uniqueAliasCount: Int!
+
+  missingNicknameCount: Int!
+
+}
+
+type PetPublicSearchDocConnection {
+  edges: [PetPublicSearchDocEdge!]!
+  totalCount: Int!
+  aggregations: PetPublicSearchAggregations!
+  pageInfo: PageInfo!
+}
+
+type PetPublicSearchDocEdge {
+  node: PetPublicSearchDoc!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}

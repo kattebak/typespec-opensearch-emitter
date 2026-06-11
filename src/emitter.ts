@@ -18,12 +18,23 @@ import {
 import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
 import { emitMapping } from "./emit-mapping.js";
+import {
+	type EmittedRestResolverFile,
+	emitRestResolver,
+	restResolverFileName,
+} from "./emit-rest-resolver.js";
+import { emitRestSdl, restSdlFileName } from "./emit-rest-sdl.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
 import {
 	isSearchProjectionModel,
 	type ResolvedProjection,
 	resolveProjectionModel,
 } from "./projection.js";
+import {
+	collectRestOperations,
+	type ResolvedRestOperation,
+	resolveRestOperation,
+} from "./rest-operations.js";
 import { toKebabCase } from "./utils.js";
 
 export async function $onEmit(
@@ -36,7 +47,13 @@ export async function $onEmit(
 		context.program,
 		context.program.getGlobalNamespaceType(),
 	);
-	if (projectionModels.length === 0) {
+	// Issue #134 — `@restResolver` operations are a second, independent
+	// discovery path; a spec can be rest-only, projection-only, or both.
+	const restOperations = collectRestOperations(
+		context.program,
+		context.program.getGlobalNamespaceType(),
+	);
+	if (projectionModels.length === 0 && restOperations.length === 0) {
 		return;
 	}
 
@@ -102,21 +119,27 @@ export async function $onEmit(
 		}
 	}
 
-	const indexFile = emitIndex(topLevel);
-	await emitFile(context.program, {
-		path: resolvePath(context.emitterOutputDir, indexFile.fileName),
-		content: indexFile.content,
-	});
+	// OpenSearch index + projections JSON only when projections exist — a
+	// rest-only spec (issue #134) has no backing OS index to describe.
+	if (projectionModels.length > 0) {
+		const indexFile = emitIndex(topLevel);
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, indexFile.fileName),
+			content: indexFile.content,
+		});
 
-	await emitFile(context.program, {
-		path: resolvePath(context.emitterOutputDir, outputFile),
-		content: `${JSON.stringify(serializeProjections(topLevel), null, 2)}\n`,
-	});
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, outputFile),
+			content: `${JSON.stringify(serializeProjections(topLevel), null, 2)}\n`,
+		});
+	}
 
 	const packageName = context.options["package-name"];
 	const packageVersion = context.options["package-version"];
 	const graphqlOptions = context.options.graphql;
 	const resolverFiles: EmittedResolverFile[] = [];
+	const restResolverFiles: EmittedRestResolverFile[] = [];
+	const restSdlFileNames: string[] = [];
 	if (graphqlOptions?.emit) {
 		const directiveDefaults = graphqlOptions.directives?.default;
 		const pageOptions = {
@@ -184,10 +207,37 @@ export async function $onEmit(
 			),
 		);
 
+		// REST resolvers (issue #134) — a parallel, additive path. New modules
+		// only; with no @restResolver operations these loops are no-ops and the
+		// manifest stays byte-identical to the OpenSearch-only emit.
+		const restOptions = context.options.rest;
+		const restResolved = restOperations.map((operation) =>
+			resolveRestOperation(context.program, operation),
+		);
+		for (const sdlFile of emitRestSdl(context.program, restResolved)) {
+			restSdlFileNames.push(sdlFile.fileName);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
+				content: sdlFile.content,
+			});
+		}
+		for (const restOperation of restResolved) {
+			const restResolverFile = emitRestResolver(restOperation, {
+				injectHeaders: restOptions?.injectHeaders,
+				errorMap: restOptions?.errorMap,
+			});
+			restResolverFiles.push(restResolverFile);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, restResolverFile.fileName),
+				content: restResolverFile.content,
+			});
+		}
+
 		const manifest = generateGraphQLManifest(
 			topLevel,
 			resolverFiles,
 			queryFieldDirectivesByProjection,
+			generateRestManifestEntries(restResolved, restOptions?.dataSourceName),
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
@@ -214,6 +264,12 @@ export async function $onEmit(
 			graphqlArtifacts,
 			graphqlOptions?.emit ? resolverFiles : undefined,
 			graphqlOptions?.emit ? nestedOnly : undefined,
+			graphqlOptions?.emit
+				? [
+						...restSdlFileNames,
+						...restResolverFiles.map((file) => file.fileName),
+					]
+				: undefined,
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "package.json"),
@@ -304,10 +360,45 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 	};
 }
 
+/**
+ * REST manifest entries (issue #134). Reuses the graphql-resolvers.json
+ * contract so the same CDK construct wires both resolver kinds; REST entries
+ * carry `typeName` / `httpMethod` / `resourcePath` / `dataSource` instead of
+ * `projection` / `indexName` / `queryFieldName` (`indexName` is optional in
+ * the manifest shape — REST entries have no backing OS index).
+ */
+function generateRestManifestEntries(
+	restOperations: ResolvedRestOperation[],
+	dataSourceName?: string,
+): RestManifestEntry[] {
+	return restOperations.map((op) => ({
+		typeName: op.typeName,
+		fieldName: op.fieldName,
+		dataSource: dataSourceName ?? "HTTP",
+		httpMethod: op.httpMethod,
+		resourcePath: op.path,
+		mode: "monolithic",
+		resolverFile: restResolverFileName(op),
+		sdlFile: restSdlFileName(op),
+	}));
+}
+
+interface RestManifestEntry {
+	typeName: string;
+	fieldName: string;
+	dataSource: string;
+	httpMethod: string;
+	resourcePath: string;
+	mode: "monolithic";
+	resolverFile: string;
+	sdlFile: string;
+}
+
 function generateGraphQLManifest(
 	projections: ResolvedProjection[],
 	resolverFiles: EmittedResolverFile[],
 	queryFieldDirectives?: string[][],
+	restEntries?: RestManifestEntry[],
 ): string {
 	const resolvers = projections.map((projection, i) => {
 		const resolver = resolverFiles[i];
@@ -337,7 +428,11 @@ function generateGraphQLManifest(
 		};
 	});
 
-	return `${JSON.stringify({ resolvers }, null, 2)}\n`;
+	// REST entries (issue #134) append after the OpenSearch entries; with none
+	// present the manifest is byte-identical to the OpenSearch-only emit.
+	const allResolvers = [...resolvers, ...(restEntries ?? [])];
+
+	return `${JSON.stringify({ resolvers: allResolvers }, null, 2)}\n`;
 }
 
 export const __test = {
@@ -348,6 +443,7 @@ export const __test = {
 	generatePackageJson,
 	generateTsConfig,
 	generateGraphQLManifest,
+	generateRestManifestEntries,
 	generateGraphQLEntryPoint,
 };
 
@@ -404,6 +500,7 @@ function generatePackageJson(
 	graphqlProjections?: ResolvedProjection[],
 	resolverFiles?: EmittedResolverFile[],
 	nestedOnlyGraphqlProjections?: ResolvedProjection[],
+	restArtifactFileNames?: string[],
 ): string {
 	const artifactExports: Record<string, string> = {};
 
@@ -446,6 +543,13 @@ function generatePackageJson(
 			for (const projection of nestedOnlyGraphqlProjections) {
 				const kebab = toKebabCase(projection.projectionModel.name);
 				artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
+			}
+		}
+		// REST artifacts (issue #134): SDL fragments + Query/Mutation resolver
+		// files. Only present when @restResolver operations exist.
+		if (restArtifactFileNames) {
+			for (const fileName of restArtifactFileNames) {
+				artifactExports[`./${fileName}`] = `./${fileName}`;
 			}
 		}
 	}

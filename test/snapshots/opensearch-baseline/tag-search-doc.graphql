@@ -1,0 +1,46 @@
+type TagSearchDoc @aws_cognito_user_pools @aws_iam {
+  name: String!
+  note: String
+}
+
+input TagSearchDocFilter {
+  name: String
+}
+
+input TagSearchFilter {
+  name: String
+  nameNot: String
+  noteExists: Boolean
+}
+
+type TermBucket @aws_cognito_user_pools @aws_iam {
+  key: String!
+  count: Int!
+}
+
+type TagSearchAggregations @aws_cognito_user_pools @aws_iam {
+
+  byName: [TermBucket!]!
+
+  uniqueNameCount: Int!
+
+  missingNoteCount: Int!
+
+}
+
+type TagSearchDocConnection @aws_cognito_user_pools @aws_iam {
+  edges: [TagSearchDocEdge!]!
+  totalCount: Int!
+  aggregations: TagSearchAggregations!
+  pageInfo: PageInfo!
+}
+
+type TagSearchDocEdge @aws_cognito_user_pools @aws_iam {
+  node: TagSearchDoc!
+  cursor: String!
+}
+
+type PageInfo @aws_cognito_user_pools @aws_iam {
+  hasNextPage: Boolean!
+  endCursor: String
+}

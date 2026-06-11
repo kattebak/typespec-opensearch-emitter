@@ -1,0 +1,110 @@
+{
+  "mappings": {
+    "properties": {
+      "id": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "name": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        },
+        "analyzer": "edge_ngram",
+        "boost": 2
+      },
+      "species": {
+        "type": "keyword"
+      },
+      "breed": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "birthDate": {
+        "type": "date"
+      },
+      "createdAt": {
+        "type": "date"
+      },
+      "tags": {
+        "type": "nested",
+        "properties": {
+          "name": {
+            "type": "keyword"
+          },
+          "note": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          }
+        }
+      },
+      "owner": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "keyword"
+          }
+        }
+      },
+      "aliases": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "nickname": {
+        "type": "text",
+        "fields": {
+          "keyword": {
+            "type": "keyword",
+            "ignore_above": 256
+          }
+        }
+      },
+      "rank": {
+        "type": "long"
+      },
+      "stock": {
+        "type": "long"
+      },
+      "score": {
+        "type": "double"
+      },
+      "active": {
+        "type": "boolean"
+      },
+      "approvals": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "keyword"
+          },
+          "grantedBy": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  }
+}

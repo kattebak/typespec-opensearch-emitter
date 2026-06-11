@@ -26,12 +26,34 @@ export interface GraphQLEmitterOptions {
 	directives?: GraphQLDirectivesOptions;
 }
 
+export interface RestEmitterOptions {
+	/**
+	 * Manifest `dataSource` value for REST entries so the CDK consumer knows
+	 * which AppSync HTTP data source to attach. Default: "HTTP". Issue #134.
+	 */
+	dataSourceName?: string;
+	/**
+	 * Header name → dotted path into the resolver `ctx`, expanded into the
+	 * generated BASE_HEADERS (e.g. `x-user-id: identity.resolverContext.userId`
+	 * → `"x-user-id": ctx.identity.resolverContext.userId`). Absent config
+	 * yields only `Content-Type: application/json`. Issue #134.
+	 */
+	injectHeaders?: Record<string, string>;
+	/**
+	 * HTTP status code → GraphQL error type name, merged over the default
+	 * (409 → ConflictError, 403 → ForbiddenError; anything else falls through
+	 * to `Http<status>`). Issue #134.
+	 */
+	errorMap?: Record<string, string>;
+}
+
 export interface OpenSearchEmitterOptions {
 	"output-file"?: string;
 	"default-ignore-above"?: number;
 	"package-name"?: string;
 	"package-version"?: string;
 	graphql?: GraphQLEmitterOptions;
+	rest?: RestEmitterOptions;
 }
 
 export const $lib = createTypeSpecLibrary({
@@ -166,6 +188,10 @@ export const $lib = createTypeSpecLibrary({
 			description:
 				"Marks a SearchProjection<T> model as a top-level projection (gets a Query field, resolver, OS index, manifest entry); undecorated SearchProjection<T> models are nested-only (issue #123)",
 		},
+		restResolver: {
+			description:
+				"Marks an HTTP operation for AppSync JS REST resolver emission (GET → Query field, other verbs → Mutation field) — issue #134",
+		},
 	},
 	emitter: {
 		options: {
@@ -220,6 +246,24 @@ export const $lib = createTypeSpecLibrary({
 								},
 							},
 							additionalProperties: false,
+						},
+					},
+					additionalProperties: false,
+				},
+				rest: {
+					type: "object",
+					nullable: true,
+					properties: {
+						dataSourceName: { type: "string", nullable: true },
+						injectHeaders: {
+							type: "object",
+							nullable: true,
+							additionalProperties: { type: "string" },
+						},
+						errorMap: {
+							type: "object",
+							nullable: true,
+							additionalProperties: { type: "string" },
 						},
 					},
 					additionalProperties: false,

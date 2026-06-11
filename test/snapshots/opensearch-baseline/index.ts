@@ -1,0 +1,10 @@
+export type { Address } from "./address.js";
+export type { ApprovalSearchDoc } from "./approval-search-doc.js";
+export type { PersonSearchDoc } from "./person-search-doc.js";
+export const PERSON_SEARCH_DOC_INDEX_NAME = "person_search_doc";
+export type { PetPublicSearchDoc } from "./pet-public-search-doc.js";
+export const PET_PUBLIC_SEARCH_DOC_INDEX_NAME = "pet_public_search_doc";
+export type { PetSearchDoc } from "./pet-search-doc.js";
+export const PET_SEARCH_DOC_INDEX_NAME = "pets_v1";
+export type { TagSearchDoc } from "./tag-search-doc.js";
+export const TAG_SEARCH_DOC_INDEX_NAME = "tag_search_doc";
