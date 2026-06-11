@@ -98,6 +98,32 @@ export function isRestResolver(program: Program, target: Operation): boolean {
 	return program.stateSet(StateKeys.restResolver).has(target);
 }
 
+export function $graphqlId(
+	context: DecoratorContext,
+	target: ModelProperty,
+): void {
+	if (!isStringType(target.type)) {
+		reportDiagnostic(context.program, {
+			code: "string-property-required",
+			target,
+			format: { decorator: "graphqlId" },
+		});
+		return;
+	}
+
+	context.program.stateSet(StateKeys.graphqlId).add(target);
+}
+
+/**
+ * True when the property is marked `@graphqlId` — the opt-in (issue #136)
+ * for surfacing a key-like string property as GraphQL `ID` instead of
+ * `String` in REST SDL output (operation args and object/input fields).
+ * No heuristics: undecorated strings always stay `String`.
+ */
+export function isGraphqlId(program: Program, target: ModelProperty): boolean {
+	return program.stateSet(StateKeys.graphqlId).has(target);
+}
+
 export function $graphqlDirectives(
 	context: DecoratorContext,
 	target: Model,
