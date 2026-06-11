@@ -1,0 +1,268 @@
+{
+  "projections": [
+    {
+      "name": "TagSearchDoc",
+      "sourceModel": "Tag",
+      "indexName": "tag_search_doc",
+      "fields": [
+        {
+          "name": "name",
+          "optional": false,
+          "keyword": true,
+          "nested": false,
+          "aggregations": [
+            "terms",
+            "cardinality"
+          ]
+        },
+        {
+          "name": "note",
+          "optional": true,
+          "keyword": false,
+          "nested": false,
+          "aggregations": [
+            "missing"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "PetSearchDoc",
+      "sourceModel": "Pet",
+      "indexName": "pets_v1",
+      "fields": [
+        {
+          "name": "id",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "name",
+          "optional": false,
+          "keyword": false,
+          "nested": false,
+          "analyzer": "edge_ngram",
+          "boost": 2
+        },
+        {
+          "name": "species",
+          "optional": false,
+          "keyword": true,
+          "nested": false,
+          "aggregations": [
+            "terms"
+          ]
+        },
+        {
+          "name": "breed",
+          "optional": true,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "birthDate",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "createdAt",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "tags",
+          "optional": false,
+          "keyword": false,
+          "nested": true
+        },
+        {
+          "name": "owner",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "aliases",
+          "optional": false,
+          "keyword": false,
+          "nested": false,
+          "aggregations": [
+            "terms",
+            "cardinality"
+          ]
+        },
+        {
+          "name": "nickname",
+          "optional": true,
+          "keyword": false,
+          "nested": false,
+          "aggregations": [
+            "missing"
+          ]
+        },
+        {
+          "name": "rank",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "stock",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "score",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "active",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "approvals",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        }
+      ]
+    },
+    {
+      "name": "PetPublicSearchDoc",
+      "sourceModel": "Pet",
+      "indexName": "pet_public_search_doc",
+      "fields": [
+        {
+          "name": "id",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "name",
+          "optional": false,
+          "keyword": true,
+          "nested": false
+        },
+        {
+          "name": "species",
+          "optional": false,
+          "keyword": true,
+          "nested": false,
+          "aggregations": [
+            "terms"
+          ]
+        },
+        {
+          "name": "breed",
+          "optional": true,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "birthDate",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "createdAt",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "tags",
+          "optional": false,
+          "keyword": false,
+          "nested": true
+        },
+        {
+          "name": "owner",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "aliases",
+          "optional": false,
+          "keyword": false,
+          "nested": false,
+          "aggregations": [
+            "terms",
+            "cardinality"
+          ]
+        },
+        {
+          "name": "nickname",
+          "optional": true,
+          "keyword": false,
+          "nested": false,
+          "aggregations": [
+            "missing"
+          ]
+        },
+        {
+          "name": "rank",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "stock",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "score",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "active",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "approvals",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        }
+      ]
+    },
+    {
+      "name": "PersonSearchDoc",
+      "sourceModel": "Person",
+      "indexName": "person_search_doc",
+      "fields": [
+        {
+          "name": "id",
+          "optional": false,
+          "keyword": true,
+          "nested": false,
+          "aggregations": [
+            "terms"
+          ]
+        },
+        {
+          "name": "address",
+          "optional": true,
+          "keyword": false,
+          "nested": false
+        }
+      ]
+    }
+  ]
+}

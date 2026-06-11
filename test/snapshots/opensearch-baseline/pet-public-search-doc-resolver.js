@@ -1,0 +1,38 @@
+import { util } from "@aws-appsync/utils";
+
+export function request(ctx) {
+	return {};
+}
+
+export function response(ctx) {
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type);
+	}
+
+	const parsedBody = ctx.prev.result;
+	const hits = parsedBody.hits.hits;
+	const totalHits = parsedBody.hits.total.value;
+	const args = ctx.args;
+	const size = Math.min(args.first || 20, 100);
+
+	const hasNextPage = hits.length > size;
+	const edges = hits.slice(0, size).map((hit) => ({
+		node: hit._source,
+		cursor: util.base64Encode(JSON.stringify(hit.sort)),
+	}));
+	const _a = parsedBody.aggregations || {};
+	return {
+		edges,
+		totalCount: totalHits,
+		aggregations: {
+			bySpecies: (_a.bySpecies?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			byAlias: (_a.byAlias?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			uniqueAliasCount: _a.uniqueAliasCount?.value ?? 0,
+			missingNicknameCount: _a.missingNicknameCount?.doc_count ?? 0,
+		},
+		pageInfo: {
+			hasNextPage,
+			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+		},
+	};
+}

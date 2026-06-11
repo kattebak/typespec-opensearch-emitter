@@ -4,6 +4,7 @@ import type { Model } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import { __test } from "./emitter.js";
 import type { ResolvedProjection } from "./projection.js";
+import type { ResolvedRestOperation } from "./rest-operations.js";
 import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
 async function createRunner() {
@@ -435,6 +436,96 @@ describe("generateGraphQLManifest queryFieldDirectives (issue #121)", () => {
 			__test.generateGraphQLManifest([projection], [resolverFile], [[]]),
 		);
 		assert.ok(!("queryFieldDirectives" in manifest.resolvers[0]));
+	});
+});
+
+describe("generateRestManifestEntries (issue #134)", () => {
+	const getPet = {
+		fieldName: "getPet",
+		typeName: "Query",
+		httpMethod: "GET",
+		path: "/pets/{petId}",
+		pathParams: [{ name: "petId" }],
+		queryParams: [],
+		returnType: { kind: "Model", name: "Pet", properties: new Map() },
+	} as unknown as ResolvedRestOperation;
+
+	it("emits typeName/httpMethod/resourcePath/dataSource with HTTP default and no indexName", () => {
+		const entries = __test.generateRestManifestEntries([getPet]);
+		assert.deepEqual(entries, [
+			{
+				typeName: "Query",
+				fieldName: "getPet",
+				dataSource: "HTTP",
+				httpMethod: "GET",
+				resourcePath: "/pets/{petId}",
+				mode: "monolithic",
+				resolverFile: "Query.getPet.js",
+				sdlFile: "pet.graphql",
+			},
+		]);
+		assert.ok(!("indexName" in entries[0]));
+	});
+
+	it("uses rest.dataSourceName when configured", () => {
+		const entries = __test.generateRestManifestEntries([getPet], "PetApi");
+		assert.equal(entries[0].dataSource, "PetApi");
+	});
+
+	it("appends REST entries after OpenSearch entries in the manifest", () => {
+		const projection = {
+			projectionModel: { name: "PetSearchDoc" },
+			sourceModel: { name: "Pet" },
+			indexName: "pets_v1",
+			fields: [],
+		} as unknown as ResolvedProjection;
+		const resolverFile = {
+			queryFieldName: "searchPet",
+			mode: "monolithic",
+			fileName: "pet-search-doc-resolver.js",
+			content: "",
+			functions: [],
+		};
+
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest(
+				[projection],
+				[resolverFile],
+				undefined,
+				__test.generateRestManifestEntries([getPet]),
+			),
+		);
+		assert.equal(manifest.resolvers.length, 2);
+		assert.equal(manifest.resolvers[0].projection, "PetSearchDoc");
+		assert.equal(manifest.resolvers[1].fieldName, "getPet");
+	});
+
+	it("leaves the manifest unchanged when no REST entries are passed", () => {
+		const projection = {
+			projectionModel: { name: "PetSearchDoc" },
+			sourceModel: { name: "Pet" },
+			indexName: "pets_v1",
+			fields: [],
+		} as unknown as ResolvedProjection;
+		const resolverFile = {
+			queryFieldName: "searchPet",
+			mode: "monolithic",
+			fileName: "pet-search-doc-resolver.js",
+			content: "",
+			functions: [],
+		};
+
+		const withUndefined = __test.generateGraphQLManifest(
+			[projection],
+			[resolverFile],
+		);
+		const withEmpty = __test.generateGraphQLManifest(
+			[projection],
+			[resolverFile],
+			undefined,
+			[],
+		);
+		assert.equal(withUndefined, withEmpty);
 	});
 });
 

@@ -1,0 +1,70 @@
+type PersonSearchDoc {
+  address: Address
+}
+
+type Address {
+  country: String!
+  city: String!
+}
+
+input PersonSearchFilter {
+  id: String
+  idIn: [String!]
+  idExists: Boolean
+  address: AddressSearchFilter
+}
+
+input AddressSearchFilter {
+  country: String
+  countryIn: [String!]
+  countryExists: Boolean
+  city: String
+  cityIn: [String!]
+  cityExists: Boolean
+}
+
+type TermBucket {
+  key: String!
+  count: Int!
+}
+
+type PersonSearchAggregations {
+
+  byId: [TermBucket!]!
+
+  byCountry: [TermBucket!]!
+
+  byCity: [TermBucket!]!
+
+}
+
+enum SortDirection {
+  ASC
+  DESC
+}
+
+enum PersonSortField {
+  id
+}
+
+input PersonSortInput {
+  field: PersonSortField!
+  direction: SortDirection!
+}
+
+type PersonSearchDocConnection {
+  edges: [PersonSearchDocEdge!]!
+  totalCount: Int!
+  aggregations: PersonSearchAggregations!
+  pageInfo: PageInfo!
+}
+
+type PersonSearchDocEdge {
+  node: PersonSearchDoc!
+  cursor: String!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}

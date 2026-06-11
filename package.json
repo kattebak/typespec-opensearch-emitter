@@ -27,14 +27,16 @@
 		"lint": "npx @biomejs/biome check",
 		"build": "tsc",
 		"watch": "tsc --watch",
-		"test": "npm run build && npm run lint && npm run test:unit && npm run test:emit && npm run test:example",
+		"test": "npm run build && npm run lint && npm run test:unit && npm run test:emit && npm run test:emit:rest && npm run test:example",
 		"test:emit": "tsp compile test/main.tsp --config test/tspconfig.yaml",
-		"test:example": "node --test test/example.js",
+		"test:emit:rest": "tsp compile test/petstore/main.tsp --config test/petstore/tspconfig.yaml",
+		"test:example": "node --test test/example.js test/regression.js test/rest-example.js",
 		"test:unit": "node --test --import=tsx src/**/*.test.ts",
 		"prepublishOnly": "tsc"
 	},
 	"dependencies": {
-		"@typespec/compiler": "^1.4.0"
+		"@typespec/compiler": "^1.4.0",
+		"@typespec/http": "^1.13.0"
 	},
 	"devDependencies": {
 		"@aws-appsync/eslint-plugin": "^2.0.2",

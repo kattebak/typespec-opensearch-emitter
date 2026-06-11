@@ -1,11 +1,4 @@
-import {
-	type Model,
-	NoTarget,
-	type Program,
-	type Scalar,
-	type Type,
-	type Union,
-} from "@typespec/compiler";
+import { type Model, NoTarget, type Program } from "@typespec/compiler";
 import {
 	type AggregationEntry,
 	aggregationsTypeName,
@@ -22,11 +15,9 @@ import {
 	type FilterSpecNode,
 	type SearchFilterShape,
 } from "./filters.js";
+import { toGraphQLType } from "./graphql-types.js";
 import { reportDiagnostic } from "./lib.js";
-import type {
-	ResolvedProjection,
-	ResolvedProjectionField,
-} from "./projection.js";
+import type { ResolvedProjection } from "./projection.js";
 import { toKebabCase } from "./utils.js";
 
 export interface EmittedGraphQLFile {
@@ -585,114 +576,6 @@ function aggregationGraphQLType(
 function capitalizeFirst(name: string): string {
 	if (name.length === 0) return name;
 	return name[0].toUpperCase() + name.slice(1);
-}
-
-type EmitContext = "response" | "filter";
-
-function toGraphQLType(
-	program: Program,
-	type: Type,
-	field?: ResolvedProjectionField,
-	context: EmitContext = "response",
-): string {
-	if (field?.subProjection) {
-		const subName = field.subProjection.projectionModel.name;
-		const isArray =
-			type.kind === "Model" && type.name === "Array" && !!type.indexer?.value;
-		return isArray ? `[${subName}!]` : subName;
-	}
-
-	switch (type.kind) {
-		case "Scalar":
-			return scalarToGraphQL(type, context);
-		case "Model":
-			return modelToGraphQL(program, type, context);
-		case "String":
-			return "String";
-		case "Number":
-			return "Float";
-		case "Boolean":
-			return "Boolean";
-		case "Union":
-			return unionToGraphQL(program, type, context);
-		case "Enum":
-			return "String";
-		default:
-			return "String";
-	}
-}
-
-function scalarToGraphQL(scalar: Scalar, context: EmitContext): string {
-	let current: Scalar | undefined = scalar;
-	while (current) {
-		switch (current.name) {
-			case "string":
-			case "plainDate":
-			case "utcDateTime":
-				return "String";
-			case "int64":
-			case "uint64":
-				// AppSync GraphQL has no Long scalar; Int is 32-bit (max ~2.1B) so
-				// realistic int64 values (e.g. epoch-ms timestamps ~1.7T) overflow at
-				// parse time on filter inputs. Emit String for filter inputs so callers
-				// can serialize the 64-bit value as a numeric string. Response types
-				// keep Int for backward compatibility (a separate concern, since the
-				// resolver-side serialization path is already constrained by AppSync).
-				return context === "filter" ? "String" : "Int";
-			case "int32":
-			case "integer":
-			case "safeint":
-			case "uint8":
-			case "uint16":
-			case "uint32":
-			case "int8":
-			case "int16":
-				return "Int";
-			case "float":
-			case "float32":
-			case "float64":
-			case "decimal":
-			case "numeric":
-			case "number":
-				return "Float";
-			case "boolean":
-				return "Boolean";
-		}
-		current = current.baseScalar;
-	}
-
-	return "String";
-}
-
-function modelToGraphQL(
-	program: Program,
-	model: Model,
-	context: EmitContext,
-): string {
-	if (model.name === "Array" && model.indexer?.value) {
-		const elementType = toGraphQLType(
-			program,
-			model.indexer.value,
-			undefined,
-			context,
-		);
-		return `[${elementType}!]`;
-	}
-
-	return "String";
-}
-
-function unionToGraphQL(
-	program: Program,
-	union: Union,
-	context: EmitContext,
-): string {
-	for (const variant of union.variants.values()) {
-		if (variant.type.kind === "Scalar" || variant.type.kind === "String") {
-			return toGraphQLType(program, variant.type, undefined, context);
-		}
-	}
-	return "String";
 }
 
 export function toGraphQLQueryFieldName(projectionModelName: string): string {

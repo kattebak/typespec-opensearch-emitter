@@ -1,0 +1,88 @@
+{
+  "resolvers": [
+    {
+      "projection": "TagSearchDoc",
+      "indexName": "tag_search_doc",
+      "queryFieldName": "searchTag",
+      "queryFieldDirectives": [
+        "@aws_cognito_user_pools",
+        "@aws_iam"
+      ],
+      "mode": "pipeline",
+      "resolverFile": "tag-search-doc-resolver.js",
+      "sdlFile": "tag-search-doc.graphql",
+      "functions": [
+        {
+          "name": "prepare",
+          "file": "tag-search-doc-fn-prepare.js",
+          "dataSource": "NONE"
+        },
+        {
+          "name": "search",
+          "file": "tag-search-doc-fn-search.js",
+          "dataSource": "OPENSEARCH"
+        }
+      ]
+    },
+    {
+      "projection": "PetSearchDoc",
+      "indexName": "pets_v1",
+      "queryFieldName": "searchPet",
+      "mode": "pipeline",
+      "resolverFile": "pet-search-doc-resolver.js",
+      "sdlFile": "pet-search-doc.graphql",
+      "functions": [
+        {
+          "name": "prepare",
+          "file": "pet-search-doc-fn-prepare.js",
+          "dataSource": "NONE"
+        },
+        {
+          "name": "search",
+          "file": "pet-search-doc-fn-search.js",
+          "dataSource": "OPENSEARCH"
+        }
+      ]
+    },
+    {
+      "projection": "PetPublicSearchDoc",
+      "indexName": "pet_public_search_doc",
+      "queryFieldName": "searchPetPublic",
+      "mode": "pipeline",
+      "resolverFile": "pet-public-search-doc-resolver.js",
+      "sdlFile": "pet-public-search-doc.graphql",
+      "functions": [
+        {
+          "name": "prepare",
+          "file": "pet-public-search-doc-fn-prepare.js",
+          "dataSource": "NONE"
+        },
+        {
+          "name": "search",
+          "file": "pet-public-search-doc-fn-search.js",
+          "dataSource": "OPENSEARCH"
+        }
+      ]
+    },
+    {
+      "projection": "PersonSearchDoc",
+      "indexName": "person_search_doc",
+      "queryFieldName": "searchPerson",
+      "mode": "pipeline",
+      "resolverFile": "person-search-doc-resolver.js",
+      "sdlFile": "person-search-doc.graphql",
+      "functions": [
+        {
+          "name": "prepare",
+          "file": "person-search-doc-fn-prepare.js",
+          "dataSource": "NONE"
+        },
+        {
+          "name": "search",
+          "file": "person-search-doc-fn-search.js",
+          "dataSource": "OPENSEARCH"
+        }
+      ]
+    }
+  ]
+}
