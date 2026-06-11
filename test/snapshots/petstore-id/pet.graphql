@@ -1,0 +1,25 @@
+type Pet {
+  petId: ID!
+  name: String!
+  status: PetStatus!
+}
+
+enum PetStatus {
+  Available
+  Pending
+  Sold
+}
+
+input CreatePetInput {
+  name: String!
+  status: PetStatus!
+}
+
+type Query {
+  getPet(petId: ID!): Pet
+  listPets(status: String): [Pet!]
+}
+
+type Mutation {
+  createPet(input: CreatePetInput!): Pet
+}

@@ -90,6 +90,48 @@ describe("emitRestSdl", () => {
 		);
 	});
 
+	it("maps @graphqlId params and fields to ID (issue #136)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model Pet {
+        @graphqlId petId: string;
+        name: string;
+      }
+
+      model CreatePetInput {
+        @graphqlId ownerId: string;
+        name: string;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path @graphqlId petId: string): Pet;
+        @restResolver @post op createPet(@body input: CreatePetInput): Pet;
+        @restResolver @get op listPets(@query @graphqlId ownerId?: string): Pet[];
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		// path param → ID! (required), optional query param → ID
+		assert.ok(content.includes("getPet(petId: ID!): Pet"));
+		assert.ok(content.includes("listPets(ownerId: ID): [Pet!]"));
+		// the same property on object and input types maps consistently
+		assert.ok(content.includes("type Pet {\n  petId: ID!\n  name: String!\n}"));
+		assert.ok(
+			content.includes(
+				"input CreatePetInput {\n  ownerId: ID!\n  name: String!\n}",
+			),
+		);
+	});
+
+	it("keeps undecorated strings as String — no opt-in, no change (issue #136)", async () => {
+		const { runner, resolved } = await resolveFixture(PETSTORE);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(content.includes("getPet(petId: String!): Pet"));
+		assert.ok(content.includes("type Pet {\n  petId: String!"));
+		assert.ok(!content.includes("ID"));
+	});
+
 	it("renders required @query params with a bang", async () => {
 		const { runner, resolved } = await resolveFixture(`
       model Pet { petId: string; }

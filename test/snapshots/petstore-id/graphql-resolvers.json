@@ -1,0 +1,34 @@
+{
+  "resolvers": [
+    {
+      "typeName": "Query",
+      "fieldName": "getPet",
+      "dataSource": "HTTP",
+      "httpMethod": "GET",
+      "resourcePath": "/pets/{petId}",
+      "mode": "monolithic",
+      "resolverFile": "Query.getPet.js",
+      "sdlFile": "pet.graphql"
+    },
+    {
+      "typeName": "Mutation",
+      "fieldName": "createPet",
+      "dataSource": "HTTP",
+      "httpMethod": "POST",
+      "resourcePath": "/pets",
+      "mode": "monolithic",
+      "resolverFile": "Mutation.createPet.js",
+      "sdlFile": "pet.graphql"
+    },
+    {
+      "typeName": "Query",
+      "fieldName": "listPets",
+      "dataSource": "HTTP",
+      "httpMethod": "GET",
+      "resourcePath": "/pets",
+      "mode": "monolithic",
+      "resolverFile": "Query.listPets.js",
+      "sdlFile": "pet.graphql"
+    }
+  ]
+}

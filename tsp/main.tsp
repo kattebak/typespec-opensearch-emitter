@@ -21,5 +21,6 @@ extern dec sortable(target: ModelProperty);
 extern dec graphqlDirectives(target: Model, ...directives: valueof string[]);
 extern dec searchProjection(target: Model);
 extern dec restResolver(target: Operation);
+extern dec graphqlId(target: ModelProperty);
 
 model SearchProjection<T> {}

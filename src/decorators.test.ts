@@ -12,6 +12,7 @@ import {
 	getIndexName,
 	getIndexSettings,
 	getSearchAs,
+	isGraphqlId,
 	isKeyword,
 	isNested,
 	isSearchable,
@@ -129,6 +130,41 @@ describe("decorators", () => {
 			getIndexName(runner.program, model),
 			"counterparty_search_doc",
 		);
+	});
+
+	it("marks string property as graphql ID (issue #136)", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Pet {
+        @graphqlId petId: string;
+        name: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const pet = runner.program.getGlobalNamespaceType().models.get("Pet");
+		assert.ok(pet);
+
+		const petId = pet.properties.get("petId");
+		assert.ok(petId);
+		assert.equal(isGraphqlId(runner.program, petId), true);
+
+		const name = pet.properties.get("name");
+		assert.ok(name);
+		assert.equal(isGraphqlId(runner.program, name), false);
+	});
+
+	it("emits diagnostic for invalid graphqlId target", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Pet {
+        @graphqlId rank: int32;
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "string-property-required"), true);
 	});
 
 	it("emits diagnostic for invalid keyword target", async () => {

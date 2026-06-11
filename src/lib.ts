@@ -192,6 +192,10 @@ export const $lib = createTypeSpecLibrary({
 			description:
 				"Marks an HTTP operation for AppSync JS REST resolver emission (GET → Query field, other verbs → Mutation field) — issue #134",
 		},
+		graphqlId: {
+			description:
+				"Opt-in marker — the string property surfaces as GraphQL ID instead of String in REST SDL output (issue #136)",
+		},
 	},
 	emitter: {
 		options: {

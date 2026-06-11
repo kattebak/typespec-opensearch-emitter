@@ -1,4 +1,11 @@
-import type { Enum, Model, Program, Type } from "@typespec/compiler";
+import type {
+	Enum,
+	Model,
+	ModelProperty,
+	Program,
+	Type,
+} from "@typespec/compiler";
+import { isGraphqlId } from "./decorators.js";
 import { toGraphQLType } from "./graphql-types.js";
 import type { ResolvedRestOperation } from "./rest-operations.js";
 import { toKebabCase } from "./utils.js";
@@ -109,13 +116,13 @@ function renderField(
 	const args: string[] = [];
 	for (const param of op.pathParams) {
 		const gqlType = param.property
-			? restTypeRef(program, param.property.type, registry, "object")
+			? restPropertyRef(program, param.property, registry, "object")
 			: "String";
 		args.push(`${param.name}: ${gqlType}!`);
 	}
 	for (const param of op.queryParams) {
 		const gqlType = param.property
-			? restTypeRef(program, param.property.type, registry, "object")
+			? restPropertyRef(program, param.property, registry, "object")
 			: "String";
 		args.push(`${param.name}: ${gqlType}${param.optional ? "" : "!"}`);
 	}
@@ -127,6 +134,24 @@ function renderField(
 	const returnRef = restTypeRef(program, op.returnType, registry, "object");
 	const argList = args.length > 0 ? `(${args.join(", ")})` : "";
 	return `  ${op.fieldName}${argList}: ${returnRef}`;
+}
+
+/**
+ * Property-aware type reference: `@graphqlId` (issue #136) is an opt-in on
+ * the ModelProperty, so it can only be honored where the property is known —
+ * operation args and object/input fields. Undecorated properties defer to
+ * restTypeRef unchanged, keeping default output byte-identical.
+ */
+function restPropertyRef(
+	program: Program,
+	property: ModelProperty,
+	registry: TypeRegistry,
+	position: "object" | "input",
+): string {
+	if (isGraphqlId(program, property)) {
+		return "ID";
+	}
+	return restTypeRef(program, property.type, registry, position);
 }
 
 /**
@@ -183,7 +208,7 @@ function renderModelBlock(
 ): string {
 	const position = keyword === "input" ? "input" : "object";
 	const fieldLines = [...model.properties.values()].map((property) => {
-		const gqlType = restTypeRef(program, property.type, registry, position);
+		const gqlType = restPropertyRef(program, property, registry, position);
 		const nullable = property.optional ? "" : "!";
 		return `  ${property.name}: ${gqlType}${nullable}`;
 	});
@@ -201,5 +226,6 @@ export const __test = {
 	groupName,
 	renderGroup,
 	renderField,
+	restPropertyRef,
 	restTypeRef,
 };
