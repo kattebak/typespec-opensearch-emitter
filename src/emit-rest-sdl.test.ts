@@ -223,4 +223,72 @@ describe("emitRestSdl", () => {
 		const [{ content }] = emitRestSdl(runner.program, resolved);
 		assert.ok(content.includes("listPets(limit: Int!): [Pet!]"));
 	});
+
+	it("sdlFileName option: all ops in one file", async () => {
+		const MULTI_MODEL = `
+      model Pet {
+        petId: string;
+        name: string;
+      }
+
+      model Order {
+        orderId: string;
+        qty: int32;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+      }
+
+      @route("/orders")
+      namespace Orders {
+        @restResolver @post op createOrder(@body input: Order): Order;
+      }
+    `;
+
+		const { runner, resolved } = await resolveFixture(MULTI_MODEL);
+		const files = emitRestSdl(runner.program, resolved, {
+			sdlFileName: "all.graphql",
+		});
+
+		assert.equal(files.length, 1);
+		assert.equal(files[0].fileName, "all.graphql");
+
+		const { content } = files[0];
+		// Both operations in the same Query/Mutation block
+		assert.ok(content.includes("type Query {"));
+		assert.ok(content.includes("  getPet(petId: String!): Pet"));
+		assert.ok(content.includes("type Mutation {"));
+		assert.ok(content.includes("  createOrder(input: Order!): Order"));
+
+		// Each shared type appears exactly once
+		assert.equal((content.match(/type Pet \{/g) ?? []).length, 1);
+		assert.equal((content.match(/input Order \{/g) ?? []).length, 1);
+	});
+
+	it("sdlFileName option: shared types deduplicated across operations", async () => {
+		const { runner, resolved } = await resolveFixture(PETSTORE);
+		const files = emitRestSdl(runner.program, resolved, {
+			sdlFileName: "pets.graphql",
+		});
+
+		assert.equal(files.length, 1);
+		assert.equal(files[0].fileName, "pets.graphql");
+
+		const { content } = files[0];
+		// Pet, PetStatus and CreatePetInput each appear exactly once
+		assert.equal((content.match(/type Pet \{/g) ?? []).length, 1);
+		assert.equal((content.match(/enum PetStatus \{/g) ?? []).length, 1);
+		assert.equal((content.match(/input CreatePetInput \{/g) ?? []).length, 1);
+	});
+
+	it("without sdlFileName option, backward-compat per-model grouping is preserved", async () => {
+		const { runner, resolved } = await resolveFixture(PETSTORE);
+		// All ops return Pet so they still land in pet.graphql
+		const files = emitRestSdl(runner.program, resolved);
+
+		assert.equal(files.length, 1);
+		assert.equal(files[0].fileName, "pet.graphql");
+	});
 });

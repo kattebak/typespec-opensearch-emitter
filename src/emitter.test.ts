@@ -500,6 +500,16 @@ describe("generateRestManifestEntries (issue #134)", () => {
 		assert.equal(manifest.resolvers[1].fieldName, "getPet");
 	});
 
+	it("uses sdlFileName when provided (issue #142)", () => {
+		const entries = __test.generateRestManifestEntries(
+			[getPet],
+			undefined,
+			undefined,
+			"all.graphql",
+		);
+		assert.equal(entries[0].sdlFile, "all.graphql");
+	});
+
 	it("leaves the manifest unchanged when no REST entries are passed", () => {
 		const projection = {
 			projectionModel: { name: "PetSearchDoc" },

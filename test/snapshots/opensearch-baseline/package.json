@@ -1,0 +1,21 @@
+{
+  "name": "@test/opensearch-types",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./pet-public-search-doc-search-mapping.json": "./pet-public-search-doc-search-mapping.json",
+    "./pet-search-doc-search-mapping.json": "./pet-search-doc-search-mapping.json"
+  },
+  "scripts": {
+    "prepare": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

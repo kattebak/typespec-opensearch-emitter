@@ -51,6 +51,13 @@ export interface RestEmitterOptions {
 	 * Example: `/api/v1`. Default: `""` (current behavior). Issue #140.
 	 */
 	resourcePathPrefix?: string;
+	/**
+	 * When set, all REST operations are emitted into a single SDL file with
+	 * this name (e.g. `"pets.graphql"`). Each type appears once and there is
+	 * a single Query/Mutation block. All manifest entries' `sdlFile` point
+	 * at this file. Issue #142.
+	 */
+	sdlFileName?: string;
 }
 
 export interface OpenSearchEmitterOptions {
@@ -276,6 +283,7 @@ export const $lib = createTypeSpecLibrary({
 							additionalProperties: { type: "string" },
 						},
 						resourcePathPrefix: { type: "string", nullable: true },
+						sdlFileName: { type: "string", nullable: true },
 					},
 					additionalProperties: false,
 				},
