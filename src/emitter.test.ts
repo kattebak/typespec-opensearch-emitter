@@ -527,6 +527,48 @@ describe("generateRestManifestEntries (issue #134)", () => {
 		);
 		assert.equal(withUndefined, withEmpty);
 	});
+
+	it("prepends resourcePathPrefix to resourcePath in manifest entries (issue #140)", () => {
+		const entries = __test.generateRestManifestEntries(
+			[getPet],
+			undefined,
+			"/api/v1",
+		);
+		assert.equal(entries[0].resourcePath, "/api/v1/pets/{petId}");
+	});
+
+	it("leaves resourcePath unchanged when no prefix given (default behavior)", () => {
+		const entries = __test.generateRestManifestEntries([getPet]);
+		assert.equal(entries[0].resourcePath, "/pets/{petId}");
+	});
+});
+
+describe("validateResourcePathPrefix (issue #140)", () => {
+	it("returns undefined when prefix is undefined", () => {
+		assert.equal(__test.validateResourcePathPrefix(undefined), undefined);
+	});
+
+	it("returns undefined when prefix is empty string", () => {
+		assert.equal(__test.validateResourcePathPrefix(""), undefined);
+	});
+
+	it("returns the prefix when valid", () => {
+		assert.equal(__test.validateResourcePathPrefix("/api/v1"), "/api/v1");
+	});
+
+	it("throws when prefix does not start with /", () => {
+		assert.throws(
+			() => __test.validateResourcePathPrefix("api/v1"),
+			/must start with "\/"/,
+		);
+	});
+
+	it("throws when prefix ends with /", () => {
+		assert.throws(
+			() => __test.validateResourcePathPrefix("/api/v1/"),
+			/must not end with "\/"/,
+		);
+	});
 });
 
 describe("isTemplateDeclaration", () => {

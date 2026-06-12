@@ -211,6 +211,9 @@ export async function $onEmit(
 		// only; with no @restResolver operations these loops are no-ops and the
 		// manifest stays byte-identical to the OpenSearch-only emit.
 		const restOptions = context.options.rest;
+		const resourcePathPrefix = validateResourcePathPrefix(
+			restOptions?.resourcePathPrefix,
+		);
 		const restResolved = restOperations.map((operation) =>
 			resolveRestOperation(context.program, operation),
 		);
@@ -225,6 +228,7 @@ export async function $onEmit(
 			const restResolverFile = emitRestResolver(restOperation, {
 				injectHeaders: restOptions?.injectHeaders,
 				errorMap: restOptions?.errorMap,
+				resourcePathPrefix,
 			});
 			restResolverFiles.push(restResolverFile);
 			await emitFile(context.program, {
@@ -237,7 +241,11 @@ export async function $onEmit(
 			topLevel,
 			resolverFiles,
 			queryFieldDirectivesByProjection,
-			generateRestManifestEntries(restResolved, restOptions?.dataSourceName),
+			generateRestManifestEntries(
+				restResolved,
+				restOptions?.dataSourceName,
+				resourcePathPrefix,
+			),
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
@@ -377,17 +385,37 @@ function serializeProjections(resolved: ResolvedProjection[]) {
 function generateRestManifestEntries(
 	restOperations: ResolvedRestOperation[],
 	dataSourceName?: string,
+	resourcePathPrefix?: string,
 ): RestManifestEntry[] {
+	const prefix = resourcePathPrefix ?? "";
 	return restOperations.map((op) => ({
 		typeName: op.typeName,
 		fieldName: op.fieldName,
 		dataSource: dataSourceName ?? "HTTP",
 		httpMethod: op.httpMethod,
-		resourcePath: op.path,
+		resourcePath: `${prefix}${op.path}`,
 		mode: "monolithic",
 		resolverFile: restResolverFileName(op),
 		sdlFile: restSdlFileName(op),
 	}));
+}
+
+/**
+ * Validates `rest.resourcePathPrefix` (issue #140). Must start with `/` and
+ * must not end with `/`. Returns the validated string, or `undefined` when
+ * no prefix is configured (preserves current behavior).
+ */
+function validateResourcePathPrefix(prefix?: string): string | undefined {
+	if (prefix === undefined || prefix === "") return undefined;
+	if (!prefix.startsWith("/")) {
+		throw new Error(`rest.resourcePathPrefix "${prefix}" must start with "/"`);
+	}
+	if (prefix.endsWith("/")) {
+		throw new Error(
+			`rest.resourcePathPrefix "${prefix}" must not end with "/"`,
+		);
+	}
+	return prefix;
 }
 
 interface RestManifestEntry {
@@ -452,6 +480,7 @@ export const __test = {
 	generateGraphQLManifest,
 	generateRestManifestEntries,
 	generateGraphQLEntryPoint,
+	validateResourcePathPrefix,
 };
 
 function generateTsConfig(projections: ResolvedProjection[]): string {
