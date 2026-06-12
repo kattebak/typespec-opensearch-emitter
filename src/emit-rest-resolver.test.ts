@@ -89,6 +89,29 @@ describe("emitRestResolver request rendering", () => {
 		assert.ok(!content.includes("query: {"));
 		assert.ok(!content.includes("JSON.stringify"));
 	});
+
+	it("prepends resourcePathPrefix to path params template literal (issue #140)", () => {
+		const { content } = emitRestResolver(getPet, {
+			resourcePathPrefix: "/api/v1",
+		});
+		assert.ok(
+			content.includes(
+				"resourcePath: `/api/v1/pets/${util.urlEncode(ctx.args.petId)}`",
+			),
+		);
+	});
+
+	it("prepends resourcePathPrefix to plain string resourcePath (issue #140)", () => {
+		const { content } = emitRestResolver(createPet, {
+			resourcePathPrefix: "/api/v1",
+		});
+		assert.ok(content.includes('resourcePath: "/api/v1/pets"'));
+	});
+
+	it("leaves resourcePath unchanged when no prefix given (issue #140)", () => {
+		const { content } = emitRestResolver(createPet);
+		assert.ok(content.includes('resourcePath: "/pets"'));
+	});
 });
 
 describe("emitRestResolver header injection", () => {

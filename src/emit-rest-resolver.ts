@@ -20,6 +20,11 @@ export interface RestResolverOptions {
 	 * through to `Http<status>`.
 	 */
 	errorMap?: Record<string, string>;
+	/**
+	 * Literal path segment prepended to every generated `resourcePath`.
+	 * Must start with `/` and must not end with `/`. Issue #140.
+	 */
+	resourcePathPrefix?: string;
 }
 
 export interface EmittedRestResolverFile {
@@ -49,7 +54,7 @@ export function emitRestResolver(
 		"",
 		renderBaseHeaders(options.injectHeaders),
 		"",
-		renderRequest(op),
+		renderRequest(op, options.resourcePathPrefix),
 		"",
 		"export function response(ctx) {",
 		"\treturn mapResponse(ctx);",
@@ -85,7 +90,10 @@ function renderBaseHeaders(injectHeaders?: Record<string, string>): string {
 	return ["const BASE_HEADERS = (ctx) => ({", ...lines, "});"].join("\n");
 }
 
-function renderRequest(op: RestOperationShape): string {
+function renderRequest(
+	op: RestOperationShape,
+	resourcePathPrefix?: string,
+): string {
 	const paramsLines: string[] = ["\t\t\theaders: BASE_HEADERS(ctx),"];
 	if (op.queryParams.length > 0) {
 		paramsLines.push("\t\t\tquery: {");
@@ -109,7 +117,7 @@ function renderRequest(op: RestOperationShape): string {
 		"export function request(ctx) {",
 		"\treturn {",
 		`\t\tmethod: "${op.httpMethod}",`,
-		`\t\tresourcePath: ${renderResourcePath(op)},`,
+		`\t\tresourcePath: ${renderResourcePath(op, resourcePathPrefix)},`,
 		params,
 		"\t};",
 		"}",
@@ -119,17 +127,22 @@ function renderRequest(op: RestOperationShape): string {
 /**
  * Route template → JS expression. Each `{param}` placeholder becomes
  * `${util.urlEncode(ctx.args.<param>)}` inside a template literal; routes
- * without path params render as a plain string literal.
+ * without path params render as a plain string literal. An optional
+ * `resourcePathPrefix` is prepended verbatim. Issue #140.
  */
-function renderResourcePath(op: RestOperationShape): string {
+function renderResourcePath(
+	op: RestOperationShape,
+	resourcePathPrefix?: string,
+): string {
+	const prefix = resourcePathPrefix ?? "";
 	if (op.pathParams.length === 0) {
-		return `"${op.path}"`;
+		return `"${prefix}${op.path}"`;
 	}
 	const interpolated = op.path.replace(
 		/\{([^}]+)\}/g,
 		(_match, name: string) => `\${util.urlEncode(ctx.args.${name})}`,
 	);
-	return `\`${interpolated}\``;
+	return `\`${prefix}${interpolated}\``;
 }
 
 /**

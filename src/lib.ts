@@ -45,6 +45,12 @@ export interface RestEmitterOptions {
 	 * to `Http<status>`). Issue #134.
 	 */
 	errorMap?: Record<string, string>;
+	/**
+	 * Path segment prepended to every `resourcePath` in the generated resolver
+	 * and manifest entry. Must start with `/` and must not end with `/`.
+	 * Example: `/api/v1`. Default: `""` (current behavior). Issue #140.
+	 */
+	resourcePathPrefix?: string;
 }
 
 export interface OpenSearchEmitterOptions {
@@ -269,6 +275,7 @@ export const $lib = createTypeSpecLibrary({
 							nullable: true,
 							additionalProperties: { type: "string" },
 						},
+						resourcePathPrefix: { type: "string", nullable: true },
 					},
 					additionalProperties: false,
 				},
