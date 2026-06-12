@@ -2,6 +2,7 @@ type Pet {
   petId: String!
   name: String!
   status: PetStatus!
+  createdAt: Float!
 }
 
 enum PetStatus {
@@ -13,6 +14,7 @@ enum PetStatus {
 input CreatePetInput {
   name: String!
   status: PetStatus!
+  createdAt: Float!
 }
 
 type Query {

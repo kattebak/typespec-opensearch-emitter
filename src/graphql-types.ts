@@ -7,7 +7,7 @@ import type { ResolvedProjectionField } from "./projection.js";
  * same scalar/model mapping without touching the OpenSearch search path.
  */
 
-export type GraphQLEmitContext = "response" | "filter";
+export type GraphQLEmitContext = "response" | "filter" | "rest";
 
 export function toGraphQLType(
 	program: Program,
@@ -58,10 +58,18 @@ function scalarToGraphQL(scalar: Scalar, context: GraphQLEmitContext): string {
 				// can serialize the 64-bit value as a numeric string. Response types
 				// keep Int for backward compatibility (a separate concern, since the
 				// resolver-side serialization path is already constrained by AppSync).
+				// The REST target maps to Float (issue #138): AppSync rejects values
+				// > 2^31-1 during response coercion, and Float (IEEE double) is exact
+				// for integers up to 2^53 — fine for epoch-ms timestamps.
+				if (context === "rest") return "Float";
 				return context === "filter" ? "String" : "Int";
+			case "safeint":
+				// safeint spans up to 2^53, which also overflows GraphQL's 32-bit Int.
+				// The REST target maps it to Float (issue #138); the OpenSearch paths
+				// keep Int unchanged.
+				return context === "rest" ? "Float" : "Int";
 			case "int32":
 			case "integer":
-			case "safeint":
 			case "uint8":
 			case "uint16":
 			case "uint32":
