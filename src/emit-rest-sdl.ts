@@ -178,6 +178,14 @@ function restTypeRef(
 		);
 		return `[${element}!]`;
 	}
+	if (
+		type.kind === "Model" &&
+		type.name === "Record" &&
+		type.indexer?.value &&
+		type.properties.size === 0
+	) {
+		return "AWSJSON";
+	}
 	if (type.kind === "Model" && type.name) {
 		registerModel(program, type, registry, position);
 		return type.name;
