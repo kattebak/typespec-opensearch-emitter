@@ -182,7 +182,7 @@ function restTypeRef(
 		registerModel(program, type, registry, position);
 		return type.name;
 	}
-	return toGraphQLType(program, type);
+	return toGraphQLType(program, type, undefined, "rest");
 }
 
 function registerModel(

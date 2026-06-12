@@ -8,6 +8,7 @@ model Pet {
 	petId: string;
 	name: string;
 	status: PetStatus;
+	createdAt: int64;
 }
 
 enum PetStatus {
@@ -19,6 +20,7 @@ enum PetStatus {
 model CreatePetInput {
 	name: string;
 	status: PetStatus;
+	createdAt: int64;
 }
 
 @route("/pets")

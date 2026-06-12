@@ -132,6 +132,66 @@ describe("emitRestSdl", () => {
 		assert.ok(!content.includes("ID"));
 	});
 
+	it("maps int64 to Float in object, input, and arg positions to avoid 32-bit Int overflow (issue #138)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model Pet {
+        petId: string;
+        createdAt: int64;
+      }
+
+      model CreatePetInput {
+        createdAt: int64;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+        @restResolver @post op createPet(@body input: CreatePetInput): Pet;
+        @restResolver @get op listPets(@query since?: int64): Pet[];
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes("type Pet {\n  petId: String!\n  createdAt: Float!\n}"),
+		);
+		assert.ok(
+			content.includes("input CreatePetInput {\n  createdAt: Float!\n}"),
+		);
+		assert.ok(content.includes("listPets(since: Float): [Pet!]"));
+	});
+
+	it("maps safeint to Float like int64 (issue #138)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model Pet { count: safeint; }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(content.includes("type Pet {\n  count: Float!\n}"));
+	});
+
+	it("keeps int32 and integer as Int — only 64-bit-capable scalars are remapped (issue #138)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model Pet {
+        age: int32;
+        weight: integer;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(content.includes("type Pet {\n  age: Int!\n  weight: Int!\n}"));
+	});
+
 	it("renders required @query params with a bang", async () => {
 		const { runner, resolved } = await resolveFixture(`
       model Pet { petId: string; }
