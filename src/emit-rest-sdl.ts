@@ -32,10 +32,28 @@ export function restSdlFileName(op: ResolvedRestOperation): string {
 	return `${toKebabCase(groupName(op))}.graphql`;
 }
 
+export interface EmitRestSdlOptions {
+	/**
+	 * When set, all operations collapse into one file with this name and a
+	 * shared type registry. Manifest entries all point at this file. Issue #142.
+	 */
+	sdlFileName?: string;
+}
+
 export function emitRestSdl(
 	program: Program,
 	operations: ResolvedRestOperation[],
+	options?: EmitRestSdlOptions,
 ): EmittedRestSdlFile[] {
+	if (options?.sdlFileName) {
+		return [
+			{
+				fileName: options.sdlFileName,
+				content: renderGroup(program, operations),
+			},
+		];
+	}
+
 	const groups = new Map<string, ResolvedRestOperation[]>();
 	for (const op of operations) {
 		const fileName = restSdlFileName(op);

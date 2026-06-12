@@ -23,7 +23,11 @@ import {
 	emitRestResolver,
 	restResolverFileName,
 } from "./emit-rest-resolver.js";
-import { emitRestSdl, restSdlFileName } from "./emit-rest-sdl.js";
+import {
+	type EmitRestSdlOptions,
+	emitRestSdl,
+	restSdlFileName,
+} from "./emit-rest-sdl.js";
 import type { OpenSearchEmitterOptions } from "./lib.js";
 import {
 	isSearchProjectionModel,
@@ -217,7 +221,14 @@ export async function $onEmit(
 		const restResolved = restOperations.map((operation) =>
 			resolveRestOperation(context.program, operation),
 		);
-		for (const sdlFile of emitRestSdl(context.program, restResolved)) {
+		const restSdlOptions: EmitRestSdlOptions = {
+			sdlFileName: restOptions?.sdlFileName,
+		};
+		for (const sdlFile of emitRestSdl(
+			context.program,
+			restResolved,
+			restSdlOptions,
+		)) {
 			restSdlFileNames.push(sdlFile.fileName);
 			await emitFile(context.program, {
 				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
@@ -245,6 +256,7 @@ export async function $onEmit(
 				restResolved,
 				restOptions?.dataSourceName,
 				resourcePathPrefix,
+				restOptions?.sdlFileName,
 			),
 		);
 		await emitFile(context.program, {
@@ -386,6 +398,7 @@ function generateRestManifestEntries(
 	restOperations: ResolvedRestOperation[],
 	dataSourceName?: string,
 	resourcePathPrefix?: string,
+	sdlFileName?: string,
 ): RestManifestEntry[] {
 	const prefix = resourcePathPrefix ?? "";
 	return restOperations.map((op) => ({
@@ -396,7 +409,7 @@ function generateRestManifestEntries(
 		resourcePath: `${prefix}${op.path}`,
 		mode: "monolithic",
 		resolverFile: restResolverFileName(op),
-		sdlFile: restSdlFileName(op),
+		sdlFile: sdlFileName ?? restSdlFileName(op),
 	}));
 }
 
