@@ -192,6 +192,25 @@ describe("emitRestSdl", () => {
 		assert.ok(content.includes("type Pet {\n  age: Int!\n  weight: Int!\n}"));
 	});
 
+	it("maps Record<T> properties to AWSJSON scalar (issue #141)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model Pet {
+        petId: string;
+        metadata: Record<unknown>;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(content.includes("  metadata: AWSJSON!"));
+		// Record should not be emitted as a named type
+		assert.ok(!content.includes("type Record"));
+	});
+
 	it("renders required @query params with a bang", async () => {
 		const { runner, resolved } = await resolveFixture(`
       model Pet { petId: string; }
