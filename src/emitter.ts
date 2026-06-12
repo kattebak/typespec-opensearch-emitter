@@ -257,6 +257,10 @@ export async function $onEmit(
 		// don't merit a separate exports entry. The fragment is still needed,
 		// though — track it via `nestedOnly` so the .graphql file gets exported.
 		const graphqlArtifacts = graphqlOptions?.emit ? topLevel : undefined;
+		// Rest-only emit (issue #143): no projections means no doc types and no
+		// index.ts barrel, so the package must not point at an entrypoint or
+		// run tsc on publish — and there is nothing for a tsconfig to compile.
+		const restOnly = projectionModels.length === 0;
 		const packageJsonContent = generatePackageJson(
 			packageName,
 			packageVersion,
@@ -270,17 +274,20 @@ export async function $onEmit(
 						...restResolverFiles.map((file) => file.fileName),
 					]
 				: undefined,
+			restOnly,
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "package.json"),
 			content: packageJsonContent,
 		});
 
-		const tsConfigContent = generateTsConfig(resolved);
-		await emitFile(context.program, {
-			path: resolvePath(context.emitterOutputDir, "tsconfig.json"),
-			content: tsConfigContent,
-		});
+		if (!restOnly) {
+			const tsConfigContent = generateTsConfig(resolved);
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, "tsconfig.json"),
+				content: tsConfigContent,
+			});
+		}
 	}
 }
 
@@ -501,6 +508,7 @@ function generatePackageJson(
 	resolverFiles?: EmittedResolverFile[],
 	nestedOnlyGraphqlProjections?: ResolvedProjection[],
 	restArtifactFileNames?: string[],
+	restOnly = false,
 ): string {
 	const artifactExports: Record<string, string> = {};
 
@@ -557,6 +565,19 @@ function generatePackageJson(
 	const sorted = Object.fromEntries(
 		Object.entries(artifactExports).sort(([a], [b]) => a.localeCompare(b)),
 	);
+
+	// Rest-only package (issue #143): SDL / resolver / manifest artifacts only —
+	// no index.ts entrypoint exists, so no main/types/"." export and no tsc run.
+	if (restOnly) {
+		const restPackageJson = {
+			name: packageName,
+			version: packageVersion,
+			type: "module" as const,
+			exports: sorted,
+		};
+
+		return `${JSON.stringify(restPackageJson, null, 2)}\n`;
+	}
 
 	const packageJson = {
 		name: packageName,

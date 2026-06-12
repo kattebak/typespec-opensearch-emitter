@@ -1,0 +1,13 @@
+{
+  "name": "@kattebak/petstore-rest",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    "./graphql-resolvers.js": "./graphql-resolvers.js",
+    "./graphql-resolvers.json": "./graphql-resolvers.json",
+    "./Mutation.createPet.js": "./Mutation.createPet.js",
+    "./pet.graphql": "./pet.graphql",
+    "./Query.getPet.js": "./Query.getPet.js",
+    "./Query.listPets.js": "./Query.listPets.js"
+  }
+}

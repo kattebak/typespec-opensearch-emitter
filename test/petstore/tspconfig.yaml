@@ -3,6 +3,8 @@ emit:
 options:
   "@kattebak/typespec-opensearch-emitter":
     emitter-output-dir: "{cwd}/build/petstore-emit"
+    package-name: "@kattebak/petstore-rest"
+    package-version: "0.0.1"
     graphql:
       emit: true
     rest:

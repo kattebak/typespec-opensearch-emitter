@@ -117,3 +117,20 @@ test("generated resolvers contain no async or disallowed globals (APPSYNC_JS)", 
 		);
 	}
 });
+
+test("rest-only package.json carries artifacts only — no entrypoint, no tsc (issue #143)", async () => {
+	const packageJson = JSON.parse(
+		await readFile(`${EMIT_DIR}/package.json`, "utf8"),
+	);
+
+	assert.equal(packageJson.name, "@kattebak/petstore-rest");
+	assert.ok(!("main" in packageJson));
+	assert.ok(!("types" in packageJson));
+	assert.ok(!("scripts" in packageJson));
+	assert.ok(!("devDependencies" in packageJson));
+	assert.ok(!("." in packageJson.exports));
+
+	const emittedFiles = await readdir(EMIT_DIR);
+	assert.ok(!emittedFiles.includes("tsconfig.json"));
+	assert.ok(!emittedFiles.includes("index.ts"));
+});
