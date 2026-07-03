@@ -291,4 +291,66 @@ describe("emitRestSdl", () => {
 		assert.equal(files.length, 1);
 		assert.equal(files[0].fileName, "pet.graphql");
 	});
+
+	it("disambiguates distinct instantiations of a shared generic wrapper (issue #148)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model ResultList<T> {
+        continuationToken?: string;
+        items: T[];
+      }
+
+      model Pet { petId: string; }
+      model Order { orderId: string; }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op listPets(): ResultList<Pet>;
+      }
+
+      @route("/orders")
+      namespace Orders {
+        @restResolver @get op listOrders(): ResultList<Order>;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved, {
+			sdlFileName: "all.graphql",
+		});
+
+		assert.ok(
+			content.includes(
+				"type PetResultList {\n  continuationToken: String\n  items: [Pet!]!\n}",
+			),
+		);
+		assert.ok(
+			content.includes(
+				"type OrderResultList {\n  continuationToken: String\n  items: [Order!]!\n}",
+			),
+		);
+		assert.ok(content.includes("listPets: PetResultList"));
+		assert.ok(content.includes("listOrders: OrderResultList"));
+		// The bare template name must not appear as its own emitted type.
+		assert.ok(!content.includes("type ResultList "));
+	});
+
+	it("still dedupes the same generic instantiation reused across operations", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model ResultList<T> {
+        continuationToken?: string;
+        items: T[];
+      }
+
+      model Pet { petId: string; }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op listPets(): ResultList<Pet>;
+        @restResolver @get op searchPets(@query q?: string): ResultList<Pet>;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved, {
+			sdlFileName: "all.graphql",
+		});
+
+		assert.equal((content.match(/type PetResultList \{/g) ?? []).length, 1);
+	});
 });
