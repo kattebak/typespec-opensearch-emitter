@@ -72,7 +72,7 @@ export function emitRestSdl(
 /** Group key: the (unwrapped) return model name, falling back to the field name. */
 function groupName(op: ResolvedRestOperation): string {
 	const model = unwrapModel(op.returnType);
-	return model?.name ?? op.fieldName;
+	return model ? restModelName(model) : op.fieldName;
 }
 
 function unwrapModel(type: Type): Model | undefined {
@@ -81,6 +81,31 @@ function unwrapModel(type: Type): Model | undefined {
 		return unwrapModel(type.indexer.value);
 	}
 	return type.name ? type : undefined;
+}
+
+/**
+ * Distinct GraphQL type name for a model. Plain (non-template) models keep
+ * their bare name, unchanged from before — this is what keeps default output
+ * byte-identical. A template instantiation (e.g. `ResultList<TaskDefinition>`)
+ * shares its template's `.name` ("ResultList") across every instantiation, so
+ * without this every `ResultList<T>` collapsed onto one GraphQL type and
+ * silently kept whichever `T` registered first (issue #148). When every
+ * template argument is itself a named model, the instantiation is
+ * disambiguated as `<Arg1><Arg2>...<TemplateName>` (`TaskDefinitionResultList`);
+ * anything else (unresolvable/unnamed args) falls back to the bare name.
+ */
+function restModelName(model: Model): string {
+	const args = model.templateMapper?.args;
+	if (!args || args.length === 0) return model.name;
+
+	const argNames = args.map((arg) =>
+		typeof arg === "object" && "kind" in arg && arg.kind === "Model" && arg.name
+			? arg.name
+			: undefined,
+	);
+	if (argNames.some((name) => !name)) return model.name;
+
+	return `${argNames.join("")}${model.name}`;
 }
 
 interface TypeRegistry {
@@ -206,7 +231,7 @@ function restTypeRef(
 	}
 	if (type.kind === "Model" && type.name) {
 		registerModel(program, type, registry, position);
-		return type.name;
+		return restModelName(type);
 	}
 	return toGraphQLType(program, type, undefined, "rest");
 }
@@ -218,8 +243,9 @@ function registerModel(
 	position: "object" | "input",
 ): void {
 	const target = position === "input" ? registry.inputs : registry.objects;
-	if (target.has(model.name)) return;
-	target.set(model.name, model);
+	const name = restModelName(model);
+	if (target.has(name)) return;
+	target.set(name, model);
 	// Walk properties so referenced models/enums are registered too.
 	for (const property of model.properties.values()) {
 		restTypeRef(program, property.type, registry, position);
@@ -238,7 +264,7 @@ function renderModelBlock(
 		const nullable = property.optional ? "" : "!";
 		return `  ${property.name}: ${gqlType}${nullable}`;
 	});
-	return `${keyword} ${model.name} {\n${fieldLines.join("\n")}\n}`;
+	return `${keyword} ${restModelName(model)} {\n${fieldLines.join("\n")}\n}`;
 }
 
 function renderEnumBlock(enumType: Enum): string {
@@ -254,4 +280,5 @@ export const __test = {
 	renderField,
 	restPropertyRef,
 	restTypeRef,
+	restModelName,
 };
