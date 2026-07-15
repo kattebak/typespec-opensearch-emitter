@@ -136,13 +136,14 @@ test("emits graphql aggregation types and resolver block", async () => {
 
 	// Aggs request shape lives in the prepare function; response mapping
 	// lives in the resolver after-mapping (pipeline split — issue #105).
-	assert.ok(prepare.includes("aggs:"));
+	assert.ok(prepare.includes("const AGG_SPEC = ["));
+	assert.ok(prepare.includes("body.aggs = aggs;"));
 	assert.ok(
-		prepare.includes('byAlias: { terms: { field: "aliases.keyword" } }'),
+		prepare.includes('{n:"byAlias",a:{ terms: { field: "aliases.keyword" } }}'),
 	);
 	assert.ok(
 		prepare.includes(
-			'uniqueAliasCount: { cardinality: { field: "aliases.keyword" } }',
+			'{n:"uniqueAliasCount",a:{ cardinality: { field: "aliases.keyword" } }}',
 		),
 	);
 	assert.ok(resolver.includes("aggregations: {"));
@@ -223,14 +224,20 @@ test("emits nested-aware aggregations on nested sub-projections", async () => {
 	assert.ok(sdl.includes("uniqueTagNameCount: Int!"));
 	assert.ok(sdl.includes("missingTagNoteCount: Int!"));
 
-	// Nested aggs sharing a path are grouped under a single wrapper
-	// (`_<path>` key) in the request (prepare function); the response
-	// mapping in the resolver after-mapping reads the grouped shape — issue #105.
-	assert.ok(
-		prepare.includes(
-			'_tags: { nested: { path: "tags" }, aggs: { byTagName: { terms: { field: "tags.name" } }, uniqueTagNameCount: { cardinality: { field: "tags.name" } }, missingTagNoteCount: { missing: { field: "tags.note.keyword" } } } }',
-		),
-	);
+	// Nested aggs sharing a path carry that path's group key in AGG_SPEC, so the
+	// selected ones are assembled under a single wrapper (`_<path>` key) in the
+	// request (prepare function); the response mapping in the resolver
+	// after-mapping reads the grouped shape — issues #105, #150.
+	for (const specEntry of [
+		'{n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name" } }}',
+		'{n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}',
+		'{n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}',
+	]) {
+		assert.ok(
+			prepare.includes(specEntry),
+			`AGG_SPEC must include ${specEntry}`,
+		);
+	}
 	assert.ok(
 		resolver.includes("byTagName: (_a_tags.byTagName?.buckets ?? []).map"),
 	);

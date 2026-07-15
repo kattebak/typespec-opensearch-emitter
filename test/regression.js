@@ -4,8 +4,10 @@ import test from "node:test";
 
 // Issue #134 hard constraint: a .tsp with no @restResolver must emit
 // byte-identical output to pre-REST main. test/snapshots/opensearch-baseline
-// was captured from the unmodified main emit of test/main.tsp; this compares
-// the fresh emit (produced by `npm run test:emit`) file-by-file, byte-by-byte.
+// holds the expected emit of test/main.tsp; this compares the fresh emit
+// (produced by `npm run test:emit`) file-by-file, byte-by-byte. Only an
+// intentional change to the OpenSearch emit re-captures it — copy
+// build/opensearch-emit over the snapshot dir and review the diff.
 const SNAPSHOT_DIR = "test/snapshots/opensearch-baseline";
 const EMIT_DIR = "build/opensearch-emit";
 

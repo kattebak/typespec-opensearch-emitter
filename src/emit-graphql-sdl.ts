@@ -463,7 +463,7 @@ function renderAggregationTypes(
 	const customBucketTypes: string[] = [];
 
 	// Dedupe by aggName — same fieldLine matches the resolver-side dedupe in
-	// renderAggsObjectLiteral. Without this, an aggregation declared on a field that
+	// renderAggSpecLiteral. Without this, an aggregation declared on a field that
 	// the projection emits twice (e.g. via spread) produces a duplicate-field
 	// SDL block, which AppSync schema validation rejects.
 	const seenAggNames = new Set<string>();

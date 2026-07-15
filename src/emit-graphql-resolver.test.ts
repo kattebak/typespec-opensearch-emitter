@@ -539,6 +539,56 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(combinedContent(result).includes("base64Encode"));
 	});
 
+	// A projection with several independent top-level aggregations, including
+	// the date_histogram that makes riding-along aggregations expensive.
+	function multiAggProjection() {
+		return makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					aggregations: ["terms", "cardinality"],
+				}),
+				makeField({
+					name: "rank",
+					aggregations: [{ kind: "date_histogram", options: {} }],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+				}),
+			],
+		});
+	}
+
+	// A projection mixing a top-level aggregation with two aggregations under a
+	// single @nested path, so the `_tags` wrapper's presence can be pinned to
+	// the caller's selection.
+	function nestedAggProjection() {
+		const subProjection = {
+			projectionModel: { name: "TagSearchDoc" },
+			sourceModel: { name: "Tag" },
+			indexName: "tags",
+			fields: [
+				makeField({ name: "name", keyword: true, aggregations: ["terms"] }),
+				makeField({ name: "note", optional: true, aggregations: ["missing"] }),
+			],
+		} as unknown as ResolvedProjection;
+
+		return makeProjection({
+			fields: [
+				makeField({ name: "species", keyword: true, aggregations: ["terms"] }),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+	}
+
 	it("omits aggs block when no aggregations", async () => {
 		const projection = makeProjection({
 			fields: [makeField({ name: "name" })],
@@ -547,11 +597,12 @@ describe("emitGraphQLResolver", () => {
 
 		assert.ok(!combinedContent(result).includes("aggs:"));
 		assert.ok(!combinedContent(result).includes("body.aggs"));
-		assert.ok(!combinedContent(result).includes("wantsAggs"));
+		assert.ok(!combinedContent(result).includes("AGG_SPEC"));
+		assert.ok(!combinedContent(result).includes("buildAggs"));
 		assert.ok(!combinedContent(result).includes("aggregations:"));
 	});
 
-	it("emits aggs block in request when fields have aggregations", async () => {
+	it("emits an AGG_SPEC entry per aggregation when fields have aggregations", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -572,20 +623,20 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(combinedContent(result).includes("body.aggs = {"));
+		assert.ok(combinedContent(result).includes("const AGG_SPEC = ["));
 		assert.ok(
 			combinedContent(result).includes(
-				'byTag: { terms: { field: "tags.keyword" } }',
+				'{n:"byTag",a:{ terms: { field: "tags.keyword" } }}',
 			),
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				'bySpecies: { terms: { field: "species" } }',
+				'{n:"bySpecies",a:{ terms: { field: "species" } }}',
 			),
 		);
 	});
 
-	it("gates body.aggs assignment on ctx.info.selectionSetList containing aggregations", async () => {
+	it("assembles body.aggs from ctx.info.selectionSetList", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -598,21 +649,22 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		const combined = combinedContent(result);
 
-		// The wantsAggs gate must check both the bare `aggregations` selection
-		// and any nested `aggregations/...` sub-path. APPSYNC_JS forbids regex
+		// buildAggs must read the caller's selection. APPSYNC_JS forbids regex
 		// and try/catch — keep the check to plain string comparisons.
 		assert.ok(
-			combined.includes(
-				'ctx.info.selectionSetList.some((p) => p === "aggregations" || p.indexOf("aggregations/") === 0)',
-			),
-			`wantsAggs gate must read ctx.info.selectionSetList; got:\n${combined}`,
+			combined.includes("const aggs = buildAggs(ctx.info.selectionSetList);"),
+			`body.aggs must be assembled from ctx.info.selectionSetList; got:\n${combined}`,
 		);
 		assert.ok(
-			combined.includes("if (wantsAggs) {"),
-			"body.aggs assignment must be inside `if (wantsAggs)` block",
+			combined.includes('selectionSetList.indexOf("aggregations/" + spec.n)'),
+			"buildAggs must match each spec entry against the caller's selection",
+		);
+		assert.ok(
+			combined.includes("if (aggs) {"),
+			"body.aggs assignment must be inside `if (aggs)` block",
 		);
 		// Sanity: the gate appears BEFORE `body.aggs = ` in the request function.
-		const gateIdx = combined.indexOf("if (wantsAggs)");
+		const gateIdx = combined.indexOf("if (aggs)");
 		const assignIdx = combined.indexOf("body.aggs = ");
 		assert.ok(gateIdx >= 0 && assignIdx >= 0 && gateIdx < assignIdx);
 	});
@@ -671,6 +723,127 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
+	it("sends only the aggregations the caller selected", async () => {
+		// Issue #150 — every aggregation used to ride along with any
+		// `aggregations` selection, so one aggregation OpenSearch rejects
+		// (an unbounded date_histogram over a far-future sentinel date) failed
+		// every aggregation query on the projection, including those that never
+		// referenced it.
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"edges",
+				"totalCount",
+				"aggregations",
+				"aggregations/bySpecies",
+				"aggregations/bySpecies/key",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>), [
+			"bySpecies",
+		]);
+	});
+
+	it("sends every aggregation the caller selected", async () => {
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/bySpecies",
+				"aggregations/uniqueSpeciesCount",
+				"aggregations/byRankOverTime",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>).sort(), [
+			"byRankOverTime",
+			"bySpecies",
+			"uniqueSpeciesCount",
+		]);
+	});
+
+	it("omits the aggs key when the caller selects no aggregation field", async () => {
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: ["edges", "edges/node", "totalCount", "pageInfo"],
+		});
+		assert.equal(
+			Object.hasOwn(body, "aggs"),
+			false,
+			`body must NOT contain aggs; got body=${JSON.stringify(body)}`,
+		);
+	});
+
+	it("builds a nested agg group only for the selected children", async () => {
+		const result = await emitGraphQLResolver(
+			nestedAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/byTagName",
+				"aggregations/byTagName/key",
+			],
+		});
+		assert.deepEqual(body.aggs, {
+			_tags: {
+				nested: { path: "tags" },
+				aggs: { byTagName: { terms: { field: "tags.name" } } },
+			},
+		});
+	});
+
+	it("omits a nested agg group when none of its children are selected", async () => {
+		const result = await emitGraphQLResolver(
+			nestedAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: ["aggregations", "aggregations/bySpecies"],
+		});
+		assert.deepEqual(body.aggs, {
+			bySpecies: { terms: { field: "species" } },
+		});
+	});
+
+	it("groups every selected child of a nested path under one wrapper", async () => {
+		const result = await emitGraphQLResolver(
+			nestedAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/byTagName",
+				"aggregations/missingTagNoteCount",
+			],
+		});
+		assert.deepEqual(body.aggs, {
+			_tags: {
+				nested: { path: "tags" },
+				aggs: {
+					byTagName: { terms: { field: "tags.name" } },
+					missingTagNoteCount: { missing: { field: "tags.note.keyword" } },
+				},
+			},
+		});
+	});
+
 	it("emits cardinality and missing aggs in request", async () => {
 		const projection = makeProjection({
 			fields: [
@@ -695,12 +868,12 @@ describe("emitGraphQLResolver", () => {
 
 		assert.ok(
 			combinedContent(result).includes(
-				'uniqueLocationCount: { cardinality: { field: "locations" } }',
+				'{n:"uniqueLocationCount",a:{ cardinality: { field: "locations" } }}',
 			),
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				'missingDescriptionCount: { missing: { field: "description.keyword" } }',
+				'{n:"missingDescriptionCount",a:{ missing: { field: "description.keyword" } }}',
 			),
 		);
 	});
@@ -720,7 +893,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
-				'byValidFromOverTime: { date_histogram: { field: "validFrom", calendar_interval: "month" } }',
+				'{n:"byValidFromOverTime",a:{ date_histogram: { field: "validFrom", calendar_interval: "month" } }}',
 			),
 		);
 		assert.ok(
@@ -755,7 +928,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
-				'byNotionalRange: { range: { field: "notional", ranges: [{"to":1000},{"from":1000,"to":10000},{"from":10000}] } }',
+				'{n:"byNotionalRange",a:{ range: { field: "notional", ranges: [{"to":1000},{"from":1000,"to":10000},{"from":10000}] } }}',
 			),
 		);
 		assert.ok(
@@ -785,7 +958,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
-				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }',
+				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId" }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }}',
 			),
 		);
 		assert.ok(
@@ -809,7 +982,7 @@ describe("emitGraphQLResolver", () => {
 
 		assert.ok(
 			combinedContent(result).includes(
-				'byCounterpartyId: { terms: { field: "counterpartyId" }, aggs: { "hits": { top_hits: { size: 5 } } } }',
+				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId" }, aggs: { "hits": { top_hits: { size: 5 } } } }}',
 			),
 			"terms agg request must include hits sub-agg with top_hits.size",
 		);
@@ -871,19 +1044,23 @@ describe("emitGraphQLResolver", () => {
 
 		assert.ok(
 			combinedContent(result).includes(
-				'notionalSum: { sum: { field: "notional" } }',
+				'{n:"notionalSum",a:{ sum: { field: "notional" } }}',
 			),
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				'notionalAvg: { avg: { field: "notional" } }',
+				'{n:"notionalAvg",a:{ avg: { field: "notional" } }}',
 			),
 		);
 		assert.ok(
-			combinedContent(result).includes('rankMin: { min: { field: "rank" } }'),
+			combinedContent(result).includes(
+				'{n:"rankMin",a:{ min: { field: "rank" } }}',
+			),
 		);
 		assert.ok(
-			combinedContent(result).includes('rankMax: { max: { field: "rank" } }'),
+			combinedContent(result).includes(
+				'{n:"rankMax",a:{ max: { field: "rank" } }}',
+			),
 		);
 
 		assert.ok(
@@ -932,14 +1109,19 @@ describe("emitGraphQLResolver", () => {
 
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		// All nested aggs sharing a path are grouped under one wrapper
-		// (`__n_<path>` key) — saves the per-agg `{ nested: ..., aggs: { inner: ... } }`
-		// skeleton on wide projections (issue #105).
-		assert.ok(
-			combinedContent(result).includes(
-				'_tags: { nested: { path: "tags" }, aggs: { byTagName: { terms: { field: "tags.name" } }, uniqueTagNameCount: { cardinality: { field: "tags.name" } }, missingTagNoteCount: { missing: { field: "tags.note.keyword" } } } }',
-			),
-		);
+		// Every agg under a nested path carries that path's group key, so the
+		// selected ones share ONE `{ nested: ..., aggs: { ... } }` wrapper at
+		// request time instead of one wrapper each (issue #105).
+		for (const specEntry of [
+			'{n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name" } }}',
+			'{n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}',
+			'{n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}',
+		]) {
+			assert.ok(
+				combinedContent(result).includes(specEntry),
+				`AGG_SPEC must include ${specEntry}`,
+			);
+		}
 
 		assert.ok(
 			combinedContent(result).includes(
@@ -976,11 +1158,11 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
-				'byTag: { terms: { field: "tags.keyword" } }',
+				'{n:"byTag",a:{ terms: { field: "tags.keyword" } }}',
 			),
 		);
 		// Aggs for non-@nested fields must not be wrapped in `{ nested: ... }`.
-		assert.ok(!combinedContent(result).includes("byTag: { nested:"));
+		assert.ok(!combinedContent(result).includes('{n:"byTag",a:{ nested:'));
 	});
 
 	it("emits aggregations mapping in response", async () => {

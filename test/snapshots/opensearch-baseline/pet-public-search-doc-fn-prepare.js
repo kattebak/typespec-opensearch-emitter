@@ -2,6 +2,8 @@ import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = [{i:"species",k:"term",f:"species"}, {i:"speciesNot",k:"term_negate",f:"species"}, {i:"birthDate",k:"range",f:"birthDate"}, {i:"createdAt",k:"range",f:"createdAt"}, {i:"nicknameExists",k:"exists",f:"nickname.keyword"}, {i:"rank",k:"range",f:"rank"}];
 
+const AGG_SPEC = [{n:"bySpecies",a:{ terms: { field: "species" } }}, {n:"byAlias",a:{ terms: { field: "aliases.keyword" } }}, {n:"uniqueAliasCount",a:{ cardinality: { field: "aliases.keyword" } }}, {n:"missingNicknameCount",a:{ missing: { field: "nickname.keyword" } }}];
+
 export function request(ctx) {
 	const args = ctx.args;
 	const size = Math.min(args.first || 20, 100);
@@ -20,14 +22,9 @@ export function request(ctx) {
 	if (searchAfter) {
 		body.search_after = searchAfter;
 	}
-	const wantsAggs = ctx.info.selectionSetList.some((p) => p === "aggregations" || p.indexOf("aggregations/") === 0);
-	if (wantsAggs) {
-		body.aggs = {
-		bySpecies: { terms: { field: "species" } },
-		byAlias: { terms: { field: "aliases.keyword" } },
-		uniqueAliasCount: { cardinality: { field: "aliases.keyword" } },
-		missingNicknameCount: { missing: { field: "nickname.keyword" } },
-	};
+	const aggs = buildAggs(ctx.info.selectionSetList);
+	if (aggs) {
+		body.aggs = aggs;
 	}
 
 	ctx.stash.queryBody = body;
@@ -36,6 +33,26 @@ export function request(ctx) {
 
 export function response(ctx) {
 	return ctx.result;
+}
+
+function buildAggs(selectionSetList) {
+	// Only the aggregations named in the caller's selection are sent; `null`
+	// means none were, and the request omits the `aggs` key entirely.
+	const aggs = {};
+	let requested = false;
+	for (const spec of AGG_SPEC) {
+		if (selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
+			requested = true;
+			if (spec.g) {
+				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
+				group.aggs[spec.n] = spec.a;
+				aggs[spec.g] = group;
+			} else {
+				aggs[spec.n] = spec.a;
+			}
+		}
+	}
+	return requested ? aggs : null;
 }
 
 function buildQuery(queryText, filter, searchFilter) {
