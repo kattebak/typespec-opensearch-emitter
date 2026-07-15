@@ -368,6 +368,7 @@ In the example above:
 | `graphql.default-page-size` | `number` | `20` | Default page size for connection queries. |
 | `graphql.max-page-size` | `number` | `100` | Maximum allowed page size. |
 | `graphql.track-total-hits-up-to` | `number` | `10000` | OpenSearch `track_total_hits` limit. |
+| `graphql.monolithic-threshold-bytes` | `number` | `32000` | Rendered-resolver size above which the pipeline split is emitted instead of a single file. See [Resolver code-size budget](#resolver-code-size-budget). |
 
 The `emitter-output-dir` option is a standard TypeSpec compiler option that controls the output directory.
 
@@ -541,6 +542,50 @@ GraphQL intent is derived from the existing OpenSearch mapping — no additional
 | `text` field (no `@keyword`) | Included in `multi_match` field list |
 | All projection fields | Output type fields |
 | Sub-projection (`SearchProjection`) | Nested GraphQL type reference |
+
+### Resolver code-size budget
+
+AppSync rejects APPSYNC_JS code above 32,768 bytes per file (`BadRequestException: Code must be 32768 bytes or less`). The cap applies to each file on its own, not to their sum. Issue #99 covered the work to fit inside it.
+
+The emitter renders the single-file shape, measures it, and picks a mode:
+
+| Rendered single-file size | Mode | Emitted files |
+| --- | --- | --- |
+| ≤ `graphql.monolithic-threshold-bytes` (default `32000`) | `monolithic` | `*-resolver.js` |
+| above the threshold | `pipeline` | `*-resolver.js` (after-mapping), `*-fn-prepare.js` (`NONE`), `*-fn-search.js` (`OPENSEARCH`) |
+
+Each pipeline file gets its own 32,768-byte budget. Splitting the work is what makes wide `@searchInfer` projections deployable: the filter and aggregation specs stop competing with the response mapping for one budget.
+
+#### Staying inside the budget
+
+Emitted code stays flat as projections widen by keeping specs as data. A projection emits a compact name → spec map — `FILTER_SPEC` for filter inputs, `AGG_SPEC` for aggregations, both using single-letter keys — plus one assembly function that walks the map at runtime. A new field adds map entries; it does not add code.
+
+Inlining a literal per field instead scales code with projection width. That is what breached the cap twice: issue #101 (counterparty resolver at 38,301 bytes, of which 38,257 were the inline `FILTER_SPEC` literal; fixed by collapsing range-suffix expansions) and issue #105 (37,310 bytes after range-collapse; fixed by factoring repeated nested-doc skeletons).
+
+Emitted code must also stay in the APPSYNC_JS supported subset. `src/emit-graphql-resolver.test.ts` runs `@aws-appsync/eslint-plugin` over the output.
+
+#### Guards
+
+Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured on `277755b`:
+
+| Projection | Resolver | Prepare | Search | Headroom |
+| --- | --- | --- | --- | --- |
+| counterparty shape (7 nested sub-models) | 8,991 | 24,497 | 742 | 8,271 |
+| synthetic wide (14 sub-models) | 14,458 | 32,482 | 732 | **286** |
+
+`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 286 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
+
+CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
+
+#### When a guard goes red
+
+The message names the file and its size. Work in this order:
+
+1. **Check whether the growth is per-field.** Code that repeats once per field or per sub-model belongs in a spec entry, not in the emitted body. This is the fix for #101 and #105 and the first thing to try.
+2. **Check the mode.** A monolithic projection tipping past the threshold falls back to the pipeline split on its own. A pipeline file over the cap has no further automatic split.
+3. **Fall back to spec-as-data-asset.** Loading `FILTER_SPEC` from a data source instead of inlining it removes the size bound entirely, at the cost of one indirection. This is lever 3 from #101 and is not implemented.
+
+Do not raise the constant in the assertion. 32,768 is an AWS limit, not a project policy — a green test with a raised cap fails at deploy instead.
 
 ## Index settings (analyzers, tokenizers, filters)
 
