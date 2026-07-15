@@ -130,13 +130,20 @@ function evalRequestBody(
 	);
 }
 
-type UtilError = Error & { errorType?: string; data?: unknown };
+type UtilError = Error & {
+	errorType?: string;
+	data?: unknown;
+	errorInfo?: unknown;
+};
 
 /**
  * Evaluates an emitted `response(ctx)` against a stub `util`, mirroring the
  * AppSync runtime closely enough for issue #150: `util.error` interrupts
- * evaluation, so it throws here and carries the errorType/data through for
- * assertions. Returns the handler's value on the success path.
+ * evaluation, so it throws here and carries the errorType/data/errorInfo
+ * through for assertions. The stub takes all four documented arguments
+ * (`message`, `errorType`, `data`, `errorInfo`) so a diagnostic parked in the
+ * wrong slot is visible to a test rather than silently dropped at runtime.
+ * Returns the handler's value on the success path.
  */
 function evalResponse(source: string, ctx: unknown): unknown {
 	const stripped = source
@@ -148,10 +155,16 @@ function evalResponse(source: string, ctx: unknown): unknown {
 	const utilStub = {
 		base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
 		base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
-		error: (message: string, errorType?: string, data?: unknown) => {
+		error: (
+			message: string,
+			errorType?: string,
+			data?: unknown,
+			errorInfo?: unknown,
+		) => {
 			const err: UtilError = new Error(message);
 			err.errorType = errorType;
 			err.data = data;
+			err.errorInfo = errorInfo;
 			throw err;
 		},
 	};
@@ -2409,6 +2422,31 @@ describe("emitGraphQLResolver datasource error propagation (issue #150)", () => 
 		assert.match(err.message, /95947/);
 	});
 
+	it("search function carries the response body as errorInfo, not data", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			result: osErrorBody,
+		});
+
+		assert.deepEqual(
+			err.errorInfo,
+			osErrorBody,
+			"the body must travel as errorInfo; AppSync filters `data` against the query selection set, which an OpenSearch body shares no field with",
+		);
+		assert.equal(err.data, null);
+	});
+
+	it("search function carries ctx.result as errorInfo when ctx.error is set", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			error: { message: "Connection refused", type: "ServiceUnavailable" },
+			result: osErrorBody,
+		});
+
+		assert.deepEqual(err.errorInfo, osErrorBody);
+		assert.equal(err.data, null);
+	});
+
 	it("search function surfaces a non-2xx datasource response", async () => {
 		const result = await emitPipeline();
 		const err = captureResponseError(searchFunctionContent(result), {
@@ -2464,6 +2502,8 @@ describe("emitGraphQLResolver datasource error propagation (issue #150)", () => 
 
 		assert.equal(err.errorType, "too_many_buckets_exception");
 		assert.match(err.message, /too many buckets/);
+		assert.deepEqual(err.errorInfo, osErrorBody);
+		assert.equal(err.data, null);
 	});
 
 	it("after-mapping shapes a successful response unchanged", async () => {

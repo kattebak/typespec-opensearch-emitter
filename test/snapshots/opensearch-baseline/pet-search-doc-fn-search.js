@@ -10,7 +10,7 @@ export function request(ctx) {
 
 export function response(ctx) {
 	if (ctx.error) {
-		return util.error(ctx.error.message, ctx.error.type, ctx.result);
+		return util.error(ctx.error.message, ctx.error.type, null, ctx.result);
 	}
 	if (!ctx.result || !ctx.result.hits) {
 		const err = ctx.result ? ctx.result.error : null;
@@ -18,6 +18,7 @@ export function response(ctx) {
 		return util.error(
 			(err && err.reason) || "OpenSearch search failed" + (status ? " with status " + status : "") + ": " + JSON.stringify(ctx.result),
 			(err && err.type) || "OpenSearchError",
+			null,
 			ctx.result,
 		);
 	}

@@ -16,6 +16,7 @@ export function response(ctx) {
 		return util.error(
 			(err && err.reason) || "OpenSearch search failed" + (status ? " with status " + status : "") + ": " + JSON.stringify(parsedBody),
 			(err && err.type) || "OpenSearchError",
+			null,
 			parsedBody,
 		);
 	}

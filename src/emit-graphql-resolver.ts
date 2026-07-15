@@ -900,7 +900,7 @@ export function request(ctx) {
 
 export function response(ctx) {
 	if (ctx.error) {
-		return util.error(ctx.error.message, ctx.error.type, ctx.result);
+		return util.error(ctx.error.message, ctx.error.type, null, ctx.result);
 	}
 ${renderSearchBodyGuard("ctx.result", "\t")}	return ctx.result;
 }
@@ -916,6 +916,12 @@ ${renderSearchBodyGuard("ctx.result", "\t")}	return ctx.result;
  * arrives), and a raw non-2xx HTTP response (`{ statusCode, body }`). Each one
  * surfaces the real type and reason instead of a phantom ReferenceError one
  * line later.
+ *
+ * The body travels as `errorInfo` (4th arg), not `data` (3rd): AppSync filters
+ * `data` against the field's query selection set, and an OpenSearch body
+ * (`hits`/`error`/`status`) shares no field with a Connection selection
+ * (`totalCount`/`edges`/`aggregations`), so it would filter down to nothing and
+ * never reach the client. `errorInfo` is not filtered.
  */
 function renderSearchBodyGuard(expr: string, indent: string): string {
 	const i = indent;
@@ -925,6 +931,7 @@ ${i}	const status = ${expr} ? ${expr}.status || ${expr}.statusCode : null;
 ${i}	return util.error(
 ${i}		(err && err.reason) || "OpenSearch search failed" + (status ? " with status " + status : "") + ": " + JSON.stringify(${expr}),
 ${i}		(err && err.type) || "OpenSearchError",
+${i}		null,
 ${i}		${expr},
 ${i}	);
 ${i}}
