@@ -545,7 +545,7 @@ GraphQL intent is derived from the existing OpenSearch mapping — no additional
 
 ### Resolver code-size budget
 
-AppSync rejects APPSYNC_JS code above 32,768 bytes per file (`BadRequestException: Code must be 32768 bytes or less`). The cap applies to each file on its own, not to their sum. Issue #99 tracks the work to fit inside it.
+AppSync rejects APPSYNC_JS code above 32,768 bytes per file (`BadRequestException: Code must be 32768 bytes or less`). The cap applies to each file on its own, not to their sum. Issue #99 covered the work to fit inside it.
 
 The emitter renders the single-file shape, measures it, and picks a mode:
 
@@ -554,7 +554,7 @@ The emitter renders the single-file shape, measures it, and picks a mode:
 | ≤ `graphql.monolithic-threshold-bytes` (default `32000`) | `monolithic` | `*-resolver.js` |
 | above the threshold | `pipeline` | `*-resolver.js` (after-mapping), `*-fn-prepare.js` (`NONE`), `*-fn-search.js` (`OPENSEARCH`) |
 
-Each pipeline file gets its own 32,768-byte budget. Splitting the work is what makes wide `@searchInfer` projections deployable at all: the filter and aggregation specs stop competing with the response mapping for one budget.
+Each pipeline file gets its own 32,768-byte budget. Splitting the work is what makes wide `@searchInfer` projections deployable: the filter and aggregation specs stop competing with the response mapping for one budget.
 
 #### Staying inside the budget
 
@@ -566,16 +566,16 @@ Emitted code must also stay in the APPSYNC_JS supported subset. `src/emit-graphq
 
 #### Guards
 
-Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured on `469c9a6`:
+Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured on `277755b`:
 
 | Projection | Resolver | Prepare | Search | Headroom |
 | --- | --- | --- | --- | --- |
-| counterparty shape (7 nested sub-models) | 8,589 | 24,497 | 201 | 8,271 |
-| synthetic wide (14 sub-models) | 14,056 | 32,482 | 191 | **286** |
+| counterparty shape (7 nested sub-models) | 8,991 | 24,497 | 742 | 8,271 |
+| synthetic wide (14 sub-models) | 14,458 | 32,482 | 732 | **286** |
 
-`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 286 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 17,917 bytes as a single file and stays monolithic.
+`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 286 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
 
-Failure is loud in both directions: CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
+CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
 
 #### When a guard goes red
 
