@@ -12,6 +12,7 @@ import {
 	toDocTypeFileName,
 } from "./emit-doc-type.js";
 import {
+	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 	type EmittedResolverFile,
 	emitGraphQLResolver,
 } from "./emit-graphql-resolver.js";
@@ -157,6 +158,9 @@ export async function $onEmit(
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
 			monolithicThresholdBytes:
 				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
+			autoDateHistogramBuckets:
+				graphqlOptions["auto-date-histogram-buckets"] ??
+				DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 		};
 
 		// Top-level projections get the full SDL + resolver + manifest entry.

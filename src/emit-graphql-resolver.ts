@@ -1,4 +1,8 @@
 import { type AggregationEntry, collectAggregations } from "./aggregations.js";
+import {
+	type DateHistogramOptions,
+	supportsMinimumInterval,
+} from "./decorators.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
 import {
 	buildSearchFilterShape,
@@ -55,9 +59,39 @@ export interface ResolverOptions {
 	 * minus headroom). Measured against the rendered monolithic content.
 	 */
 	monolithicThresholdBytes?: number;
+	/**
+	 * `buckets` for the `auto_date_histogram` emitted when a date_histogram
+	 * aggregation declares no bounds. See DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS.
+	 */
+	autoDateHistogramBuckets?: number;
 }
 
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
+
+/**
+ * `buckets` ceiling for a bounds-less `auto_date_histogram` (issue #150).
+ *
+ * `auto_date_histogram` returns at most this many buckets, picking the finest
+ * interval at or above `minimum_interval` that fits. The value therefore sets
+ * how wide a range still keeps the author's declared interval: at 10,000 that
+ * is 833 years of monthly buckets, 27 years of daily, and 1.1 years of hourly
+ * — past any real corpus, so declared intervals survive. A 9999-12-31 sentinel
+ * (~96,000 months) does not fit and steps down to yearly (~8,000 buckets),
+ * which renders instead of failing.
+ *
+ * It stays an order of magnitude under OpenSearch's 65,535 `search.max_buckets`
+ * on purpose: that cap counts every bucket in the request, so leaving headroom
+ * keeps one histogram from starving the other aggregations beside it.
+ */
+export const DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS = 10_000;
+
+/**
+ * Module-level helper the emitted AGG_SPEC calls for each bounds-less
+ * date_histogram. `buckets` is identical across every such entry and the
+ * `auto_date_histogram` key is long, so factoring both out of the literal keeps
+ * wide projections under AppSync's 32 KB per-function cap (issues #99, #105).
+ */
+const AUTO_DATE_HISTOGRAM_HELPER = "ADH";
 
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
 // APPSYNC_JS does not honor self-extending Array iteration, so the emitted
@@ -205,7 +239,7 @@ function renderMonolithicResolver(
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
-	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations, options);
 	const buildAggsFunction = renderBuildAggsFunction(aggregations);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
@@ -567,7 +601,7 @@ function renderPrepareFunction(
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
-	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations, options);
 	const buildAggsFunction = renderBuildAggsFunction(aggregations);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
@@ -979,11 +1013,38 @@ function stringifyNode(node: FilterSpecNode): string {
  * under. `buildAggs` reads it at request time. Returns "" when the projection
  * has no aggregations at all.
  */
-function renderAggSpecDeclaration(aggregations: AggregationEntry[]): string {
+function renderAggSpecDeclaration(
+	aggregations: AggregationEntry[],
+	options: ResolverOptions,
+): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
-	return `\nconst AGG_SPEC = ${renderAggSpecLiteral(aggregations)};\n`;
+	const buckets =
+		options.autoDateHistogramBuckets ?? DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS;
+	const helper = aggregations.some(usesAutoDateHistogram)
+		? `\nconst ${AUTO_DATE_HISTOGRAM_HELPER} = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m, buckets: ${buckets} } });\n`
+		: "";
+	return `${helper}\nconst AGG_SPEC = ${renderAggSpecLiteral(aggregations)};\n`;
+}
+
+/**
+ * True when the entry renders through the AUTO_DATE_HISTOGRAM_HELPER: a
+ * date_histogram with no author-declared bounds, at an interval OpenSearch can
+ * express as a `minimum_interval`.
+ */
+function usesAutoDateHistogram(entry: AggregationEntry): boolean {
+	if (entry.kind !== "date_histogram") {
+		return false;
+	}
+	const opts =
+		entry.options && "interval" in entry.options
+			? (entry.options as DateHistogramOptions)
+			: undefined;
+	if (opts?.bounds) {
+		return false;
+	}
+	return supportsMinimumInterval(opts?.interval ?? "month");
 }
 
 /**
@@ -1150,11 +1211,27 @@ function renderAggInner(entry: AggregationEntry): string {
 	const fieldLit = JSON.stringify(entry.openSearchField);
 
 	if (entry.kind === "date_histogram") {
-		const interval =
+		const opts =
 			entry.options && "interval" in entry.options
-				? entry.options.interval
-				: "month";
-		return `{ ${aggType}: { field: ${fieldLit}, calendar_interval: ${JSON.stringify(interval)} } }`;
+				? (entry.options as DateHistogramOptions)
+				: undefined;
+		const interval = opts?.interval ?? "month";
+		const intervalLit = JSON.stringify(interval);
+		// Author-declared bounds pin the range, so the declared interval can
+		// never blow the bucket count: emit the real thing.
+		if (opts?.bounds) {
+			return `{ ${aggType}: { field: ${fieldLit}, calendar_interval: ${intervalLit}, hard_bounds: ${JSON.stringify(opts.bounds)} } }`;
+		}
+		// No bounds: bound the bucket count instead of the range, so every
+		// document still counts and only the resolution gives way (issue #150).
+		if (supportsMinimumInterval(interval)) {
+			return `${AUTO_DATE_HISTOGRAM_HELPER}(${fieldLit}, ${intervalLit})`;
+		}
+		// `week`/`quarter` have no `minimum_interval` spelling. Emitting a
+		// coarser floor would silently drop resolution the author asked for and
+		// a finer one would silently add detail, so keep the declared histogram
+		// as-is; the decorator warns that bounds are the only lever here.
+		return `{ ${aggType}: { field: ${fieldLit}, calendar_interval: ${intervalLit} } }`;
 	}
 	if (entry.kind === "range") {
 		const ranges =

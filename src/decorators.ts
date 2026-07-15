@@ -373,8 +373,41 @@ export interface RangeBucketSpec {
 	to?: number;
 }
 
+/**
+ * Intervals that `auto_date_histogram`'s `minimum_interval` accepts. OpenSearch
+ * takes only `year`, `month`, `day`, `hour`, `minute` and `second` there — the
+ * `week` and `quarter` that `date_histogram`'s `calendar_interval` accepts have
+ * no `minimum_interval` spelling. Issue #150.
+ */
+export const MINIMUM_INTERVAL_SUPPORTED = [
+	"year",
+	"month",
+	"day",
+	"hour",
+] as const;
+
+export function supportsMinimumInterval(interval: DateHistogramInterval) {
+	return (MINIMUM_INTERVAL_SUPPORTED as readonly string[]).includes(interval);
+}
+
+/**
+ * `hard_bounds` for a `date_histogram`. Values are whatever OpenSearch accepts
+ * as a date: an ISO 8601 instant (`"2020-01-01T00:00:00Z"`) or date math
+ * (`"now-5y"`). At least one end is required; an omitted end tracks the data.
+ */
+export interface DateHistogramBounds {
+	min?: string;
+	max?: string;
+}
+
 export interface DateHistogramOptions {
 	interval: DateHistogramInterval;
+	/**
+	 * Bounds the histogram's range, which pins the bucket interval to the
+	 * declared `interval`. Absent, the emitter bounds the *bucket count*
+	 * instead by emitting `auto_date_histogram` — see issue #150.
+	 */
+	bounds?: DateHistogramBounds;
 }
 
 export interface RangeOptions {
@@ -425,6 +458,40 @@ function isSubAggKind(value: unknown): value is SubAggKind {
 	);
 }
 
+function validateDateHistogramBounds(
+	context: DecoratorContext,
+	target: ModelProperty,
+	kind: AggregationKind,
+	raw: unknown,
+): DateHistogramBounds | undefined {
+	const reason = (detail: string) => {
+		reportDiagnostic(context.program, {
+			code: "invalid-aggregation-options",
+			format: { kind, reason: detail },
+			target,
+		});
+		return undefined;
+	};
+	if (!isPlainObject(raw)) {
+		return reason("bounds must be an object of { min?, max? }");
+	}
+	const bounds: DateHistogramBounds = {};
+	for (const end of ["min", "max"] as const) {
+		const value = raw[end];
+		if (value === undefined) {
+			continue;
+		}
+		if (typeof value !== "string" || value.length === 0) {
+			return reason(`bounds.${end} must be a non-empty date string`);
+		}
+		bounds[end] = value;
+	}
+	if (bounds.min === undefined && bounds.max === undefined) {
+		return reason("bounds requires at least one of min or max");
+	}
+	return bounds;
+}
+
 function validateOptions(
 	context: DecoratorContext,
 	target: ModelProperty,
@@ -452,7 +519,21 @@ function validateOptions(
 			});
 			return undefined;
 		}
-		return { interval };
+		if (raw.bounds === undefined) {
+			if (!supportsMinimumInterval(interval)) {
+				reportDiagnostic(context.program, {
+					code: "unboundable-date-histogram-interval",
+					format: { interval },
+					target,
+				});
+			}
+			return { interval };
+		}
+		const bounds = validateDateHistogramBounds(context, target, kind, raw.bounds);
+		if (!bounds) {
+			return undefined;
+		}
+		return { interval, bounds };
 	}
 	if (kind === "range") {
 		if (!isPlainObject(raw) || !Array.isArray(raw.ranges)) {
