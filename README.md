@@ -545,7 +545,7 @@ GraphQL intent is derived from the existing OpenSearch mapping — no additional
 
 ### Resolver code-size budget
 
-AppSync rejects APPSYNC_JS code above 32,768 bytes per file (`BadRequestException: Code must be 32768 bytes or less`). The cap applies to each file on its own, not to their sum.
+AppSync rejects APPSYNC_JS code above 32,768 bytes per file (`BadRequestException: Code must be 32768 bytes or less`). The cap applies to each file on its own, not to their sum. Issue #99 tracks the work to fit inside it.
 
 The emitter renders the single-file shape, measures it, and picks a mode:
 
@@ -566,14 +566,16 @@ Emitted code must also stay in the APPSYNC_JS supported subset. `src/emit-graphq
 
 #### Guards
 
-Two tests emit a counterparty-shaped projection (7 nested sub-models, all `@searchInfer`) and assert every emitted file is under 32,768 bytes:
+Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured on `469c9a6`:
 
-- `src/emit-graphql-resolver.test.ts` — synthetic projection built directly from the resolver API.
-- `src/projection.test.ts` — the equivalent shape compiled from TypeSpec source.
+| Projection | Resolver | Prepare | Search | Headroom |
+| --- | --- | --- | --- | --- |
+| counterparty shape (7 nested sub-models) | 8,589 | 24,497 | 201 | 8,271 |
+| synthetic wide (14 sub-models) | 14,056 | 32,482 | 191 | **286** |
 
-Failure is loud in both directions: CI goes red on the guard, and AppSync refuses the deploy.
+`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 286 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 17,917 bytes as a single file and stays monolithic.
 
-Measured on `469c9a6`, the tightest file is the synthetic guard's prepare function at 24,497 of 32,768 bytes. The assertion message prints the current headroom on failure, so read it there rather than trusting this number.
+Failure is loud in both directions: CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
 
 #### When a guard goes red
 
