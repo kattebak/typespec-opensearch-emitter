@@ -130,6 +130,56 @@ function evalRequestBody(
 	);
 }
 
+type UtilError = Error & {
+	errorType?: string;
+	data?: unknown;
+	errorInfo?: unknown;
+};
+
+/**
+ * Evaluates an emitted `response(ctx)` against a stub `util`, mirroring the
+ * AppSync runtime closely enough for issue #150: `util.error` interrupts
+ * evaluation, so it throws here and carries the errorType/data/errorInfo
+ * through for assertions. The stub takes all four documented arguments
+ * (`message`, `errorType`, `data`, `errorInfo`) so a diagnostic parked in the
+ * wrong slot is visible to a test rather than silently dropped at runtime.
+ * Returns the handler's value on the success path.
+ */
+function evalResponse(source: string, ctx: unknown): unknown {
+	const stripped = source
+		.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+		.replace(/^export function /gm, "function ");
+	const factory = new Function("util", `${stripped}\nreturn response;`) as (
+		util: unknown,
+	) => (ctx: unknown) => unknown;
+	const utilStub = {
+		base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+		base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+		error: (
+			message: string,
+			errorType?: string,
+			data?: unknown,
+			errorInfo?: unknown,
+		) => {
+			const err: UtilError = new Error(message);
+			err.errorType = errorType;
+			err.data = data;
+			err.errorInfo = errorInfo;
+			throw err;
+		},
+	};
+	return factory(utilStub)(ctx);
+}
+
+function captureResponseError(source: string, ctx: unknown): UtilError {
+	try {
+		evalResponse(source, ctx);
+	} catch (err) {
+		return err as UtilError;
+	}
+	throw new Error("response(ctx) returned without raising an error");
+}
+
 type EmitResult = Awaited<ReturnType<typeof emitGraphQLResolver>>;
 
 /**
@@ -2320,6 +2370,171 @@ describe("emitGraphQLResolver search filter DSL", () => {
 				],
 			},
 		});
+	});
+});
+
+describe("emitGraphQLResolver datasource error propagation (issue #150)", () => {
+	const okBody = {
+		hits: {
+			total: { value: 1 },
+			hits: [{ _source: { name: "Rex" }, sort: [1] }],
+		},
+	};
+
+	// The reported failure: OpenSearch rejects the search, and the emitted code
+	// must name `too_many_buckets_exception` rather than let an undefined body
+	// reach the after-mapping and resurface as a phantom ReferenceError.
+	const osErrorBody = {
+		error: {
+			type: "too_many_buckets_exception",
+			reason:
+				"Trying to create too many buckets. Must be less than or equal to: [65535] but was [95947].",
+		},
+		status: 400,
+	};
+
+	async function emitPipeline(): Promise<EmitResult> {
+		return await emitGraphQLResolver(
+			makeProjection({ fields: [makeField({ name: "name" })] }),
+			defaultOptions,
+		);
+	}
+
+	it("search function surfaces ctx.error with its message and type", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			error: { message: "Connection refused", type: "ServiceUnavailable" },
+			result: undefined,
+		});
+
+		assert.equal(err.message, "Connection refused");
+		assert.equal(err.errorType, "ServiceUnavailable");
+	});
+
+	it("search function surfaces an OpenSearch error envelope's type and reason", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			result: osErrorBody,
+		});
+
+		assert.equal(err.errorType, "too_many_buckets_exception");
+		assert.match(err.message, /too many buckets/);
+		assert.match(err.message, /95947/);
+	});
+
+	it("search function carries the response body as errorInfo, not data", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			result: osErrorBody,
+		});
+
+		assert.deepEqual(
+			err.errorInfo,
+			osErrorBody,
+			"the body must travel as errorInfo; AppSync filters `data` against the query selection set, which an OpenSearch body shares no field with",
+		);
+		assert.equal(err.data, null);
+	});
+
+	it("search function carries ctx.result as errorInfo when ctx.error is set", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			error: { message: "Connection refused", type: "ServiceUnavailable" },
+			result: osErrorBody,
+		});
+
+		assert.deepEqual(err.errorInfo, osErrorBody);
+		assert.equal(err.data, null);
+	});
+
+	it("search function surfaces a non-2xx datasource response", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			result: { statusCode: 503, body: "service unavailable" },
+		});
+
+		assert.equal(err.errorType, "OpenSearchError");
+		assert.match(err.message, /503/);
+		assert.match(err.message, /service unavailable/);
+	});
+
+	it("search function surfaces a missing result rather than passing undefined on", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(searchFunctionContent(result), {
+			result: undefined,
+		});
+
+		assert.equal(err.errorType, "OpenSearchError");
+		assert.match(err.message, /OpenSearch search failed/);
+	});
+
+	it("search function passes a successful response through unchanged", async () => {
+		const result = await emitPipeline();
+		const passed = evalResponse(searchFunctionContent(result), {
+			result: okBody,
+		});
+
+		assert.deepEqual(passed, okBody);
+	});
+
+	it("after-mapping reports a missing body instead of a ReferenceError on parsedBody", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(result.content, {
+			args: {},
+			prev: { result: undefined },
+		});
+
+		assert.equal(err.errorType, "OpenSearchError");
+		assert.match(err.message, /OpenSearch search failed/);
+		assert.doesNotMatch(
+			err.message,
+			/is not defined/,
+			"the after-mapping must name the real failure, not a phantom ReferenceError",
+		);
+	});
+
+	it("after-mapping surfaces an OpenSearch error envelope reaching ctx.prev.result", async () => {
+		const result = await emitPipeline();
+		const err = captureResponseError(result.content, {
+			args: {},
+			prev: { result: osErrorBody },
+		});
+
+		assert.equal(err.errorType, "too_many_buckets_exception");
+		assert.match(err.message, /too many buckets/);
+		assert.deepEqual(err.errorInfo, osErrorBody);
+		assert.equal(err.data, null);
+	});
+
+	it("after-mapping shapes a successful response unchanged", async () => {
+		const result = await emitPipeline();
+		const shaped = evalResponse(result.content, {
+			args: {},
+			prev: { result: okBody },
+		}) as { totalCount: number; edges: { node: unknown }[] };
+
+		assert.equal(shaped.totalCount, 1);
+		assert.deepEqual(shaped.edges[0].node, { name: "Rex" });
+	});
+
+	it("monolithic after-mapping guards a missing body too", async () => {
+		const result = await emitGraphQLResolver(
+			makeProjection({ fields: [makeField({ name: "name" })] }),
+			{ ...defaultOptions, monolithicThresholdBytes: 28_000 },
+		);
+		assert.equal(result.mode, "monolithic");
+
+		const err = captureResponseError(result.content, {
+			args: {},
+			result: osErrorBody,
+		});
+		assert.equal(err.errorType, "too_many_buckets_exception");
+
+		const shaped = evalResponse(result.content, {
+			args: {},
+			result: okBody,
+		}) as { totalCount: number };
+		assert.equal(shaped.totalCount, 1);
 	});
 });
 

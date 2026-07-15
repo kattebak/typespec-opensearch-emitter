@@ -249,7 +249,7 @@ export function response(ctx) {
 	}
 
 	const parsedBody = ctx.result;
-	const hits = parsedBody.hits.hits;
+${renderSearchBodyGuard("parsedBody", "\t")}	const hits = parsedBody.hits.hits;
 	const totalHits = parsedBody.hits.total.value;
 	const args = ctx.args;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
@@ -525,7 +525,7 @@ export function response(ctx) {
 	}
 
 	const parsedBody = ctx.prev.result;
-	const hits = parsedBody.hits.hits;
+${renderSearchBodyGuard("parsedBody", "\t")}	const hits = parsedBody.hits.hits;
 	const totalHits = parsedBody.hits.total.value;
 	const args = ctx.args;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
@@ -880,9 +880,17 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
  * from `ctx.stash.queryBody` (set by the prepare function) and issues the
  * OS HTTP request. Tiny on purpose — the heavy filter/aggs construction
  * lives in the prepare function where it has its own 32 KB budget.
+ *
+ * The response handler must fail loudly (issue #150): returning `ctx.result`
+ * unchecked lets a failed search through as `undefined`, which the resolver
+ * after-mapping then dereferences — the AppSync JS runtime reports that as
+ * `ReferenceError: parsedBody is not defined`, naming neither the status code
+ * nor the OpenSearch reason.
  */
 function renderSearchFunction(indexName: string): string {
-	return `export function request(ctx) {
+	return `import { util } from "@aws-appsync/utils";
+
+export function request(ctx) {
 	return {
 		operation: "GET",
 		path: "/${indexName}/_search",
@@ -891,8 +899,42 @@ function renderSearchFunction(indexName: string): string {
 }
 
 export function response(ctx) {
-	return ctx.result;
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type, null, ctx.result);
+	}
+${renderSearchBodyGuard("ctx.result", "\t")}	return ctx.result;
 }
+`;
+}
+
+/**
+ * Guard an OpenSearch response body before anything dereferences `.hits`.
+ *
+ * Covers three failure shapes the datasource can hand back without setting
+ * `ctx.error`: a missing body, an OpenSearch error envelope
+ * (`{ error: { type, reason }, status }` — this is how `too_many_buckets_exception`
+ * arrives), and a raw non-2xx HTTP response (`{ statusCode, body }`). Each one
+ * surfaces the real type and reason instead of a phantom ReferenceError one
+ * line later.
+ *
+ * The body travels as `errorInfo` (4th arg), not `data` (3rd): AppSync filters
+ * `data` against the field's query selection set, and an OpenSearch body
+ * (`hits`/`error`/`status`) shares no field with a Connection selection
+ * (`totalCount`/`edges`/`aggregations`), so it would filter down to nothing and
+ * never reach the client. `errorInfo` is not filtered.
+ */
+function renderSearchBodyGuard(expr: string, indent: string): string {
+	const i = indent;
+	return `${i}if (!${expr} || !${expr}.hits) {
+${i}	const err = ${expr} ? ${expr}.error : null;
+${i}	const status = ${expr} ? ${expr}.status || ${expr}.statusCode : null;
+${i}	return util.error(
+${i}		(err && err.reason) || "OpenSearch search failed" + (status ? " with status " + status : "") + ": " + JSON.stringify(${expr}),
+${i}		(err && err.type) || "OpenSearchError",
+${i}		null,
+${i}		${expr},
+${i}	);
+${i}}
 `;
 }
 
