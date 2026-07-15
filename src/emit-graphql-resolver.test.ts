@@ -844,6 +844,119 @@ describe("emitGraphQLResolver", () => {
 		});
 	});
 
+	// `selectionSetList` reports an aliased field under its alias only — the
+	// schema field name never appears — so an aliased aggregation matches no
+	// AGG_SPEC entry. Narrowing on that would send no aggs and answer with empty
+	// buckets the caller cannot distinguish from a real empty result, since the
+	// response side reads defensively (`parsedBody.aggregations || {}`). These
+	// pin the fallback that keeps aliased queries whole.
+	it("sends every aggregation when the caller aliases an aggregation field", async () => {
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"totalCount",
+				"aggregations",
+				"aggregations/speciesBuckets",
+				"aggregations/speciesBuckets/key",
+				"aggregations/speciesBuckets/count",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>).sort(), [
+			"byRankOverTime",
+			"bySpecies",
+			"uniqueSpeciesCount",
+		]);
+	});
+
+	it("sends every aggregation when an alias is mixed with a named aggregation", async () => {
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/bySpecies",
+				"aggregations/bySpecies/key",
+				"aggregations/rankOverTime",
+				"aggregations/rankOverTime/key",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>).sort(), [
+			"byRankOverTime",
+			"bySpecies",
+			"uniqueSpeciesCount",
+		]);
+	});
+
+	it("builds every nested agg group when the caller aliases an aggregation field", async () => {
+		const result = await emitGraphQLResolver(
+			nestedAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/tagNames",
+				"aggregations/tagNames/key",
+			],
+		});
+		assert.deepEqual(body.aggs, {
+			bySpecies: { terms: { field: "species" } },
+			_tags: {
+				nested: { path: "tags" },
+				aggs: {
+					byTagName: { terms: { field: "tags.name" } },
+					missingTagNoteCount: { missing: { field: "tags.note.keyword" } },
+				},
+			},
+		});
+	});
+
+	it("aliasing a sub-field of an aggregation does not widen the selection", async () => {
+		// `bySpecies { k: key }` aliases below the aggregation name, which stays
+		// resolvable — narrowing must still apply.
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/bySpecies",
+				"aggregations/bySpecies/k",
+				"aggregations/bySpecies/n",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>), [
+			"bySpecies",
+		]);
+	});
+
+	it("omits the aggs key when an alias sits outside the aggregations selection", async () => {
+		// A field aliased at the top level must not read as an aggregation alias.
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: ["count: totalCount", "rows", "rows/node"],
+		});
+		assert.equal(
+			Object.hasOwn(body, "aggs"),
+			false,
+			`body must NOT contain aggs; got body=${JSON.stringify(body)}`,
+		);
+	});
+
 	it("emits cardinality and missing aggs in request", async () => {
 		const projection = makeProjection({
 			fields: [

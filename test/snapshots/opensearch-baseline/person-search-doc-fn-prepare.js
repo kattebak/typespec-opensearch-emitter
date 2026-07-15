@@ -36,12 +36,27 @@ export function response(ctx) {
 }
 
 function buildAggs(selectionSetList) {
-	// Only the aggregations named in the caller's selection are sent; `null`
-	// means none were, and the request omits the `aggs` key entirely.
+	// A first segment under `aggregations/` naming no AGG_SPEC entry is an
+	// alias, whose target is not recoverable here — send every aggregation
+	// rather than none.
+	let aliased = false;
+	for (const path of selectionSetList) {
+		if (path.indexOf("aggregations/") === 0) {
+			const rest = path.substring(13);
+			const slash = rest.indexOf("/");
+			const name = slash < 0 ? rest : rest.substring(0, slash);
+			let declared = false;
+			for (const spec of AGG_SPEC) {
+				if (spec.n === name) declared = true;
+			}
+			if (!declared) aliased = true;
+		}
+	}
+	// `null` means nothing was requested, and the request omits `aggs` entirely.
 	const aggs = {};
 	let requested = false;
 	for (const spec of AGG_SPEC) {
-		if (selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
+		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
 			requested = true;
 			if (spec.g) {
 				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };

@@ -1019,6 +1019,14 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
  * of how many aggregations the projection declares — the alternative, emitting
  * a per-selection object literal, does not fit the 32 KB per-function cap.
  *
+ * `selectionSetList` names an aliased field by its alias only — the schema
+ * field name is absent — so `aggregations { s: bySpecies { key } }` yields
+ * `aggregations/s` and nothing that identifies `bySpecies`. The alias target is
+ * not recoverable, so buildAggs detects the alias instead: the valid children of
+ * `aggregations` are exactly the AGG_SPEC names, and any other first segment is
+ * an alias. Such a selection falls back to sending every aggregation, which is
+ * what the caller received before issue #150 narrowed the block.
+ *
  * Returns "" when the projection has no aggregations at all.
  */
 function renderBuildAggsFunction(aggregations: AggregationEntry[]): string {
@@ -1027,12 +1035,27 @@ function renderBuildAggsFunction(aggregations: AggregationEntry[]): string {
 	}
 	return `
 function buildAggs(selectionSetList) {
-	// Only the aggregations named in the caller's selection are sent; \`null\`
-	// means none were, and the request omits the \`aggs\` key entirely.
+	// A first segment under \`aggregations/\` naming no AGG_SPEC entry is an
+	// alias, whose target is not recoverable here — send every aggregation
+	// rather than none.
+	let aliased = false;
+	for (const path of selectionSetList) {
+		if (path.indexOf("aggregations/") === 0) {
+			const rest = path.substring(13);
+			const slash = rest.indexOf("/");
+			const name = slash < 0 ? rest : rest.substring(0, slash);
+			let declared = false;
+			for (const spec of AGG_SPEC) {
+				if (spec.n === name) declared = true;
+			}
+			if (!declared) aliased = true;
+		}
+	}
+	// \`null\` means nothing was requested, and the request omits \`aggs\` entirely.
 	const aggs = {};
 	let requested = false;
 	for (const spec of AGG_SPEC) {
-		if (selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
+		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
 			requested = true;
 			if (spec.g) {
 				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
@@ -1142,7 +1165,7 @@ function renderResponseAggregations(aggregations: AggregationEntry[]): string {
 		return "";
 	}
 
-	// Match the dedupe in renderAggsObjectLiteral — first-wins on duplicate aggName.
+	// Match the dedupe in renderAggSpecLiteral — first-wins on duplicate aggName.
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const entry of aggregations) {
