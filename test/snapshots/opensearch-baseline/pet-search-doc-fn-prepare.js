@@ -2,6 +2,8 @@ import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = [{i:"namePrefix",k:"prefix",f:"name"}, {i:"nameMatch",k:"match",f:"name"}, {i:"species",k:"term",f:"species"}, {i:"speciesNot",k:"term_negate",f:"species"}, {i:"birthDate",k:"range",f:"birthDate"}, {i:"createdAt",k:"range",f:"createdAt"}, {i:"tags",k:"nested",p:"tags",c:[{i:"name",k:"term",f:"tags.name"}, {i:"nameNot",k:"term_negate",f:"tags.name"}, {i:"noteExists",k:"exists",f:"tags.note.keyword"}]}, {i:"nicknameExists",k:"exists",f:"nickname.keyword"}, {i:"rank",k:"range",f:"rank"}];
 
+const AGG_SPEC = [{n:"bySpecies",a:{ terms: { field: "species" } }}, {n:"byAlias",a:{ terms: { field: "aliases.keyword" } }}, {n:"uniqueAliasCount",a:{ cardinality: { field: "aliases.keyword" } }}, {n:"missingNicknameCount",a:{ missing: { field: "nickname.keyword" } }}, {n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name" } }}, {n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}, {n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}];
+
 export function request(ctx) {
 	const args = ctx.args;
 	const size = Math.min(args.first || 20, 100);
@@ -20,15 +22,9 @@ export function request(ctx) {
 	if (searchAfter) {
 		body.search_after = searchAfter;
 	}
-	const wantsAggs = ctx.info.selectionSetList.some((p) => p === "aggregations" || p.indexOf("aggregations/") === 0);
-	if (wantsAggs) {
-		body.aggs = {
-		bySpecies: { terms: { field: "species" } },
-		byAlias: { terms: { field: "aliases.keyword" } },
-		uniqueAliasCount: { cardinality: { field: "aliases.keyword" } },
-		missingNicknameCount: { missing: { field: "nickname.keyword" } },
-		_tags: { nested: { path: "tags" }, aggs: { byTagName: { terms: { field: "tags.name" } }, uniqueTagNameCount: { cardinality: { field: "tags.name" } }, missingTagNoteCount: { missing: { field: "tags.note.keyword" } } } },
-	};
+	const aggs = buildAggs(ctx.info.selectionSetList);
+	if (aggs) {
+		body.aggs = aggs;
 	}
 
 	ctx.stash.queryBody = body;
@@ -37,6 +33,41 @@ export function request(ctx) {
 
 export function response(ctx) {
 	return ctx.result;
+}
+
+function buildAggs(selectionSetList) {
+	// A first segment under `aggregations/` naming no AGG_SPEC entry is an
+	// alias, whose target is not recoverable here — send every aggregation
+	// rather than none.
+	let aliased = false;
+	for (const path of selectionSetList) {
+		if (path.indexOf("aggregations/") === 0) {
+			const rest = path.substring(13);
+			const slash = rest.indexOf("/");
+			const name = slash < 0 ? rest : rest.substring(0, slash);
+			let declared = false;
+			for (const spec of AGG_SPEC) {
+				if (spec.n === name) declared = true;
+			}
+			if (!declared && name !== "__typename") aliased = true;
+		}
+	}
+	// `null` means nothing was requested, and the request omits `aggs` entirely.
+	const aggs = {};
+	let requested = false;
+	for (const spec of AGG_SPEC) {
+		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
+			requested = true;
+			if (spec.g) {
+				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
+				group.aggs[spec.n] = spec.a;
+				aggs[spec.g] = group;
+			} else {
+				aggs[spec.n] = spec.a;
+			}
+		}
+	}
+	return requested ? aggs : null;
 }
 
 function buildQuery(queryText, filter, searchFilter) {

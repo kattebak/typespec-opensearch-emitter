@@ -205,6 +205,8 @@ function renderMonolithicResolver(
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const buildAggsFunction = renderBuildAggsFunction(aggregations);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 	const responseAggregationsPreamble =
@@ -214,7 +216,7 @@ function renderMonolithicResolver(
 	return `import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = ${filterSpecLiteral};
-
+${aggSpecDeclaration}
 export function request(ctx) {
 	const args = ctx.args;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
@@ -267,7 +269,7 @@ ${responseAggregationsPreamble}
 		},
 	};
 }
-
+${buildAggsFunction}
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
@@ -565,6 +567,8 @@ function renderPrepareFunction(
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const buildAggsFunction = renderBuildAggsFunction(aggregations);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
 	// — saves ~5 bytes per slot. The walker never reads these init values; it
@@ -575,7 +579,7 @@ function renderPrepareFunction(
 	return `import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = ${filterSpecLiteral};
-
+${aggSpecDeclaration}
 export function request(ctx) {
 	const args = ctx.args;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
@@ -602,7 +606,7 @@ ${aggsAssignment}
 export function response(ctx) {
 	return ctx.result;
 }
-
+${buildAggsFunction}
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
@@ -928,56 +932,43 @@ function stringifyNode(node: FilterSpecNode): string {
 }
 
 /**
- * Emits a runtime block that conditionally assigns `body.aggs = { ... }` only
- * when the GraphQL caller selected the `aggregations` field. APPSYNC_JS exposes
- * `ctx.info.selectionSetList` as an array of dot-paths into the selection set;
- * we gate on `aggregations` itself or any nested `aggregations/...` path.
- *
- * Skipping the aggs block when not requested avoids OS executing every nested
- * aggregation defined on the doc type for every `searchX(first: 0) { totalCount }`
- * style probe — a 3 KB+ body shrinks back to a few bytes and OS does no
- * aggregation work. Returns "" when the projection has no aggregations at all.
+ * Emits the `AGG_SPEC` module-level declaration: one entry per aggregation the
+ * projection declares, keyed by the GraphQL field name the caller selects it
+ * under. `buildAggs` reads it at request time. Returns "" when the projection
+ * has no aggregations at all.
  */
-function renderAggsAssignment(
-	aggregations: AggregationEntry[],
-	indent: string,
-): string {
+function renderAggSpecDeclaration(aggregations: AggregationEntry[]): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
-	const aggsBody = renderAggsObjectLiteral(aggregations, indent);
-	return `${indent}const wantsAggs = ctx.info.selectionSetList.some((p) => p === "aggregations" || p.indexOf("aggregations/") === 0);
-${indent}if (wantsAggs) {
-${indent}\tbody.aggs = ${aggsBody};
-${indent}}
-`;
+	return `\nconst AGG_SPEC = ${renderAggSpecLiteral(aggregations)};\n`;
 }
 
 /**
- * Builds the `{ byTagName: ..., byApprovalType: ..., _tags: { nested: ... } }`
- * object literal that goes on the right-hand side of `body.aggs = ...`.
+ * Builds the `[{n:"byTagName",a:{...}}, {n:"byStatus",g:"_tags",p:"tags",a:{...}}]`
+ * literal that `buildAggs` projects the caller's selection onto.
  *
- * Group aggs by nested path so each path emits ONE `nested` wrapper with all
- * child aggs inside, instead of one wrapper per agg. Saves a per-agg
- * `{ nested: { path: "..." }, aggs: { inner: ... } }` skeleton (~50 bytes
- * per nested agg) on wide projections (issue #105).
+ * AGG_SPEC entries use single-letter keys to keep wide projections under
+ * AppSync's 32 KB per-function code cap (issue #99, #105). The reader is
+ * buildAggs inside the emitted prepare function; keys must match there:
+ *   n = GraphQL aggregation field name, a = OpenSearch agg body,
+ *   p = nested path, g = nested agg group key.
+ *
+ * Flat aggregations come first, then nested ones grouped by path, so the
+ * assembled `body.aggs` key order matches the projection's declaration order.
  *
  * Aggregations carry a per-projection-unique `aggName` (e.g. `byCounterpartyId`).
  * If the same aggName appears more than once (which can happen when a
- * projection spreads the same field/aggregation twice), APPSYNC_JS rejects
- * the resulting object literal at deploy time (TS1117 — duplicate keys).
- * Dedupe here, first-wins.
+ * projection spreads the same field/aggregation twice), the duplicate would
+ * overwrite the first at assembly time. Dedupe here, first-wins, matching the
+ * response-side mapping.
  */
-function renderAggsObjectLiteral(
-	aggregations: AggregationEntry[],
-	indent: string,
-): string {
+function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
 	if (aggregations.length === 0) {
-		return "{}";
+		return "[]";
 	}
 
-	const inner = `${indent}\t`;
-	const flatLines: string[] = [];
+	const flatItems: string[] = [];
 	const flatSeen = new Set<string>();
 	const byPath = new Map<string, AggregationEntry[]>();
 	const seenInPath = new Map<string, Set<string>>();
@@ -985,7 +976,9 @@ function renderAggsObjectLiteral(
 		if (!entry.nestedPath) {
 			if (flatSeen.has(entry.aggName)) continue;
 			flatSeen.add(entry.aggName);
-			flatLines.push(`${inner}${entry.aggName}: ${renderAggInner(entry)},`);
+			flatItems.push(
+				`{n:${JSON.stringify(entry.aggName)},a:${renderAggInner(entry)}}`,
+			);
 			continue;
 		}
 		const seen = seenInPath.get(entry.nestedPath) ?? new Set<string>();
@@ -1000,18 +993,110 @@ function renderAggsObjectLiteral(
 		}
 	}
 
-	const groupLines: string[] = [];
+	const groupItems: string[] = [];
 	for (const [path, group] of byPath) {
-		const innerEntries = group
-			.map((e) => `${e.aggName}: ${renderAggInner(e)}`)
-			.join(", ");
-		groupLines.push(
-			`${inner}${nestedAggGroupKey(path)}: { nested: { path: ${JSON.stringify(path)} }, aggs: { ${innerEntries} } },`,
-		);
+		const groupKey = JSON.stringify(nestedAggGroupKey(path));
+		const pathLit = JSON.stringify(path);
+		for (const entry of group) {
+			groupItems.push(
+				`{n:${JSON.stringify(entry.aggName)},g:${groupKey},p:${pathLit},a:${renderAggInner(entry)}}`,
+			);
+		}
 	}
 
-	const lines = [...flatLines, ...groupLines];
-	return `{\n${lines.join("\n")}\n${indent}}`;
+	return `[${[...flatItems, ...groupItems].join(", ")}]`;
+}
+
+/**
+ * Emits the `buildAggs` runtime helper, which projects the caller's selection
+ * onto AGG_SPEC. APPSYNC_JS exposes `ctx.info.selectionSetList` as an array of
+ * slash-paths into the selection set; an aggregation is requested exactly when
+ * `aggregations/<aggName>` is present.
+ *
+ * Only requested aggregations reach OpenSearch, and a nested wrapper is built
+ * only for groups with at least one requested child (issue #150). Assembling
+ * at runtime from a compact spec keeps the emitted code size flat regardless
+ * of how many aggregations the projection declares — the alternative, emitting
+ * a per-selection object literal, does not fit the 32 KB per-function cap.
+ *
+ * `selectionSetList` names an aliased field by its alias only — the schema
+ * field name is absent — so `aggregations { s: bySpecies { key } }` yields
+ * `aggregations/s` and nothing that identifies `bySpecies`. The alias target is
+ * not recoverable, so buildAggs detects the alias instead: the valid children of
+ * `aggregations` are the AGG_SPEC names plus `__typename`, which Apollo, Amplify
+ * and Relay inject into every object selection set; any other first segment is
+ * read as an alias. Such a selection falls back to sending every aggregation,
+ * which is what the caller received before issue #150 narrowed the block.
+ *
+ * Known false negative: an alias that happens to name another declared
+ * aggregation (`byAlias: bySpecies`) reads as declared, so no fallback fires and
+ * the wrong aggregation is sent — undetectable from `selectionSetList` alone.
+ *
+ * Returns "" when the projection has no aggregations at all.
+ */
+function renderBuildAggsFunction(aggregations: AggregationEntry[]): string {
+	if (aggregations.length === 0) {
+		return "";
+	}
+	return `
+function buildAggs(selectionSetList) {
+	// A first segment under \`aggregations/\` naming no AGG_SPEC entry is an
+	// alias, whose target is not recoverable here — send every aggregation
+	// rather than none.
+	let aliased = false;
+	for (const path of selectionSetList) {
+		if (path.indexOf("aggregations/") === 0) {
+			const rest = path.substring(13);
+			const slash = rest.indexOf("/");
+			const name = slash < 0 ? rest : rest.substring(0, slash);
+			let declared = false;
+			for (const spec of AGG_SPEC) {
+				if (spec.n === name) declared = true;
+			}
+			if (!declared && name !== "__typename") aliased = true;
+		}
+	}
+	// \`null\` means nothing was requested, and the request omits \`aggs\` entirely.
+	const aggs = {};
+	let requested = false;
+	for (const spec of AGG_SPEC) {
+		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
+			requested = true;
+			if (spec.g) {
+				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
+				group.aggs[spec.n] = spec.a;
+				aggs[spec.g] = group;
+			} else {
+				aggs[spec.n] = spec.a;
+			}
+		}
+	}
+	return requested ? aggs : null;
+}
+`;
+}
+
+/**
+ * Emits the request-side block that assigns `body.aggs` to the aggregations the
+ * caller selected, and leaves the key off entirely when they selected none.
+ *
+ * Sending only the requested aggregations keeps OpenSearch from executing every
+ * aggregation the doc type declares on a `searchX(first: 0) { totalCount }`
+ * style probe, and isolates each aggregation's failures to the queries that ask
+ * for it. Returns "" when the projection has no aggregations at all.
+ */
+function renderAggsAssignment(
+	aggregations: AggregationEntry[],
+	indent: string,
+): string {
+	if (aggregations.length === 0) {
+		return "";
+	}
+	return `${indent}const aggs = buildAggs(ctx.info.selectionSetList);
+${indent}if (aggs) {
+${indent}\tbody.aggs = aggs;
+${indent}}
+`;
 }
 
 function nestedAggGroupKey(nestedPath: string): string {
@@ -1085,7 +1170,7 @@ function renderResponseAggregations(aggregations: AggregationEntry[]): string {
 		return "";
 	}
 
-	// Match the dedupe in renderAggsObjectLiteral — first-wins on duplicate aggName.
+	// Match the dedupe in renderAggSpecLiteral — first-wins on duplicate aggName.
 	const seen = new Set<string>();
 	const lines: string[] = [];
 	for (const entry of aggregations) {
@@ -1170,7 +1255,8 @@ export const __test = {
 	renderSearchFunction,
 	renderMonolithicResolver,
 	renderAggsAssignment,
-	renderAggsObjectLiteral,
+	renderAggSpecLiteral,
+	renderBuildAggsFunction,
 	renderResponseAggregations,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
 };
