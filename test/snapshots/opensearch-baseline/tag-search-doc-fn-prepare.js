@@ -49,7 +49,7 @@ function buildAggs(selectionSetList) {
 			for (const spec of AGG_SPEC) {
 				if (spec.n === name) declared = true;
 			}
-			if (!declared) aliased = true;
+			if (!declared && name !== "__typename") aliased = true;
 		}
 	}
 	// `null` means nothing was requested, and the request omits `aggs` entirely.

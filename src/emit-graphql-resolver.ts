@@ -1023,9 +1023,14 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
  * field name is absent — so `aggregations { s: bySpecies { key } }` yields
  * `aggregations/s` and nothing that identifies `bySpecies`. The alias target is
  * not recoverable, so buildAggs detects the alias instead: the valid children of
- * `aggregations` are exactly the AGG_SPEC names, and any other first segment is
- * an alias. Such a selection falls back to sending every aggregation, which is
- * what the caller received before issue #150 narrowed the block.
+ * `aggregations` are the AGG_SPEC names plus `__typename`, which Apollo, Amplify
+ * and Relay inject into every object selection set; any other first segment is
+ * read as an alias. Such a selection falls back to sending every aggregation,
+ * which is what the caller received before issue #150 narrowed the block.
+ *
+ * Known false negative: an alias that happens to name another declared
+ * aggregation (`byAlias: bySpecies`) reads as declared, so no fallback fires and
+ * the wrong aggregation is sent — undetectable from `selectionSetList` alone.
  *
  * Returns "" when the projection has no aggregations at all.
  */
@@ -1048,7 +1053,7 @@ function buildAggs(selectionSetList) {
 			for (const spec of AGG_SPEC) {
 				if (spec.n === name) declared = true;
 			}
-			if (!declared) aliased = true;
+			if (!declared && name !== "__typename") aliased = true;
 		}
 	}
 	// \`null\` means nothing was requested, and the request omits \`aggs\` entirely.

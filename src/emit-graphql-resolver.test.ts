@@ -919,6 +919,53 @@ describe("emitGraphQLResolver", () => {
 		});
 	});
 
+	// `aggregations` is an object type, so Apollo (`addTypename: true` by
+	// default), Amplify and Relay inject `__typename` into its selection set.
+	// `__typename` is not an alias, and reading it as one would switch the
+	// narrowing off for exactly those clients.
+	it("__typename under aggregations does not widen the selection", async () => {
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"totalCount",
+				"aggregations",
+				"aggregations/__typename",
+				"aggregations/bySpecies",
+				"aggregations/bySpecies/__typename",
+				"aggregations/bySpecies/key",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>), [
+			"bySpecies",
+		]);
+	});
+
+	it("sends every aggregation when __typename accompanies an aliased aggregation", async () => {
+		const result = await emitGraphQLResolver(
+			multiAggProjection(),
+			defaultOptions,
+		);
+
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/__typename",
+				"aggregations/speciesBuckets",
+				"aggregations/speciesBuckets/__typename",
+				"aggregations/speciesBuckets/key",
+			],
+		});
+		assert.deepEqual(Object.keys(body.aggs as Record<string, unknown>).sort(), [
+			"byRankOverTime",
+			"bySpecies",
+			"uniqueSpeciesCount",
+		]);
+	});
+
 	it("aliasing a sub-field of an aggregation does not widen the selection", async () => {
 		// `bySpecies { k: key }` aliases below the aggregation name, which stays
 		// resolvable — narrowing must still apply.
