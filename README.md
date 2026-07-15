@@ -266,7 +266,7 @@ In this example:
 | `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
-| `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub or `"terms"`-with-`topHits`. `topHits: N` adds a `top_hits: { size: N }` sub-agg so each bucket carries up to N matching docs. See [Aggregations](#aggregations-aggregatable). | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("terms", #{ topHits: 5 }) tagId: string;` |
+| `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub or `"terms"`-with-`topHits`. `topHits: N` adds a `top_hits: { size: N }` sub-agg so each bucket carries up to N matching docs. `"date_histogram"` takes an optional `bounds: #{ min?, max? }` that pins its range and with it the declared interval; without bounds the emitter caps the bucket count instead — see [Bounding a `date_histogram`](#bounding-a-date_histogram). See [Aggregations](#aggregations-aggregatable). | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("terms", #{ topHits: 5 }) tagId: string;` / `@aggregatable("date_histogram", #{ interval: "month", bounds: #{ min: "now-5y", max: "now" } }) validTo: utcDateTime;` |
 | `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"terms"`, `"exists"`, `"range"`, `"prefix"`, `"match"`. `"terms"` produces a `<field>In: [Type!]` multi-value input (chip-style filters). On a `@nested` array field, `"exists"` becomes a path-level nested-existence check. `"prefix"` (`<field>Prefix: String`, OpenSearch `prefix`) and `"match"` (`<field>Match: String`, OpenSearch `match`) query the **analyzed** field rather than the `.keyword` sub-field, so an `@analyzer` (e.g. edge-ngram) registered on the field is exercised by the query — this is how partial / begins-with / contains matching is expressed. | `@filterable("term", "terms") status: string;` / `@analyzer("edge_ngram") @filterable("prefix", "match") name: string;` |
 | `@searchInfer` | `Model` (projection) | Walks the source model's fields and applies type-driven default `@filterable` / `@aggregatable` / `@sortable` capabilities (see [Inference](#searchinfer-type-driven-defaults)). Explicit decorators on a field always win on their axis. | `@searchInfer model TradeSearchDoc is SearchProjection<Trade> {}` |
 | `@searchSkip` | `ModelProperty` | Opts a field out of `@searchInfer` inference. The field is still included in response shape if `@searchable` / `@nested` apply; without those, the field is excluded entirely. | `@searchable @searchSkip auditTrail: string;` |
@@ -278,7 +278,7 @@ Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical 
 
 | Field type | Default `@filterable` | Default `@aggregatable` | Default `@sortable` |
 | --- | --- | --- | --- |
-| `utcDateTime` / `plainDate` | `range` | `date_histogram(month)` | yes |
+| `utcDateTime` / `plainDate` | `range` | `date_histogram(month)`, unbounded — see [Bounding a `date_histogram`](#bounding-a-date_histogram) | yes |
 | `string` + `@keyword` | `term`, `terms`, `exists` | `terms` | yes |
 | free-text `string` (no `@keyword`) | (none) | (none) | no |
 | numeric (`int*`, `float*`, `decimal`, …) | `range` | `sum`, `avg`, `min`, `max` | yes |
@@ -369,6 +369,7 @@ In the example above:
 | `graphql.max-page-size` | `number` | `100` | Maximum allowed page size. |
 | `graphql.track-total-hits-up-to` | `number` | `10000` | OpenSearch `track_total_hits` limit. |
 | `graphql.monolithic-threshold-bytes` | `number` | `32000` | Rendered-resolver size above which the pipeline split is emitted instead of a single file. See [Resolver code-size budget](#resolver-code-size-budget). |
+| `graphql.auto-date-histogram-buckets` | `number` | `10000` | Bucket ceiling for a `date_histogram` declared without `bounds`. Decides how wide a range keeps the declared interval before OpenSearch steps to a coarser one. Must stay under `search.max_buckets` (default 65,535). See [Bounding a `date_histogram`](#bounding-a-date_histogram). |
 
 The `emitter-output-dir` option is a standard TypeSpec compiler option that controls the output directory.
 
@@ -526,7 +527,29 @@ Field-name conventions in the generated `*SearchAggregations` type (singular for
 | `date_histogram` | `by<Field>OverTime` | `[DateHistogramBucket!]!` |
 | `range` | `by<Field>Range` | `[RangeBucket!]!` |
 
-`date_histogram` requires `interval` (one of `year`, `quarter`, `month`, `week`, `day`, `hour` — defaults to `month` if omitted). `range` requires `ranges` (array of `{ from?, to?, key? }`; each entry must set at least one of `from` / `to`). `terms` `sub` allows numeric metric sub-aggregations (`sum`/`avg`/`min`/`max`/`cardinality`) keyed by output bucket field name.
+`date_histogram` requires `interval` (one of `year`, `quarter`, `month`, `week`, `day`, `hour` — defaults to `month` if omitted) and takes an optional `bounds` — see [Bounding a date_histogram](#bounding-a-date_histogram). `range` requires `ranges` (array of `{ from?, to?, key? }`; each entry must set at least one of `from` / `to`). `terms` `sub` allows numeric metric sub-aggregations (`sum`/`avg`/`min`/`max`/`cardinality`) keyed by output bucket field name.
+
+#### Bounding a `date_histogram`
+
+A `date_histogram` covers the full range its data spans. A fixed interval over a wide range therefore has no bucket ceiling: a far-future sentinel date — `validTo = 9999-12-31` for "no end date" is ordinary domain data — puts a monthly histogram at roughly 96,000 buckets. OpenSearch caps a search at `search.max_buckets` (default 65,535) and rejects the whole search when it is exceeded, including the aggregations that had nothing to do with the date field.
+
+A fixed interval over an unbounded range cannot survive, so either the interval or the range has to give. The emitter bends the interval and never the range: narrowing the range would silently drop documents from the answer, while a coarser interval still counts every document and only lowers resolution.
+
+**Declare `bounds` when you need the interval fixed.** The bounds pin the range, so the declared interval is emitted as-is:
+
+```typespec
+@searchable
+@aggregatable("date_histogram", #{ interval: "month", bounds: #{ min: "2020-01-01T00:00:00Z", max: "now" } })
+validTo: utcDateTime;
+```
+
+This emits a `date_histogram` with `calendar_interval` and `hard_bounds`. `min` and `max` each accept an ISO 8601 instant or OpenSearch date math (`"now-5y"`); at least one is required, and an omitted end tracks the data. Documents outside the bounds still match the query and count toward `totalCount` — only the buckets stop there.
+
+**Without `bounds`, the emitter caps the bucket count instead.** It emits an `auto_date_histogram` with `minimum_interval` set to your declared interval, so OpenSearch uses that interval whenever the range allows and steps to a coarser one only when it would not fit. Normal data keeps its declared interval; the sentinel case above returns yearly buckets and a chart that renders rather than a failed search. The response reports the interval actually chosen.
+
+The ceiling is 10,000 buckets, configurable via [`graphql.auto-date-histogram-buckets`](#emitter-options). It holds 833 years of monthly buckets, 27 years of daily and 1.1 years of hourly — past any real corpus — and stays an order of magnitude under `search.max_buckets` so one histogram cannot starve the aggregations beside it.
+
+**`week` and `quarter` are the exception.** OpenSearch's `minimum_interval` accepts only `year`, `month`, `day`, `hour`, `minute` and `second`, so these two intervals have no automatic ceiling: flooring at `day` or `month` would silently make the chart finer than declared, and `year` would make it coarser. They keep the plain `date_histogram` they have always emitted, and the emitter warns that `bounds` is the only lever available. Declare `bounds` on a `week` or `quarter` histogram whose field may hold a sentinel.
 
 The `.keyword` sub-field is applied automatically when the underlying type is text. Numeric, date, and `@keyword` fields use the bare field name. Filter-only / agg-only fields (no `@searchable`) are mapped as plain keyword in OpenSearch — see [Decorator coverage](#searchable-and-searchprojectiont) for what each decorator contributes.
 

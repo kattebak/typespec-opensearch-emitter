@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
+	getAggregatableDirectives,
 	getAggregatableKinds,
 	getAnalyzer,
 	getBoost,
@@ -411,6 +412,113 @@ describe("decorators", () => {
 
 		const codes = diagnostics.map((x) => x.code);
 		assert.equal(hasDiagnosticCode(codes, "invalid-aggregation-kind"), true);
+	});
+
+	it("stores date_histogram bounds", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("date_histogram", #{ interval: "month", bounds: #{ min: "2020-01-01T00:00:00Z", max: "now" } })
+        @searchable validTo: utcDateTime;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const validTo = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("validTo");
+		assert.ok(validTo);
+		assert.deepEqual(getAggregatableDirectives(runner.program, validTo), [
+			{
+				kind: "date_histogram",
+				options: {
+					interval: "month",
+					bounds: { min: "2020-01-01T00:00:00Z", max: "now" },
+				},
+			},
+		]);
+	});
+
+	it("accepts date_histogram bounds with only one end", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("date_histogram", #{ interval: "month", bounds: #{ max: "now" } })
+        @searchable validTo: utcDateTime;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const validTo = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("validTo");
+		assert.ok(validTo);
+		assert.deepEqual(getAggregatableDirectives(runner.program, validTo), [
+			{
+				kind: "date_histogram",
+				options: { interval: "month", bounds: { max: "now" } },
+			},
+		]);
+	});
+
+	it("emits diagnostic for empty date_histogram bounds", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("date_histogram", #{ interval: "month", bounds: #{} })
+        @searchable validTo: utcDateTime;
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "invalid-aggregation-options"), true);
+	});
+
+	// Issue #150: auto_date_histogram's minimum_interval has no week/quarter
+	// spelling, so these two intervals cannot get an automatic bucket ceiling.
+	// Warn rather than error — existing specs must keep compiling.
+	it("warns when a week/quarter date_histogram declares no bounds", async () => {
+		for (const interval of ["week", "quarter"]) {
+			const runner = await createRunner();
+			const diagnostics = await runner.diagnose(`
+        model Product {
+          @aggregatable("date_histogram", #{ interval: "${interval}" })
+          @searchable validTo: utcDateTime;
+        }
+      `);
+
+			const warning = diagnostics.find(
+				(x) => x.code.indexOf("unboundable-date-histogram-interval") !== -1,
+			);
+			assert.ok(warning, `${interval} without bounds should warn`);
+			assert.equal(warning.severity, "warning");
+		}
+	});
+
+	it("does not warn when a week/quarter date_histogram declares bounds", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("date_histogram", #{ interval: "week", bounds: #{ min: "now-1y", max: "now" } })
+        @searchable validTo: utcDateTime;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+	});
+
+	it("does not warn for an interval auto_date_histogram can floor", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("date_histogram", #{ interval: "month" })
+        @searchable validTo: utcDateTime;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
 	});
 
 	it("stores @filterable kinds with single argument", async () => {

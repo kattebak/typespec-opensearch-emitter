@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Type } from "@typespec/compiler";
-import { emitGraphQLResolver } from "./emit-graphql-resolver.js";
+import {
+	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
+	emitGraphQLResolver,
+} from "./emit-graphql-resolver.js";
 import type { ResolvedProjection } from "./projection.js";
 
 function makeProjection(
@@ -1088,7 +1091,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("emits date_histogram with calendar_interval option", async () => {
+	it("emits an auto_date_histogram floored at the declared interval when no bounds are given", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({
@@ -1101,16 +1104,164 @@ describe("emitGraphQLResolver", () => {
 			],
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const content = combinedContent(result);
 		assert.ok(
-			combinedContent(result).includes(
-				'{n:"byValidFromOverTime",a:{ date_histogram: { field: "validFrom", calendar_interval: "month" } }}',
+			content.includes('{n:"byValidFromOverTime",a:ADH("validFrom", "month")}'),
+		);
+		assert.ok(
+			content.includes(
+				`const ADH = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m, buckets: ${DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS} } });`,
 			),
+			"the bounds-less form must cap buckets rather than the range",
+		);
+		assert.ok(
+			!content.includes("calendar_interval"),
+			"an unbounded histogram must not pin a fixed interval over an unbounded range",
 		);
 		assert.ok(
 			combinedContent(result).includes(
 				"byValidFromOverTime: (_a.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: `${b.key_as_string ?? b.key}`, keyAsString: b.key_as_string ?? null, count: b.doc_count }))",
 			),
 			"date_histogram response must use template-literal coercion (APPSYNC_JS forbids String()) and surface keyAsString",
+		);
+	});
+
+	it("emits a real date_histogram at the declared interval when bounds are given", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{
+							kind: "date_histogram",
+							options: {
+								interval: "month",
+								bounds: { min: "2020-01-01T00:00:00Z", max: "now" },
+							},
+						},
+					],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const content = combinedContent(result);
+		assert.ok(
+			content.includes(
+				'{n:"byValidFromOverTime",a:{ date_histogram: { field: "validFrom", calendar_interval: "month", hard_bounds: {"min":"2020-01-01T00:00:00Z","max":"now"} } }}',
+			),
+			"declared bounds pin the range, so the declared interval is safe to emit",
+		);
+		assert.ok(
+			!content.includes("ADH"),
+			"a bounded histogram needs no auto_date_histogram helper",
+		);
+	});
+
+	it("keeps a week/quarter histogram at its declared interval (no minimum_interval spelling exists)", async () => {
+		for (const interval of ["week", "quarter"] as const) {
+			const projection = makeProjection({
+				fields: [
+					makeField({
+						name: "validFrom",
+						type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+						aggregations: [{ kind: "date_histogram", options: { interval } }],
+					}),
+				],
+			});
+			const result = await emitGraphQLResolver(projection, defaultOptions);
+			const content = combinedContent(result);
+			assert.ok(
+				content.includes(
+					`{n:"byValidFromOverTime",a:{ date_histogram: { field: "validFrom", calendar_interval: "${interval}" } }}`,
+				),
+				`${interval} must keep its declared interval rather than silently shift resolution`,
+			);
+			assert.ok(
+				!content.includes("auto_date_histogram"),
+				`auto_date_histogram cannot express a ${interval} floor`,
+			);
+		}
+	});
+
+	it("honours a configured auto-date-histogram bucket ceiling", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "day" } },
+					],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, {
+			...defaultOptions,
+			autoDateHistogramBuckets: 512,
+		});
+		assert.ok(combinedContent(result).includes("buckets: 512 } });"));
+	});
+
+	// Issue #150 (2): an open-ended adoption carries a far-future sentinel
+	// `validTo`. A monthly histogram over that range spans ~96,000 buckets and
+	// OpenSearch rejects the whole search past search.max_buckets (65,535).
+	it("emits a bounded-bucket query for sentinel-dated nested date fields (issue #150)", async () => {
+		const projection = makeProjection({
+			name: "PetSearchDoc",
+			indexName: "pets",
+			fields: [
+				makeField({
+					name: "adoptions",
+					nested: true,
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: {
+						projectionModel: { name: "AdoptionSearchDoc" },
+						sourceModel: { name: "Adoption" },
+						indexName: "adoptions",
+						fields: [
+							makeField({
+								name: "status",
+								keyword: true,
+								filterables: ["term"],
+								aggregations: ["terms"],
+							}),
+							makeField({
+								name: "validTo",
+								type: {
+									kind: "Scalar",
+									name: "utcDateTime",
+								} as unknown as Type,
+								aggregations: [
+									{ kind: "date_histogram", options: { interval: "month" } },
+								],
+							}),
+						],
+					} as unknown as ResolvedProjection,
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const content = combinedContent(result);
+		assert.ok(
+			content.includes('a:ADH("adoptions.validTo", "month")'),
+			"the sentinel-prone field must cap its bucket count",
+		);
+		// The bucket ceiling is what makes the query survivable: OpenSearch
+		// returns at most this many buckets whatever the range holds, so a
+		// year-9999 sentinel yields coarser buckets instead of a rejected search.
+		assert.ok(
+			DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS < 65_535,
+			"the ceiling must sit under OpenSearch's default search.max_buckets",
+		);
+		assert.ok(
+			!content.includes("calendar_interval"),
+			"no unbounded fixed-interval histogram may survive in the emitted query",
 		);
 	});
 

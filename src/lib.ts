@@ -23,6 +23,16 @@ export interface GraphQLEmitterOptions {
 	 * cap minus headroom). Issue #112.
 	 */
 	"monolithic-threshold-bytes"?: number;
+	/**
+	 * `buckets` for the `auto_date_histogram` emitted when a
+	 * `@aggregatable("date_histogram", ...)` declares no bounds. It is the
+	 * ceiling on returned buckets, so it decides how wide a range still keeps
+	 * the declared interval before OpenSearch steps to a coarser one. Default:
+	 * 10000 — 833 years of monthly buckets, 27 years of daily, and an order of
+	 * magnitude under the 65,535 `search.max_buckets` a request may not exceed.
+	 * Issue #150.
+	 */
+	"auto-date-histogram-buckets"?: number;
 	directives?: GraphQLDirectivesOptions;
 }
 
@@ -95,6 +105,12 @@ export const $lib = createTypeSpecLibrary({
 			severity: "error",
 			messages: {
 				default: "@indexSettings value must be valid JSON.",
+			},
+		},
+		"unboundable-date-histogram-interval": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`@aggregatable("date_histogram", { interval: "${"interval"}" }) has no bounds, and OpenSearch cannot express a "${"interval"}" floor for auto_date_histogram. This histogram spans whatever range the data holds, so a far-future sentinel date (e.g. 9999-12-31) will exceed search.max_buckets and fail the search. Add bounds: { min, max } to pin the range.`,
 			},
 		},
 		"positive-boost-required": {
@@ -251,6 +267,11 @@ export const $lib = createTypeSpecLibrary({
 							type: "number",
 							nullable: true,
 							default: 32000,
+						},
+						"auto-date-histogram-buckets": {
+							type: "number",
+							nullable: true,
+							default: 10000,
 						},
 						directives: {
 							type: "object",
