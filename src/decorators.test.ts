@@ -456,7 +456,10 @@ describe("decorators", () => {
 			?.properties.get("validTo");
 		assert.ok(validTo);
 		assert.deepEqual(getAggregatableDirectives(runner.program, validTo), [
-			{ kind: "date_histogram", options: { interval: "month", bounds: { max: "now" } } },
+			{
+				kind: "date_histogram",
+				options: { interval: "month", bounds: { max: "now" } },
+			},
 		]);
 	});
 

@@ -1106,9 +1106,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		const content = combinedContent(result);
 		assert.ok(
-			content.includes(
-				'{n:"byValidFromOverTime",a:ADH("validFrom", "month")}',
-			),
+			content.includes('{n:"byValidFromOverTime",a:ADH("validFrom", "month")}'),
 		);
 		assert.ok(
 			content.includes(

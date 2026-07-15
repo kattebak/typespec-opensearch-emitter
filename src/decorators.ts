@@ -529,7 +529,12 @@ function validateOptions(
 			}
 			return { interval };
 		}
-		const bounds = validateDateHistogramBounds(context, target, kind, raw.bounds);
+		const bounds = validateDateHistogramBounds(
+			context,
+			target,
+			kind,
+			raw.bounds,
+		);
 		if (!bounds) {
 			return undefined;
 		}
