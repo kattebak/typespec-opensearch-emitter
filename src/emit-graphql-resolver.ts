@@ -69,7 +69,10 @@ export interface ResolverOptions {
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
 
 /**
- * `buckets` ceiling for a bounds-less `auto_date_histogram` (issue #150).
+ * Per-histogram `buckets` ceiling for a bounds-less `auto_date_histogram`
+ * (issue #150). This is the most any single histogram gets; the emitted
+ * `buildAggs` lowers it when a request selects several histograms so their sum
+ * stays under the per-request budget (issue #155).
  *
  * `auto_date_histogram` returns at most this many buckets, picking the finest
  * interval at or above `minimum_interval` that fits. The value therefore sets
@@ -78,18 +81,34 @@ const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
  * — past any real corpus, so declared intervals survive. A 9999-12-31 sentinel
  * (~96,000 months) does not fit and steps down to yearly (~8,000 buckets),
  * which renders instead of failing.
- *
- * It stays an order of magnitude under OpenSearch's 65,535 `search.max_buckets`
- * on purpose: that cap counts every bucket in the request, so leaving headroom
- * keeps one histogram from starving the other aggregations beside it.
  */
 export const DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS = 10_000;
 
 /**
+ * Soft per-request bucket budget: a third of OpenSearch's default
+ * `search.max_buckets` (65,535). That cap counts every bucket in the whole
+ * request, not one aggregation, so the emitted `buildAggs` divides this budget
+ * across the `auto_date_histogram` aggregations a request actually selects
+ * (issue #155). A request that reaches the hard cap is already a 503; a third
+ * leaves room for the terms and metric buckets sharing the request.
+ */
+export const PER_REQUEST_BUCKET_BUDGET = 21_845;
+
+/**
+ * Lower bound on the per-histogram bucket count after the budget is divided, so
+ * a request selecting many histograms still renders a legible chart instead of
+ * a handful of buckets. Below ~256 buckets a time series stops being readable;
+ * this floor only binds past ~85 selected histograms.
+ */
+export const MIN_AUTO_DATE_HISTOGRAM_BUCKETS = 256;
+
+/**
  * Module-level helper the emitted AGG_SPEC calls for each bounds-less
- * date_histogram. `buckets` is identical across every such entry and the
- * `auto_date_histogram` key is long, so factoring both out of the literal keeps
- * wide projections under AppSync's 32 KB per-function cap (issues #99, #105).
+ * date_histogram. The `auto_date_histogram` key is long and repeats across
+ * every such entry, so factoring it out of the literal keeps wide projections
+ * under AppSync's 32 KB per-function cap (issues #99, #105). `buckets` is set
+ * per request by `buildAggs`, not baked here, so it can vary with how many
+ * histograms a request selects (issue #155).
  */
 const AUTO_DATE_HISTOGRAM_HELPER = "ADH";
 
@@ -239,8 +258,8 @@ function renderMonolithicResolver(
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
-	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations, options);
-	const buildAggsFunction = renderBuildAggsFunction(aggregations);
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const buildAggsFunction = renderBuildAggsFunction(aggregations, options);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 	const responseAggregationsPreamble =
@@ -601,8 +620,8 @@ function renderPrepareFunction(
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
-	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations, options);
-	const buildAggsFunction = renderBuildAggsFunction(aggregations);
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const buildAggsFunction = renderBuildAggsFunction(aggregations, options);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
 	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
 	// — saves ~5 bytes per slot. The walker never reads these init values; it
@@ -1013,17 +1032,12 @@ function stringifyNode(node: FilterSpecNode): string {
  * under. `buildAggs` reads it at request time. Returns "" when the projection
  * has no aggregations at all.
  */
-function renderAggSpecDeclaration(
-	aggregations: AggregationEntry[],
-	options: ResolverOptions,
-): string {
+function renderAggSpecDeclaration(aggregations: AggregationEntry[]): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
-	const buckets =
-		options.autoDateHistogramBuckets ?? DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS;
 	const helper = aggregations.some(usesAutoDateHistogram)
-		? `\nconst ${AUTO_DATE_HISTOGRAM_HELPER} = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m, buckets: ${buckets} } });\n`
+		? `\nconst ${AUTO_DATE_HISTOGRAM_HELPER} = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m } });\n`
 		: "";
 	return `${helper}\nconst AGG_SPEC = ${renderAggSpecLiteral(aggregations)};\n`;
 }
@@ -1033,6 +1047,15 @@ function renderAggSpecDeclaration(
  * date_histogram with no author-declared bounds, at an interval OpenSearch can
  * express as a `minimum_interval`.
  */
+/**
+ * `,h:1` marks an AGG_SPEC entry that renders through the helper, so buildAggs
+ * can count it against the per-request bucket budget and set its `buckets`
+ * (issue #155). Empty for every other aggregation kind.
+ */
+function histogramFlag(entry: AggregationEntry): string {
+	return usesAutoDateHistogram(entry) ? ",h:1" : "";
+}
+
 function usesAutoDateHistogram(entry: AggregationEntry): boolean {
 	if (entry.kind !== "date_histogram") {
 		return false;
@@ -1080,7 +1103,7 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
 			if (flatSeen.has(entry.aggName)) continue;
 			flatSeen.add(entry.aggName);
 			flatItems.push(
-				`{n:${JSON.stringify(entry.aggName)},a:${renderAggInner(entry)}}`,
+				`{n:${JSON.stringify(entry.aggName)},a:${renderAggInner(entry)}${histogramFlag(entry)}}`,
 			);
 			continue;
 		}
@@ -1102,7 +1125,7 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
 		const pathLit = JSON.stringify(path);
 		for (const entry of group) {
 			groupItems.push(
-				`{n:${JSON.stringify(entry.aggName)},g:${groupKey},p:${pathLit},a:${renderAggInner(entry)}}`,
+				`{n:${JSON.stringify(entry.aggName)},g:${groupKey},p:${pathLit},a:${renderAggInner(entry)}${histogramFlag(entry)}}`,
 			);
 		}
 	}
@@ -1135,12 +1158,44 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
  * aggregation (`byAlias: bySpecies`) reads as declared, so no fallback fires and
  * the wrong aggregation is sent — undetectable from `selectionSetList` alone.
  *
+ * Each selected `auto_date_histogram` (marked `h:1`) has its `buckets` set from
+ * a per-request budget divided across the histograms actually sent, so their
+ * sum stays under OpenSearch's `search.max_buckets` however many are selected
+ * (issue #155). The alias fallback selects every aggregation, so its histograms
+ * count toward the same budget.
+ *
  * Returns "" when the projection has no aggregations at all.
  */
-function renderBuildAggsFunction(aggregations: AggregationEntry[]): string {
+function renderBuildAggsFunction(
+	aggregations: AggregationEntry[],
+	options: ResolverOptions,
+): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
+	const cap =
+		options.autoDateHistogramBuckets ?? DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS;
+	// Only projections with a bounds-less date_histogram carry `h:1` markers, so
+	// only they need the per-request budget division (issue #155). Everything
+	// else keeps the leaner selection-only assembly.
+	const hasAuto = aggregations.some(usesAutoDateHistogram);
+	const trackHistogram = hasAuto
+		? "\n\t\t\tif (spec.h) histograms.push(spec);"
+		: "";
+	const histogramDecl = hasAuto ? "\n\tconst histograms = [];" : "";
+	const budgetBlock = hasAuto
+		? `
+	// search.max_buckets caps the whole request: divide a soft budget across the
+	// selected histograms, capped and floored per histogram (issue #155).
+	if (histograms.length > 0) {
+		let budget = Math.floor(${PER_REQUEST_BUCKET_BUDGET} / histograms.length);
+		if (budget > ${cap}) budget = ${cap};
+		if (budget < ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS}) budget = ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS};
+		for (const spec of histograms) {
+			spec.a.auto_date_histogram.buckets = budget;
+		}
+	}`
+		: "";
 	return `
 function buildAggs(selectionSetList) {
 	// A first segment under \`aggregations/\` naming no AGG_SPEC entry is an
@@ -1161,10 +1216,10 @@ function buildAggs(selectionSetList) {
 	}
 	// \`null\` means nothing was requested, and the request omits \`aggs\` entirely.
 	const aggs = {};
-	let requested = false;
+	let requested = false;${histogramDecl}
 	for (const spec of AGG_SPEC) {
 		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
-			requested = true;
+			requested = true;${trackHistogram}
 			if (spec.g) {
 				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
 				group.aggs[spec.n] = spec.a;
@@ -1173,7 +1228,7 @@ function buildAggs(selectionSetList) {
 				aggs[spec.n] = spec.a;
 			}
 		}
-	}
+	}${budgetBlock}
 	return requested ? aggs : null;
 }
 `;

@@ -7,6 +7,8 @@ import type { Type } from "@typespec/compiler";
 import {
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 	emitGraphQLResolver,
+	MIN_AUTO_DATE_HISTOGRAM_BUCKETS,
+	PER_REQUEST_BUCKET_BUDGET,
 } from "./emit-graphql-resolver.js";
 import type { ResolvedProjection } from "./projection.js";
 
@@ -1105,14 +1107,26 @@ describe("emitGraphQLResolver", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		const content = combinedContent(result);
+		// The `,h:1` marker lets buildAggs count the entry against the
+		// per-request bucket budget (issue #155).
 		assert.ok(
-			content.includes('{n:"byValidFromOverTime",a:ADH("validFrom", "month")}'),
+			content.includes(
+				'{n:"byValidFromOverTime",a:ADH("validFrom", "month"),h:1}',
+			),
+		);
+		// buildAggs sets `buckets` per request from the divided budget, so the
+		// helper no longer bakes a fixed ceiling.
+		assert.ok(
+			content.includes(
+				"const ADH = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m } });",
+			),
+			"the bounds-less form must cap buckets rather than the range",
 		);
 		assert.ok(
 			content.includes(
-				`const ADH = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m, buckets: ${DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS} } });`,
+				`if (budget > ${DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS}) budget = ${DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS};`,
 			),
-			"the bounds-less form must cap buckets rather than the range",
+			"the per-histogram ceiling is applied in buildAggs' budget division",
 		);
 		assert.ok(
 			!content.includes("calendar_interval"),
@@ -1200,7 +1214,19 @@ describe("emitGraphQLResolver", () => {
 			...defaultOptions,
 			autoDateHistogramBuckets: 512,
 		});
-		assert.ok(combinedContent(result).includes("buckets: 512 } });"));
+		// The configured value is the per-histogram ceiling buildAggs applies
+		// when dividing the per-request bucket budget (issue #155).
+		assert.ok(
+			combinedContent(result).includes("if (budget > 512) budget = 512;"),
+		);
+		const body = evalRequestBody(prepareFunctionContent(result), {
+			selectionSetList: ["aggregations", "aggregations/byValidFromOverTime"],
+		});
+		const aggs = body.aggs as Record<
+			string,
+			{ auto_date_histogram: { buckets: number } }
+		>;
+		assert.equal(aggs.byValidFromOverTime.auto_date_histogram.buckets, 512);
 	});
 
 	// Issue #150 (2): an open-ended adoption carries a far-future sentinel
@@ -2686,6 +2712,235 @@ describe("emitGraphQLResolver datasource error propagation (issue #150)", () => 
 			result: okBody,
 		}) as { totalCount: number };
 		assert.equal(shaped.totalCount, 1);
+	});
+});
+
+describe("emitGraphQLResolver histogram bucket budget (issue #155)", () => {
+	// search.max_buckets (65,535) caps the whole request, not one aggregation.
+	// A request selecting several histograms divides a per-request budget across
+	// them rather than giving each its own ceiling, so their sum stays under the
+	// cap however many are selected.
+	function histogramProjection(count: number): ResolvedProjection {
+		return makeProjection({
+			fields: Array.from({ length: count }, (_, i) =>
+				makeField({
+					name: `h${i}`,
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+			),
+		});
+	}
+
+	// Reads the auto_date_histogram agg names (marked `,h:1`) straight off the
+	// emitted AGG_SPEC, so the tests don't depend on the field-name → agg-name
+	// derivation.
+	function histogramAggNames(source: string): string[] {
+		const names: string[] = [];
+		const re = /\{n:"([^"]+)"[^}]*,h:1\}/g;
+		let match = re.exec(source);
+		while (match) {
+			names.push(match[1]);
+			match = re.exec(source);
+		}
+		return names;
+	}
+
+	function bucketsOf(body: Record<string, unknown>, name: string): number {
+		const aggs = body.aggs as Record<
+			string,
+			{ auto_date_histogram?: { buckets?: number } }
+		>;
+		const buckets = aggs[name]?.auto_date_histogram?.buckets;
+		assert.equal(
+			typeof buckets,
+			"number",
+			`expected numeric buckets on ${name}; got aggs=${JSON.stringify(aggs)}`,
+		);
+		return buckets as number;
+	}
+
+	function expectedBudget(
+		selected: number,
+		cap = DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
+	): number {
+		let budget = Math.floor(PER_REQUEST_BUCKET_BUDGET / selected);
+		if (budget > cap) budget = cap;
+		if (budget < MIN_AUTO_DATE_HISTOGRAM_BUCKETS)
+			budget = MIN_AUTO_DATE_HISTOGRAM_BUCKETS;
+		return budget;
+	}
+
+	function aggSelection(names: string[]): { selectionSetList: string[] } {
+		return {
+			selectionSetList: [
+				"aggregations",
+				...names.map((n) => `aggregations/${n}`),
+			],
+		};
+	}
+
+	it("divides the per-request budget across the histograms actually selected", async () => {
+		const result = await emitGraphQLResolver(
+			histogramProjection(5),
+			defaultOptions,
+		);
+		const source = prepareFunctionContent(result);
+		const names = histogramAggNames(source);
+		assert.equal(names.length, 5);
+
+		const body = evalRequestBody(source, aggSelection(names));
+		const expected = expectedBudget(5); // floor(21845 / 5) = 4369
+		for (const name of names) {
+			assert.equal(bucketsOf(body, name), expected);
+		}
+	});
+
+	it("budgets against the selected count, not every declared histogram", async () => {
+		const result = await emitGraphQLResolver(
+			histogramProjection(5),
+			defaultOptions,
+		);
+		const source = prepareFunctionContent(result);
+		const selected = histogramAggNames(source).slice(0, 3);
+
+		const body = evalRequestBody(source, aggSelection(selected));
+		assert.deepEqual(
+			Object.keys(body.aggs as Record<string, unknown>).sort(),
+			[...selected].sort(),
+		);
+		const expected = expectedBudget(3); // floor(21845 / 3) = 7281
+		for (const name of selected) {
+			assert.equal(bucketsOf(body, name), expected);
+		}
+	});
+
+	it("gives a single selected histogram the full per-histogram ceiling", async () => {
+		const result = await emitGraphQLResolver(
+			histogramProjection(1),
+			defaultOptions,
+		);
+		const source = prepareFunctionContent(result);
+		const [name] = histogramAggNames(source);
+
+		const body = evalRequestBody(source, aggSelection([name]));
+		// floor(21845 / 1) exceeds the ceiling, so the ceiling wins.
+		assert.equal(bucketsOf(body, name), DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS);
+	});
+
+	it("floors the per-histogram budget so a wide selection stays legible", async () => {
+		const result = await emitGraphQLResolver(
+			histogramProjection(100),
+			defaultOptions,
+		);
+		const source = prepareFunctionContent(result);
+		const names = histogramAggNames(source);
+		assert.equal(names.length, 100);
+
+		const body = evalRequestBody(source, aggSelection(names));
+		// floor(21845 / 100) = 218 < the floor, so every histogram clamps to it.
+		for (const name of names) {
+			assert.equal(bucketsOf(body, name), MIN_AUTO_DATE_HISTOGRAM_BUCKETS);
+		}
+	});
+
+	it("counts the alias fallback's histograms against the same budget", async () => {
+		// An aliased aggregation names no AGG_SPEC entry, so the fallback sends
+		// every aggregation. Those histograms must divide the budget too, or the
+		// fallback reintroduces the per-request blowout.
+		const result = await emitGraphQLResolver(
+			histogramProjection(5),
+			defaultOptions,
+		);
+		const source = prepareFunctionContent(result);
+		const names = histogramAggNames(source);
+
+		const body = evalRequestBody(source, {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/whateverAlias",
+				"aggregations/whateverAlias/key",
+			],
+		});
+		assert.deepEqual(
+			Object.keys(body.aggs as Record<string, unknown>).sort(),
+			[...names].sort(),
+		);
+		const expected = expectedBudget(names.length); // 5 -> 4369
+		for (const name of names) {
+			assert.equal(bucketsOf(body, name), expected);
+		}
+	});
+
+	it("leaves an author-bounded histogram out of the budget (bounds opt-out)", async () => {
+		// Declared bounds pin the range, so the histogram is the author's
+		// explicit choice: it keeps its fixed interval and hard_bounds, carries
+		// no bucket cap, and does not consume the auto-histogram budget.
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "bounded",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{
+							kind: "date_histogram",
+							options: {
+								interval: "month",
+								bounds: { min: "now-5y", max: "now" },
+							},
+						},
+					],
+				}),
+				...Array.from({ length: 4 }, (_, i) =>
+					makeField({
+						name: `auto${i}`,
+						type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+						aggregations: [
+							{ kind: "date_histogram", options: { interval: "month" } },
+						],
+					}),
+				),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const source = prepareFunctionContent(result);
+		const autoNames = histogramAggNames(source);
+		assert.equal(
+			autoNames.length,
+			4,
+			"only the bounds-less histograms carry the h:1 budget marker",
+		);
+
+		const body = evalRequestBody(source, {
+			selectionSetList: [
+				"aggregations",
+				"aggregations/byBoundedOverTime",
+				...autoNames.map((n) => `aggregations/${n}`),
+			],
+		});
+		const aggs = body.aggs as Record<
+			string,
+			{
+				date_histogram?: { hard_bounds?: unknown };
+				auto_date_histogram?: { buckets?: number };
+			}
+		>;
+		assert.ok(
+			aggs.byBoundedOverTime.date_histogram?.hard_bounds,
+			"a bounded histogram keeps its declared hard_bounds",
+		);
+		assert.equal(
+			aggs.byBoundedOverTime.auto_date_histogram,
+			undefined,
+			"a bounded histogram is not emitted as an auto_date_histogram",
+		);
+		// Only the 4 auto histograms divide the budget; the bounded one does not.
+		const expected = expectedBudget(4); // floor(21845 / 4) = 5461
+		for (const name of autoNames) {
+			assert.equal(bucketsOf(body, name), expected);
+		}
 	});
 });
 

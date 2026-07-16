@@ -547,7 +547,7 @@ This emits a `date_histogram` with `calendar_interval` and `hard_bounds`. `min` 
 
 **Without `bounds`, the emitter caps the bucket count instead.** It emits an `auto_date_histogram` with `minimum_interval` set to your declared interval, so OpenSearch uses that interval whenever the range allows and steps to a coarser one only when it would not fit. Normal data keeps its declared interval; the sentinel case above returns yearly buckets and a chart that renders rather than a failed search. The response reports the interval actually chosen.
 
-The ceiling is 10,000 buckets, configurable via [`graphql.auto-date-histogram-buckets`](#emitter-options). It holds 833 years of monthly buckets, 27 years of daily and 1.1 years of hourly — past any real corpus — and stays an order of magnitude under `search.max_buckets` so one histogram cannot starve the aggregations beside it.
+The per-histogram ceiling is 10,000 buckets, configurable via [`graphql.auto-date-histogram-buckets`](#emitter-options) — 833 years of monthly buckets, 27 years of daily, 1.1 years of hourly, past any real corpus. `search.max_buckets` counts every bucket in a request, not one aggregation, so a request selecting several histograms divides a soft budget across them: a third of `search.max_buckets` (≈21,845) split by the number of histograms actually selected, capped at the ceiling and floored at 256 so a chart stays legible. Their sum stays under the request limit however many are selected, and the alias fallback that sends every aggregation counts toward the same budget.
 
 **`week` and `quarter` are the exception.** OpenSearch's `minimum_interval` accepts only `year`, `month`, `day`, `hour`, `minute` and `second`, so these two intervals have no automatic ceiling: flooring at `day` or `month` would silently make the chart finer than declared, and `year` would make it coarser. They keep the plain `date_histogram` they have always emitted, and the emitter warns that `bounds` is the only lever available. Declare `bounds` on a `week` or `quarter` histogram whose field may hold a sentinel.
 
@@ -589,14 +589,14 @@ Emitted code must also stay in the APPSYNC_JS supported subset. `src/emit-graphq
 
 #### Guards
 
-Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured on `277755b`:
+Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured after the per-request bucket budget (issue #155):
 
 | Projection | Resolver | Prepare | Search | Headroom |
 | --- | --- | --- | --- | --- |
-| counterparty shape (7 nested sub-models) | 8,991 | 24,497 | 742 | 8,271 |
-| synthetic wide (14 sub-models) | 14,458 | 32,482 | 732 | **286** |
+| counterparty shape (7 nested sub-models) | 8,991 | 24,754 | 742 | 8,014 |
+| synthetic wide (14 sub-models) | 14,458 | 32,452 | 732 | **316** |
 
-`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 286 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
+`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 316 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
 
 CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
 
