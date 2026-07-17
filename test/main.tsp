@@ -18,6 +18,7 @@ model Tag {
 // applied to its response-path types and Query field; the other three
 // projections in this fixture stay bare.
 @searchProjection
+@indexName("tag_search_doc")
 @graphqlDirectives("@aws_cognito_user_pools", "@aws_iam")
 model TagSearchDoc is SearchProjection<Tag> {}
 
@@ -37,6 +38,7 @@ model Pet {
 	@searchable score: float64;
 	@searchable active: boolean;
 	@searchable approvals: Approval[];
+	@searchable bankAccountApprovals: BankAccountApproval[];
 	internalNotes: string;
 }
 
@@ -55,6 +57,11 @@ model PetSearchDoc is SearchProjection<Pet> {
 	// (for use as an array element), but no Query field, no resolver, no
 	// OS index, no manifest entry.
 	approvals: ApprovalSearchDoc[];
+
+	// Issue #157 — same nested-only treatment, reached via the other gate:
+	// BankAccountApprovalSearchDoc carries @searchProjection but declares no
+	// @indexName, so there is no index for a Query field to target.
+	bankAccountApprovals: BankAccountApprovalSearchDoc[];
 }
 
 model Approval {
@@ -64,7 +71,20 @@ model Approval {
 
 model ApprovalSearchDoc is SearchProjection<Approval> {}
 
+model BankAccountApproval {
+	@searchable @keyword accountId: string;
+	@searchable @keyword approvedBy: string;
+}
+
+// Issue #157 — @searchProjection with no @indexName. The decorator alone used
+// to mint a top-level resolver pointed at a defaulted
+// `bank_account_approval_search_doc` index that nothing ever creates, so the
+// query failed at runtime with "Not Found".
 @searchProjection
+model BankAccountApprovalSearchDoc is SearchProjection<BankAccountApproval> {}
+
+@searchProjection
+@indexName("pet_public_search_doc")
 model PetPublicSearchDoc is SearchProjection<Pet> {
 	@keyword
 	name: string;
@@ -82,5 +102,6 @@ model Person {
 }
 
 @searchProjection
+@indexName("person_search_doc")
 @searchInfer
 model PersonSearchDoc is SearchProjection<Person> {}

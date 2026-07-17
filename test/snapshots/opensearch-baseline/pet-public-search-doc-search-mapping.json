@@ -96,6 +96,17 @@
             "type": "keyword"
           }
         }
+      },
+      "bankAccountApprovals": {
+        "type": "object",
+        "properties": {
+          "accountId": {
+            "type": "keyword"
+          },
+          "approvedBy": {
+            "type": "keyword"
+          }
+        }
       }
     }
   }

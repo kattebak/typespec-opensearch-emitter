@@ -10,17 +10,6 @@ import { reportDiagnostic, StateKeys } from "./lib.js";
 
 export const namespace = "Kattebak.OpenSearch";
 
-/**
- * Default index name derivation:
- * CounterpartySearchDoc -> counterparty_search_doc
- */
-export function deriveDefaultIndexName(modelName: string): string {
-	return modelName
-		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
-		.replace(/[-\s]+/g, "_")
-		.toLowerCase();
-}
-
 export function $searchable(
 	context: DecoratorContext,
 	target: ModelProperty,
@@ -271,11 +260,16 @@ export function $indexName(
 	context.program.stateMap(StateKeys.indexName).set(target, name);
 }
 
-export function getIndexName(program: Program, target: Model): string {
-	return (
-		program.stateMap(StateKeys.indexName).get(target) ??
-		deriveDefaultIndexName(target.name)
-	);
+/**
+ * The declared index name, or `undefined` when the model carries no
+ * `@indexName`. Absence is meaningful: it marks the projection as nested-only,
+ * so it gets no backing OpenSearch index and no top-level wiring (issue #157).
+ */
+export function getIndexName(
+	program: Program,
+	target: Model,
+): string | undefined {
+	return program.stateMap(StateKeys.indexName).get(target);
 }
 
 export function $indexSettings(
@@ -854,7 +848,6 @@ export function getSearchAs(
 }
 
 export const __test = {
-	deriveDefaultIndexName,
 	isArrayOfModelType,
 	isStringType,
 };

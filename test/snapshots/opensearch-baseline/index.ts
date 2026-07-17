@@ -1,5 +1,6 @@
 export type { Address } from "./address.js";
 export type { ApprovalSearchDoc } from "./approval-search-doc.js";
+export type { BankAccountApprovalSearchDoc } from "./bank-account-approval-search-doc.js";
 export type { PersonSearchDoc } from "./person-search-doc.js";
 export const PERSON_SEARCH_DOC_INDEX_NAME = "person_search_doc";
 export type { PetPublicSearchDoc } from "./pet-public-search-doc.js";

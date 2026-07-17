@@ -1,5 +1,6 @@
 import type { TagSearchDoc } from "./tag-search-doc.js";
 import type { ApprovalSearchDoc } from "./approval-search-doc.js";
+import type { BankAccountApprovalSearchDoc } from "./bank-account-approval-search-doc.js";
 
 export interface PetSearchDoc {
 	id: string;
@@ -19,4 +20,5 @@ export interface PetSearchDoc {
 	score: number;
 	active: boolean;
 	approvals: ApprovalSearchDoc[];
+	bankAccountApprovals: BankAccountApprovalSearchDoc[];
 }

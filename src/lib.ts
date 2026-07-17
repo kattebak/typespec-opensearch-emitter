@@ -101,6 +101,12 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Property "${"name"}" on projection model is not a @searchable property on source model ${"sourceModel"} and will be ignored.`,
 			},
 		},
+		"search-projection-without-index-name": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`Model "${"name"}" has @searchProjection but no @indexName, so it is emitted as a nested type only: no Query field, no resolver, and no backing index. Declare @indexName to emit it as top-level, or remove @searchProjection if nested-only is intended.`,
+			},
+		},
 		"invalid-index-settings-json": {
 			severity: "error",
 			messages: {

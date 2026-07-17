@@ -1,12 +1,12 @@
 import { collectSubProjections, toDocTypeFileName } from "./emit-doc-type.js";
-import type { ResolvedProjection } from "./projection.js";
+import type { ResolvedProjection, TopLevelProjection } from "./projection.js";
 
 export interface EmittedIndexFile {
 	fileName: string;
 	content: string;
 }
 
-export function emitIndex(projections: ResolvedProjection[]): EmittedIndexFile {
+export function emitIndex(projections: TopLevelProjection[]): EmittedIndexFile {
 	const sorted = [...projections].sort((a, b) =>
 		a.projectionModel.name.localeCompare(b.projectionModel.name),
 	);

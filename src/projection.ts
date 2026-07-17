@@ -66,10 +66,20 @@ export interface ResolvedProjectionField {
 export interface ResolvedProjection {
 	projectionModel: Model;
 	sourceModel: Model;
-	indexName: string;
+	/**
+	 * Set only when the model carries `@indexName`. Absent means the projection
+	 * is nested-only — no backing OpenSearch index exists for it (issue #157).
+	 */
+	indexName?: string;
 	indexSettings?: Record<string, unknown>;
 	fields: ResolvedProjectionField[];
 }
+
+/**
+ * A projection backed by a real OpenSearch index, and therefore eligible for
+ * top-level emission: Query field, resolver, mapping, manifest entry.
+ */
+export type TopLevelProjection = ResolvedProjection & { indexName: string };
 
 export function isSearchProjectionModel(
 	program: Program,

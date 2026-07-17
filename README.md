@@ -33,10 +33,11 @@ A field is included in the resolved projection if it carries any of `@searchable
 
 Filter-only / agg-only fields are mapped as `keyword` directly (no `text`+`keyword` sub-field) since there is no full-text-search surface. Fields with none of the three decorators are excluded from all projections.
 
-### Index name derivation
+### Index name
 
-- Use `@indexName("my_index_v1")` on a projection model to set an explicit index name.
-- If omitted, the index name is derived from the model name by converting PascalCase to snake_case (e.g. `PetSearchDoc` → `pet_search_doc`).
+- Use `@indexName("my_index_v1")` on a projection model to declare the index it is backed by.
+- A projection needs both `@searchProjection` and `@indexName` to be emitted top-level: Query field, resolver, mapping, and `graphql-resolvers.json` entry.
+- A projection missing either is emitted as a nested type only — a doc type plus a stripped SDL fragment, so a parent projection can reference it as a field type.
 
 ## Usage
 
@@ -263,7 +264,7 @@ In this example:
 | `@analyzer("name")` | `ModelProperty` (string) | Sets the text analyzer in mapping output. | `@analyzer("edge_ngram") name: string;` |
 | `@boost(n)` | `ModelProperty` | Sets field boost factor in mapping output. Must be > 0. | `@boost(2.0) name: string;` |
 | `@ignoreAbove(n)` | `ModelProperty` (string) | Overrides `ignore_above` on the keyword sub-field. Must be > 0. | `@ignoreAbove(1024) name: string;` |
-| `@indexName("name")` | `Model` (projection) | Sets an explicit index name for the projection. | `@indexName("pets_v1") model PetSearchDoc ...` |
+| `@indexName("name")` | `Model` (projection) | Declares the index backing the projection. Required for top-level emission; without it the projection is nested-only. | `@indexName("pets_v1") model PetSearchDoc ...` |
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
 | `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub or `"terms"`-with-`topHits`. `topHits: N` adds a `top_hits: { size: N }` sub-agg so each bucket carries up to N matching docs. `"date_histogram"` takes an optional `bounds: #{ min?, max? }` that pins its range and with it the declared interval; without bounds the emitter caps the bucket count instead — see [Bounding a `date_histogram`](#bounding-a-date_histogram). See [Aggregations](#aggregations-aggregatable). | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("terms", #{ topHits: 5 }) tagId: string;` / `@aggregatable("date_histogram", #{ interval: "month", bounds: #{ min: "now-5y", max: "now" } }) validTo: utcDateTime;` |

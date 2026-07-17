@@ -22,4 +22,8 @@ export interface PetPublicSearchDoc {
 		type: string;
 		grantedBy: string;
 	}[];
+	bankAccountApprovals: {
+		accountId: string;
+		approvedBy: string;
+	}[];
 }

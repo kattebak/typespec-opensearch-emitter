@@ -109,7 +109,7 @@ describe("decorators", () => {
 		assert.equal(getIndexName(runner.program, projection), "products_v1");
 	});
 
-	it("derives default index name from model name", async () => {
+	it("has no index name without @indexName (issue #157)", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
       model CounterpartySearchDoc is SearchProjection<Counterparty> {
@@ -127,10 +127,7 @@ describe("decorators", () => {
 			.getGlobalNamespaceType()
 			.models.get("CounterpartySearchDoc");
 		assert.ok(model);
-		assert.equal(
-			getIndexName(runner.program, model),
-			"counterparty_search_doc",
-		);
+		assert.equal(getIndexName(runner.program, model), undefined);
 	});
 
 	it("marks string property as graphql ID (issue #136)", async () => {

@@ -3,7 +3,10 @@ import { describe, it } from "node:test";
 import type { Model } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import { __test } from "./emitter.js";
-import type { ResolvedProjection } from "./projection.js";
+import {
+	type ResolvedProjection,
+	resolveProjectionModel,
+} from "./projection.js";
 import type { ResolvedRestOperation } from "./rest-operations.js";
 import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
@@ -606,5 +609,61 @@ describe("isTemplateDeclaration", () => {
 	it("returns false when model has no node", () => {
 		const model = {} as unknown as Model;
 		assert.equal(__test.isTemplateDeclaration(model), false);
+	});
+});
+
+const DEMOTION_CODE =
+	"@kattebak/typespec-opensearch-emitter/search-projection-without-index-name";
+
+describe("reportDemotedProjections (issue #157)", () => {
+	async function resolveAll(source: string, names: string[]) {
+		const runner = await createRunner();
+		await runner.diagnose(source);
+		const resolved = names.map((name) => {
+			const model = runner.program.getGlobalNamespaceType().models.get(name);
+			assert.ok(model, `fixture model ${name} must exist`);
+			const projection = resolveProjectionModel(runner.program, model);
+			assert.ok(projection);
+			return projection;
+		});
+		return { runner, resolved };
+	}
+
+	const source = `
+      model Widget {
+        @searchable name: string;
+      }
+
+      @searchProjection
+      model DemotedSearchDoc is SearchProjection<Widget> {}
+
+      model UndecoratedSearchDoc is SearchProjection<Widget> {}
+    `;
+
+	it("warns when @searchProjection carries no @indexName", async () => {
+		const { runner, resolved } = await resolveAll(source, ["DemotedSearchDoc"]);
+
+		__test.reportDemotedProjections(runner.program, resolved);
+
+		const relevant = runner.program.diagnostics.filter(
+			(d) => d.code === DEMOTION_CODE,
+		);
+		assert.equal(relevant.length, 1);
+		assert.equal(relevant[0].severity, "warning");
+		assert.ok(relevant[0].message.includes("DemotedSearchDoc"));
+		assert.ok(relevant[0].message.includes("@indexName"));
+	});
+
+	it("stays silent for a projection that never asked to be top-level", async () => {
+		const { runner, resolved } = await resolveAll(source, [
+			"UndecoratedSearchDoc",
+		]);
+
+		__test.reportDemotedProjections(runner.program, resolved);
+
+		assert.equal(
+			runner.program.diagnostics.filter((d) => d.code === DEMOTION_CODE).length,
+			0,
+		);
 	});
 });
