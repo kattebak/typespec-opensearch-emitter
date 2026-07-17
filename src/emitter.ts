@@ -29,7 +29,7 @@ import {
 	emitRestSdl,
 	restSdlFileName,
 } from "./emit-rest-sdl.js";
-import type { OpenSearchEmitterOptions } from "./lib.js";
+import { type OpenSearchEmitterOptions, reportDiagnostic } from "./lib.js";
 import {
 	isSearchProjectionModel,
 	type ResolvedProjection,
@@ -85,6 +85,8 @@ export async function $onEmit(
 
 	const topLevel = resolved.filter(isTopLevel);
 	const nestedOnly = resolved.filter((projection) => !isTopLevel(projection));
+
+	reportDemotedProjections(context.program, nestedOnly);
 
 	for (const projection of topLevel) {
 		const docTypeFile = emitDocType(context.program, projection);
@@ -493,8 +495,30 @@ function generateGraphQLManifest(
 	return `${JSON.stringify({ resolvers: allResolvers }, null, 2)}\n`;
 }
 
+/**
+ * Issue #157 — `@searchProjection` states an intent for top-level emission.
+ * Without `@indexName` that intent is discarded, and the result is
+ * byte-identical to an undecorated model, so the demotion is invisible in the
+ * build output. Warn per demoted projection: regenerating a downstream package
+ * then enumerates exactly which Query fields it lost.
+ */
+function reportDemotedProjections(
+	program: Program,
+	nestedOnly: ResolvedProjection[],
+): void {
+	for (const projection of nestedOnly) {
+		if (!isSearchProjection(program, projection.projectionModel)) continue;
+		reportDiagnostic(program, {
+			code: "search-projection-without-index-name",
+			format: { name: projection.projectionModel.name },
+			target: projection.projectionModel,
+		});
+	}
+}
+
 export const __test = {
 	collectProjectionModels,
+	reportDemotedProjections,
 	isCandidateModel,
 	isTemplateDeclaration,
 	serializeProjections,

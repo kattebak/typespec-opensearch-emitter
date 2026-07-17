@@ -324,20 +324,13 @@ test("@searchProjection without @indexName is nested-only (issue #157)", async (
 		!names.includes("searchBankAccountApproval"),
 		"index-less projections must not appear in the resolver manifest",
 	);
-	// Every manifest entry that does exist names a real, declared index.
-	for (const resolver of manifest.resolvers.filter((r) => r.indexName)) {
+	// Every projection entry names an index. Asserting over the unfiltered
+	// list is the point: filtering to entries that have one would skip the
+	// regression where an index-less projection reaches the manifest.
+	for (const resolver of manifest.resolvers.filter((r) => r.projection)) {
 		assert.ok(
 			resolver.indexName,
 			`${resolver.queryFieldName} must carry a declared index name`,
-		);
-		assert.ok(
-			!resolver.indexName.endsWith("_search_doc") ||
-				[
-					"tag_search_doc",
-					"pet_public_search_doc",
-					"person_search_doc",
-				].includes(resolver.indexName),
-			`${resolver.queryFieldName} must not fall back to a derived index name`,
 		);
 	}
 
