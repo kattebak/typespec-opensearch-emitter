@@ -84,5 +84,15 @@
         }
       ]
     }
+  ],
+  "nestedTypes": [
+    {
+      "projection": "ApprovalSearchDoc",
+      "sdlFile": "approval-search-doc.graphql"
+    },
+    {
+      "projection": "BankAccountApprovalSearchDoc",
+      "sdlFile": "bank-account-approval-search-doc.graphql"
+    }
   ]
 }

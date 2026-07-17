@@ -473,11 +473,16 @@ Maps each projection to its resolver file, SDL file, query field name, and index
       "resolverFile": "pet-search-doc-resolver.js",
       "sdlFile": "pet-search-doc.graphql"
     }
+  ],
+  "nestedTypes": [
+    { "projection": "TagSearchDoc", "sdlFile": "tag-search-doc.graphql" }
   ]
 }
 ```
 
 The consuming CDK construct can read this manifest to wire resolvers without hardcoded knowledge.
+
+`nestedTypes` lists the nested-only projections — those without `@searchProjection` or `@indexName`. They have no Query field, resolver, or index, so they carry no `resolvers[]` entry, but top-level fragments reference their types by name. Assemble a schema from `resolvers[].sdlFile` **plus** `nestedTypes[].sdlFile`; using `resolvers[]` alone leaves those references undefined. The key is omitted when a spec has no nested-only projections.
 
 ### Aggregations (`@aggregatable`)
 

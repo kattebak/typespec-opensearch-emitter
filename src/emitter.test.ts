@@ -442,6 +442,93 @@ describe("generateGraphQLManifest queryFieldDirectives (issue #121)", () => {
 	});
 });
 
+describe("generateNestedTypeEntries (issue #164)", () => {
+	const petSearchDoc = {
+		projectionModel: { name: "PetSearchDoc" },
+		sourceModel: { name: "Pet" },
+		indexName: "pets_v1",
+		fields: [],
+	} as unknown as ResolvedProjection;
+
+	const petResolverFile = {
+		queryFieldName: "searchPet",
+		mode: "monolithic",
+		fileName: "pet-search-doc-resolver.js",
+		content: "",
+		functions: [],
+	};
+
+	const tagSearchDoc = {
+		projectionModel: { name: "TagSearchDoc" },
+		sourceModel: { name: "Tag" },
+		indexName: undefined,
+		fields: [],
+	} as unknown as ResolvedProjection;
+
+	it("names each nested-only projection and its SDL fragment", () => {
+		assert.deepEqual(__test.generateNestedTypeEntries([tagSearchDoc]), [
+			{ projection: "TagSearchDoc", sdlFile: "tag-search-doc.graphql" },
+		]);
+	});
+
+	it("lists the nested type alongside the parent's resolver entry", () => {
+		// The repro: a parent with @indexName referencing a sub-projection
+		// without one. Assembling from resolvers[].sdlFile alone leaves
+		// `tags: [TagSearchDoc!]!` dangling — the fragment is emitted and
+		// exported, only the manifest never named it.
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest(
+				[petSearchDoc],
+				[petResolverFile],
+				undefined,
+				undefined,
+				__test.generateNestedTypeEntries([tagSearchDoc]),
+			),
+		);
+
+		assert.equal(manifest.resolvers.length, 1);
+		assert.equal(manifest.resolvers[0].projection, "PetSearchDoc");
+		assert.deepEqual(manifest.nestedTypes, [
+			{ projection: "TagSearchDoc", sdlFile: "tag-search-doc.graphql" },
+		]);
+	});
+
+	it("keeps nested types out of resolvers[] — they have no Query field or index", () => {
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest(
+				[petSearchDoc],
+				[petResolverFile],
+				undefined,
+				undefined,
+				__test.generateNestedTypeEntries([tagSearchDoc]),
+			),
+		);
+
+		assert.ok(
+			!manifest.resolvers.some(
+				(entry: { projection?: string }) => entry.projection === "TagSearchDoc",
+			),
+		);
+	});
+
+	it("omits nestedTypes entirely when no projection is nested-only", () => {
+		const withUndefined = __test.generateGraphQLManifest(
+			[petSearchDoc],
+			[petResolverFile],
+		);
+		const withEmpty = __test.generateGraphQLManifest(
+			[petSearchDoc],
+			[petResolverFile],
+			undefined,
+			undefined,
+			__test.generateNestedTypeEntries([]),
+		);
+
+		assert.equal(withUndefined, withEmpty);
+		assert.ok(!("nestedTypes" in JSON.parse(withEmpty)));
+	});
+});
+
 describe("generateRestManifestEntries (issue #134)", () => {
 	const getPet = {
 		fieldName: "getPet",
