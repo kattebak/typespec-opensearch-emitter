@@ -535,7 +535,9 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(
-			combinedContent(result).includes('NQ("refs", ["refs.code"], queryText)'),
+			combinedContent(result).includes(
+				'NESTED_TEXT_GROUPS = [["refs",["refs.code"]]]',
+			),
 		);
 	});
 
@@ -3337,18 +3339,24 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
 		];
 
-		// Every sub-model contributes a nested clause, so the helper must be
-		// carrying them — an inline skeleton per group costs ~150 bytes each.
+		// Every sub-model contributes a group to the NESTED_TEXT_GROUPS data
+		// array (issue #168) rather than its own NQ(...) call site, so the
+		// per-group cost is the data tuple only — a runtime loop builds the
+		// clauses, and the generated code stays flat regardless of group count.
 		const prepare = files.find((f) => f.name === "prepare");
 		assert.ok(prepare);
 		for (const shape of subShapes) {
 			assert.ok(
 				prepare.content.includes(
-					`NQ("${shape.toLowerCase()}s", ["${shape.toLowerCase()}s.name","${shape.toLowerCase()}s.value"], queryText)`,
+					`["${shape.toLowerCase()}s",["${shape.toLowerCase()}s.name","${shape.toLowerCase()}s.value"]]`,
 				),
-				`missing nested text clause for ${shape}`,
+				`missing nested text group for ${shape}`,
 			);
 		}
+		assert.ok(
+			prepare.content.includes("for (const group of NESTED_TEXT_GROUPS)"),
+			"nested text clauses must be built by a runtime loop over NESTED_TEXT_GROUPS, not unrolled per group",
+		);
 
 		for (const file of files) {
 			const bytes = Buffer.byteLength(file.content, "utf8");

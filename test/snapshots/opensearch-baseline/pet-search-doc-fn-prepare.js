@@ -70,6 +70,9 @@ function buildAggs(selectionSetList) {
 	return requested ? aggs : null;
 }
 
+const TEXT_FIELDS = ["id","name","breed","nickname"];
+const NESTED_TEXT_GROUPS = [["tags",["tags.note"]]];
+
 function NQ(path, fields, queryText) {
 	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields" } } } };
 }
@@ -80,12 +83,16 @@ function buildQuery(queryText, filter, searchFilter) {
 	const mustNots = [];
 
 	if (queryText) {
+		const shoulds = [];
+		if (TEXT_FIELDS.length > 0) {
+			shoulds.push({ multi_match: { query: queryText, fields: TEXT_FIELDS, type: "best_fields" } });
+		}
+		for (const group of NESTED_TEXT_GROUPS) {
+			shoulds.push(NQ(group[0], group[1], queryText));
+		}
 		musts.push({
 			bool: {
-				should: [
-					{ multi_match: { query: queryText, fields: ["id","name","breed","nickname"], type: "best_fields" } },
-					NQ("tags", ["tags.note"], queryText),
-				],
+				should: shoulds,
 				minimum_should_match: 1,
 			},
 		});
@@ -137,7 +144,6 @@ function buildSort(sortBy) {
 			out.push({ [target]: direction });
 		}
 	}
-	// Always tie-break on _id for stable cursor pagination.
 	out.push({ _id: "asc" });
 	return out;
 }
@@ -145,34 +151,6 @@ function buildSort(sortBy) {
 function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
-	// APPSYNC_JS forbids while, continue, C-style for(init;cond;update), and
-	// the increment/decrement unary operators (lint rules @aws-appsync/no-while,
-	// @aws-appsync/no-continue, @aws-appsync/no-for,
-	// @aws-appsync/no-disallowed-unary-operators), and recursion
-	// (@aws-appsync/no-recursion). It also does not honor the ECMA spec for
-	// Array's @@iterator: items pushed during `for...of` iteration are NOT
-	// visited (verified via aws appsync evaluate-code). Iteration is driven
-	// by fixed-length slot pools whose `for...of` runs exactly slots.length
-	// times; bodies check head/tail indexes to act on real work.
-	//
-	// Two pools, two phases (issue #110):
-	//   procSlots — FIFO process queue. Each process item walks a spec list,
-	//     enqueueing more process items for nested/object descents.
-	//   finSlots — finalize stack drained LIFO after all processing is done.
-	//     Each "nested" descent pushes one finalize item carrying the
-	//     child-clause arrays and the path to wrap them with. LIFO ordering
-	//     guarantees deepest-first wrapping, so an inner nested's clauses
-	//     are wrapped onto its outer parent's child-clause array BEFORE
-	//     that outer parent's finalize runs.
-	//
-	// The previous single-FIFO design ran a parent's finalize before
-	// descendant processing finished whenever a non-nested struct ("object"
-	// kind) sat between two leaves and a nested ancestor — the descendant
-	// term clause landed in childFilters AFTER finalize had already drained
-	// it, silently dropping the filter (issue #110). The same hazard
-	// applies to nested-of-nested: outer finalize ran before inner finalize
-	// populated its parent's child-clause array. Splitting process and
-	// finalize into separate pools fixes both.
 	const procSlots = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null];
 	const finSlots = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null];
 	procSlots[0] = {
@@ -194,12 +172,6 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 			const outFilters = item.outFilters;
 			const outMustNots = item.outMustNots;
 
-			// FILTER_SPEC nodes use compact keys to fit under AppSync's 32 KB
-			// per-function code cap (issue #99): i=inputName, k=kind, f=field,
-			// p=path, c=children. See stringifyNode in the emitter. Range
-			// kind carries one entry per field; the function expands the
-			// four bound inputs (i+"Gte"/Lte/Gt/Lt) at iteration time
-			// (issue #101).
 			for (const node of spec) {
 				const value = input[node.i];
 				if (node.k === "nested") {
@@ -314,10 +286,6 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 		}
 	}
 
-	// Finalize phase: drain LIFO. Deepest finalize first wraps its child
-	// clauses onto its parent's childFilters/childMustNots array; that
-	// parent's finalize, popped later, then sees those wrapped clauses and
-	// wraps them in its own nested+path on the way to the grandparent.
 	for (const _slot of finSlots) {
 		if (finTail > 0) {
 			finTail = finTail - 1;
