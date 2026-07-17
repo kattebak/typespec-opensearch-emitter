@@ -27,6 +27,17 @@ function makeProjection(
 	} as unknown as ResolvedProjection;
 }
 
+function makeSubProjection(
+	name: string,
+	fields: ResolvedProjection["fields"],
+): ResolvedProjection {
+	return {
+		projectionModel: { name },
+		sourceModel: { name },
+		fields,
+	} as unknown as ResolvedProjection;
+}
+
 function makeField(
 	overrides: Partial<{
 		name: string;
@@ -35,6 +46,7 @@ function makeField(
 		nested: boolean;
 		optional: boolean;
 		searchable: boolean;
+		analyzer: string;
 		type: Type;
 		aggregations: unknown;
 		filterables: ResolvedProjection["fields"][0]["filterables"];
@@ -48,6 +60,7 @@ function makeField(
 		nested: overrides.nested ?? false,
 		optional: overrides.optional ?? false,
 		searchable: overrides.searchable ?? true,
+		analyzer: overrides.analyzer,
 		type:
 			overrides.type ??
 			({
@@ -290,21 +303,240 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(combinedContent(result).includes('"species","status"'));
 	});
 
-	it("excludes nested and sub-projection fields from text fields", async () => {
-		const subProjection = {
-			projectionModel: { name: "TagSearchDoc" },
-		} as unknown as ResolvedProjection;
-
+	it("wraps a nested sub-projection's searchable fields in a nested clause and takes dotted paths through an object sub-projection", async () => {
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "name" }),
-				makeField({ name: "tags", nested: true }),
-				makeField({ name: "owner", subProjection }),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeSubProjection("TagSearchDoc", [
+						makeField({ name: "label" }),
+					]),
+				}),
+				makeField({
+					name: "owner",
+					subProjection: makeSubProjection("OwnerSearchDoc", [
+						makeField({ name: "fullName" }),
+					]),
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const query = loadBuildQuery(prepareFunctionContent(result))(
+			"rex",
+			undefined,
+			undefined,
+		);
+
+		assert.deepEqual(query, {
+			bool: {
+				must: [
+					{
+						bool: {
+							should: [
+								{
+									multi_match: {
+										query: "rex",
+										fields: ["name", "owner.fullName"],
+										type: "best_fields",
+									},
+								},
+								{
+									nested: {
+										path: "tags",
+										score_mode: "max",
+										query: {
+											multi_match: {
+												query: "rex",
+												fields: ["tags.label"],
+												type: "best_fields",
+											},
+										},
+									},
+								},
+							],
+							minimum_should_match: 1,
+						},
+					},
+				],
+			},
+		});
+	});
+
+	it("keeps the flat multi_match byte-for-byte when no nested sub-projection is searchable", async () => {
+		const withoutNested = makeProjection({
+			fields: [makeField({ name: "name" }), makeField({ name: "description" })],
+		});
+		const withInertNested = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({ name: "description" }),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeSubProjection("TagSearchDoc", [
+						// Filter-only and keyword fields carry no free-text surface,
+						// so the nested wrapper must stay off.
+						makeField({ name: "tagId", keyword: true }),
+						makeField({ name: "note", searchable: false }),
+					]),
+				}),
+			],
+		});
+
+		const baseline = combinedContent(
+			await emitGraphQLResolver(withoutNested, defaultOptions),
+		);
+		const actual = combinedContent(
+			await emitGraphQLResolver(withInertNested, defaultOptions),
+		);
+
+		assert.ok(
+			baseline.includes(`		musts.push({
+			multi_match: {
+				query: queryText,
+				fields: ["name","description"],
+				type: "best_fields",
+			},
+		});`),
+		);
+		assert.ok(!baseline.includes("minimum_should_match"));
+		assert.equal(actual, baseline);
+	});
+
+	it("honours @analyzer on a nested field by querying the analyzed path, not .keyword", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "references",
+					nested: true,
+					subProjection: makeSubProjection("ReferenceSearchDoc", [
+						makeField({ name: "value", analyzer: "edge_ngram_analyzer" }),
+					]),
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const query = loadBuildQuery(prepareFunctionContent(result))(
+			"ABC",
+			undefined,
+			undefined,
+		) as {
+			bool: {
+				must: [{ bool: { should: [unknown, { nested: { query: unknown } }] } }];
+			};
+		};
+
+		// An @analyzer only takes effect on the analyzed field itself; the
+		// `.keyword` sub-field is not analyzed. The nested clause must query
+		// `references.value` bare for edge-ngram partial matching to work.
+		assert.deepEqual(query.bool.must[0].bool.should[1].nested.query, {
+			multi_match: {
+				query: "ABC",
+				fields: ["references.value"],
+				type: "best_fields",
+			},
+		});
+	});
+
+	it("groups searchable fields by their innermost nested ancestor", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "references",
+					nested: true,
+					subProjection: makeSubProjection("ReferenceSearchDoc", [
+						makeField({ name: "value" }),
+						// An object sub-projection inside a nested one stays in the
+						// same hidden document: it extends the path but opens no
+						// second nested clause.
+						makeField({
+							name: "issuer",
+							subProjection: makeSubProjection("IssuerSearchDoc", [
+								makeField({ name: "code" }),
+							]),
+						}),
+					]),
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeSubProjection("TagSearchDoc", [
+						makeField({ name: "label" }),
+					]),
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const query = loadBuildQuery(prepareFunctionContent(result))(
+			"rex",
+			undefined,
+			undefined,
+		);
+
+		// No root-document text field, so no flat clause — only the two
+		// nested groups, each naming its own path.
+		assert.deepEqual(query, {
+			bool: {
+				must: [
+					{
+						bool: {
+							should: [
+								{
+									nested: {
+										path: "references",
+										score_mode: "max",
+										query: {
+											multi_match: {
+												query: "rex",
+												fields: ["references.value", "references.issuer.code"],
+												type: "best_fields",
+											},
+										},
+									},
+								},
+								{
+									nested: {
+										path: "tags",
+										score_mode: "max",
+										query: {
+											multi_match: {
+												query: "rex",
+												fields: ["tags.label"],
+												type: "best_fields",
+											},
+										},
+									},
+								},
+							],
+							minimum_should_match: 1,
+						},
+					},
+				],
+			},
+		});
+	});
+
+	it("resolves nested text fields through @searchAs projected names", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "references",
+					projectedName: "refs",
+					nested: true,
+					subProjection: makeSubProjection("ReferenceSearchDoc", [
+						makeField({ name: "value", projectedName: "code" }),
+					]),
+				}),
 			],
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		assert.ok(combinedContent(result).includes('["name"]'));
+		assert.ok(
+			combinedContent(result).includes('NQ("refs", ["refs.code"], queryText)'),
+		);
 	});
 
 	it("excludes non-searchable filter-only fields from text_fields and keyword_fields but includes them in FILTER_SPEC", async () => {
@@ -3060,6 +3292,69 @@ describe("emitGraphQLResolver wide-projection budget (issue #105)", () => {
 			assert.ok(
 				bytes < 32_768,
 				`wide projection ${file.name} file is ${bytes} bytes; must stay under AppSync's 32,768-byte per-file cap (issue #105). Headroom: ${32_768 - bytes} bytes.`,
+			);
+		}
+	});
+
+	it("counterparty-shape projection with searchable text in every nested sub-model stays under the cap", async () => {
+		// The nested free-text clause (issue #158) is the one part of buildQuery
+		// that scales with sub-model count, so it gets its own width guard: the
+		// counterparty shape with two @searchable text fields per sub-model —
+		// the shape that reported the bug (a nested "find by reference" lookup).
+		const subShapes = [
+			"Approval",
+			"Relation",
+			"Location",
+			"Contact",
+			"Tag",
+			"Group",
+			"Reference",
+		];
+		const projection = makeProjection({
+			name: "CounterpartySearchDoc",
+			indexName: "counterparties_v1",
+			fields: subShapes.map((shape) =>
+				makeField({
+					name: `${shape.toLowerCase()}s`,
+					nested: true,
+					subProjection: makeWideSubProjection(shape, [
+						makeField({ name: "name" }),
+						makeField({ name: "value" }),
+					]),
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			),
+		});
+
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const files = [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
+		];
+
+		// Every sub-model contributes a nested clause, so the helper must be
+		// carrying them — an inline skeleton per group costs ~150 bytes each.
+		const prepare = files.find((f) => f.name === "prepare");
+		assert.ok(prepare);
+		for (const shape of subShapes) {
+			assert.ok(
+				prepare.content.includes(
+					`NQ("${shape.toLowerCase()}s", ["${shape.toLowerCase()}s.name","${shape.toLowerCase()}s.value"], queryText)`,
+				),
+				`missing nested text clause for ${shape}`,
+			);
+		}
+
+		for (const file of files) {
+			const bytes = Buffer.byteLength(file.content, "utf8");
+			assert.ok(
+				bytes < 32_768,
+				`${file.name} is ${bytes} bytes; must stay under AppSync's 32,768-byte per-file cap. Headroom: ${32_768 - bytes} bytes.`,
 			);
 		}
 	});

@@ -70,6 +70,10 @@ function buildAggs(selectionSetList) {
 	return requested ? aggs : null;
 }
 
+function NQ(path, fields, queryText) {
+	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields" } } } };
+}
+
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
@@ -77,10 +81,12 @@ function buildQuery(queryText, filter, searchFilter) {
 
 	if (queryText) {
 		musts.push({
-			multi_match: {
-				query: queryText,
-				fields: ["id","name","breed","nickname"],
-				type: "best_fields",
+			bool: {
+				should: [
+					{ multi_match: { query: queryText, fields: ["id","name","breed","nickname"], type: "best_fields" } },
+					NQ("tags", ["tags.note"], queryText),
+				],
+				minimum_should_match: 1,
 			},
 		});
 	}

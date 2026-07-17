@@ -292,8 +292,8 @@ Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical 
 
 When a field's type is a TypeSpec model (struct) — either inline (`address: Address`) or as an array (`tags: Tag[]`) — `@searchInfer` recurses into the nested model's properties and applies the same inference table. The parent's `<Type>SearchFilter` exposes `<fieldName>: <NestedType>SearchFilter`, and a separate `<NestedType>SearchFilter` input is emitted alongside.
 
-- **`@nested` array** (OS-nested mapping): filter clauses wrap in `bool.filter[ nested + inner ]`.
-- **Inline struct** (no `@nested`): children carry dotted OS field paths (`address.country`) — no nested wrapper.
+- **`@nested` array** (OS-nested mapping): filter clauses wrap in `bool.filter[ nested + inner ]`. Free-text search wraps the same way — see [Free-text search across nested fields](#free-text-search-across-nested-fields).
+- **Inline struct** (no `@nested`): children carry dotted OS field paths (`address.country`) — no nested wrapper, on either the filter or the free-text axis.
 - **Recursion depth**: unbounded; cycles are guarded by a visited-name set.
 - **Opt-out**: `@searchSkip` on the parent's field suppresses the virtual sub-projection (and the parent skips the field when no other decorator keeps it in the projection).
 
@@ -453,7 +453,7 @@ Each resolver file exports `request(ctx)` and `response(ctx)` conforming to APPS
 - **No imports** except `@aws-appsync/utils`
 - **No network I/O** — resolvers are pure request/response transformers
 - `request` builds an OpenSearch `_search` body with:
-  - `multi_match` across all `text` fields when `query` argument is provided
+  - `multi_match` across all `text` fields when `query` argument is provided, plus a `nested`-wrapped `multi_match` per `@nested` sub-model carrying searchable text
   - `term` filters for each `@keyword` field present in the `filter` argument
   - `search_after` cursor pagination (base64-encoded sort values)
   - Deterministic sort: `[_score desc, _id asc]`
@@ -564,8 +564,34 @@ GraphQL intent is derived from the existing OpenSearch mapping — no additional
 | --- | --- |
 | `@keyword` field | Filterable input argument (term match) |
 | `text` field (no `@keyword`) | Included in `multi_match` field list |
+| `text` field inside a sub-projection | Included in free-text search — see below |
 | All projection fields | Output type fields |
 | Sub-projection (`SearchProjection`) | Nested GraphQL type reference |
+
+### Free-text search across nested fields
+
+`@searchable` on a sub-model's `text` field puts that field in free-text search. The `query` argument searches it alongside the root document's fields; no extra decorator opts it in.
+
+How the field is mapped decides the clause:
+
+- **`object` sub-projection** (no `@nested`): the field lives in the root document, so it joins the flat `multi_match` under its dotted path (`owner.fullName`).
+- **`@nested` sub-projection**: nested-mapped fields are separate hidden Lucene documents, unreachable by a bare `multi_match` on `tags.note`. Each `@nested` sub-model carrying searchable text contributes one `nested`-wrapped clause, and the clauses combine under `bool.should` with `minimum_should_match: 1`:
+
+```js
+bool: {
+  should: [
+    { multi_match: { query: queryText, fields: ["name"], type: "best_fields" } },
+    NQ("tags", ["tags.note"], queryText),
+  ],
+  minimum_should_match: 1,
+}
+```
+
+`NQ` is the emitted nested-query helper (`{ nested: { path, score_mode: "max", query: { multi_match: … } } }`). `score_mode: "max"` scores a parent by its best-matching child, so one strong hit ranks a parent the way a root-field hit would.
+
+A projection with no nested searchable text emits the flat `multi_match` alone — no `bool.should`, no helper.
+
+An `@analyzer` on a nested field is honoured: the clause queries the analyzed path, not its `.keyword` sub-field, so edge-ngram partial matching works the same as it does at the root (issue #130).
 
 ### Resolver code-size budget
 
@@ -584,20 +610,25 @@ Each pipeline file gets its own 32,768-byte budget. Splitting the work is what m
 
 Emitted code stays flat as projections widen by keeping specs as data. A projection emits a compact name → spec map — `FILTER_SPEC` for filter inputs, `AGG_SPEC` for aggregations, both using single-letter keys — plus one assembly function that walks the map at runtime. A new field adds map entries; it does not add code.
 
+Where a literal is unavoidable, the repeated skeleton is factored into a module-level helper called with the varying parts — `ADH` for bounds-less `auto_date_histogram` entries, `NQ` for nested free-text clauses. A nested sub-model then costs ~53 bytes instead of ~153.
+
 Inlining a literal per field instead scales code with projection width. That is what breached the cap twice: issue #101 (counterparty resolver at 38,301 bytes, of which 38,257 were the inline `FILTER_SPEC` literal; fixed by collapsing range-suffix expansions) and issue #105 (37,310 bytes after range-collapse; fixed by factoring repeated nested-doc skeletons).
 
 Emitted code must also stay in the APPSYNC_JS supported subset. `src/emit-graphql-resolver.test.ts` runs `@aws-appsync/eslint-plugin` over the output.
 
 #### Guards
 
-Two tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured after the per-request bucket budget (issue #155):
+Three tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured after the per-request bucket budget (issue #155):
 
 | Projection | Resolver | Prepare | Search | Headroom |
 | --- | --- | --- | --- | --- |
 | counterparty shape (7 nested sub-models) | 8,991 | 24,754 | 742 | 8,014 |
+| counterparty shape, 2 searchable text fields per sub-model | 8,491 | 24,617 | 742 | 8,151 |
 | synthetic wide (14 sub-models) | 14,458 | 32,452 | 732 | **316** |
 
-`prepare` is the constrained file in both, and headroom depends on projection width. The 14-sub-model guard governs: at 316 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
+`prepare` is the constrained file in all three, and headroom depends on projection width. The 14-sub-model guard governs: at 316 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
+
+Nested free-text search (issue #158) costs ~53 bytes per `@nested` sub-model carrying searchable text (it scales with path length), plus 166 bytes once for the `NQ` helper. It is charged only to projections that have such a field. The 14-sub-model guard is the shape where that matters: its sub-models are all `@keyword`/date, so it pays nothing, but adding searchable text to every sub-model of a projection that wide would exceed the cap — as the 316-byte headroom already implies for any addition.
 
 CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
 
