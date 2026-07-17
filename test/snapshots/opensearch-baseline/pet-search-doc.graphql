@@ -6,7 +6,7 @@ type PetSearchDoc {
   birthDate: String!
   createdAt: String!
   tags: [TagSearchDoc!]!
-  owner: String!
+  owner: Owner!
   aliases: [String!]!
   nickname: String
   rank: Int!
@@ -15,6 +15,10 @@ type PetSearchDoc {
   active: Boolean!
   approvals: [ApprovalSearchDoc!]!
   bankAccountApprovals: [BankAccountApprovalSearchDoc!]!
+}
+
+type Owner {
+  name: String!
 }
 
 input PetSearchDocFilter {

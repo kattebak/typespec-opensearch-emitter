@@ -1,4 +1,10 @@
-import { type Model, NoTarget, type Program } from "@typespec/compiler";
+import {
+	type Model,
+	type ModelProperty,
+	NoTarget,
+	type Program,
+	type Type,
+} from "@typespec/compiler";
 import {
 	type AggregationEntry,
 	aggregationsTypeName,
@@ -170,12 +176,57 @@ function renderObjectType(
 		.filter((field) => field.searchable)
 		.map((field) => {
 			const gqlName = field.projectedName ?? field.name;
-			const gqlType = toGraphQLType(program, field.type, field);
+			const gqlType = responseFieldType(program, field);
 			const nullable = field.optional ? "" : "!";
 			return `  ${gqlName}: ${gqlType}${nullable}`;
 		});
 
 	return `type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
+}
+
+/**
+ * GraphQL type reference for a response field. A field redeclared as a
+ * projection type or reached via `@searchInfer` recursion carries a
+ * `subProjection`, and `toGraphQLType` renders it. A plain model-typed field
+ * (or array-of-model) that is not redeclared has no `subProjection`; the doc
+ * type and the index mapping both describe it as a nested object, so the SDL
+ * must too — reference it by the model's own name and emit a matching
+ * `type <Model> { ... }` block (see `collectNestedStructTypes`). Without this
+ * the field falls back to `String`, contradicting the other two artifacts
+ * (issue #160).
+ */
+function responseFieldType(
+	program: Program,
+	field: ResolvedProjection["fields"][number],
+): string {
+	if (!field.subProjection) {
+		const struct = structModelOf(field.type);
+		if (struct) {
+			return isArrayType(field.type) ? `[${struct.name}!]` : struct.name;
+		}
+	}
+	return toGraphQLType(program, field.type, field);
+}
+
+/**
+ * The named struct model a field's type resolves to, or undefined for
+ * scalars, arrays of scalars, records, unions, and enums. Unwraps a single
+ * level of array so `Approval[]` and `Approval` both resolve to `Approval`.
+ */
+function structModelOf(type: Type): Model | undefined {
+	if (type.kind !== "Model") return undefined;
+	if (type.name === "Array" && type.indexer?.value) {
+		return structModelOf(type.indexer.value);
+	}
+	if (type.name === "Record") return undefined;
+	if (type.name && type.properties.size > 0) return type;
+	return undefined;
+}
+
+function isArrayType(type: Type): boolean {
+	return (
+		type.kind === "Model" && type.name === "Array" && !!type.indexer?.value
+	);
 }
 
 /**
@@ -209,7 +260,17 @@ function collectNestedStructTypes(
 ): void {
 	for (const field of projection.fields) {
 		if (!field.searchable) continue;
-		if (!field.subProjection) continue;
+		if (!field.subProjection) {
+			// A model-typed field with no sub-projection (not redeclared, not on a
+			// `@searchInfer` path) still describes a nested object in the doc type
+			// and mapping. Emit a `type <Model> { ... }` block for it so the SDL
+			// agrees (issue #160).
+			const struct = structModelOf(field.type);
+			if (struct) {
+				collectRawStructType(program, struct, out, seen, defaults);
+			}
+			continue;
+		}
 		if (!isVirtualSubProjection(field.subProjection)) continue;
 		const sub = field.subProjection;
 		const name = sub.projectionModel.name;
@@ -227,6 +288,52 @@ function collectNestedStructTypes(
 		out.push(renderVirtualStructType(program, sub, subDirectives));
 		collectNestedStructTypes(program, sub, out, seen, defaults);
 	}
+}
+
+/**
+ * Emit a `type <Model> { ... }` block for a plain struct model referenced from
+ * a response field, recursing into its own struct-typed properties. Mirrors the
+ * doc-type and mapping emitters: fields are the model's `@searchable`
+ * properties, projected names honored, in declaration order.
+ */
+function collectRawStructType(
+	program: Program,
+	model: Model,
+	out: string[],
+	seen: Set<string>,
+	defaults: string[] | undefined,
+): void {
+	if (seen.has(model.name)) return;
+	seen.add(model.name);
+
+	const children: Model[] = [];
+	const fieldLines: string[] = [];
+	for (const prop of model.properties.values()) {
+		if (!isSearchable(program, prop)) continue;
+		const gqlName = getSearchAs(program, prop) ?? prop.name;
+		const gqlType = rawPropType(program, prop);
+		const nullable = prop.optional ? "" : "!";
+		fieldLines.push(`  ${gqlName}: ${gqlType}${nullable}`);
+		const child = structModelOf(prop.type);
+		if (child) children.push(child);
+	}
+
+	const directives = resolveDirectives(program, model, defaults);
+	out.push(
+		`type ${model.name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`,
+	);
+
+	for (const child of children) {
+		collectRawStructType(program, child, out, seen, defaults);
+	}
+}
+
+function rawPropType(program: Program, prop: ModelProperty): string {
+	const struct = structModelOf(prop.type);
+	if (struct) {
+		return isArrayType(prop.type) ? `[${struct.name}!]` : struct.name;
+	}
+	return toGraphQLType(program, prop.type);
 }
 
 function isVirtualSubProjection(sub: ResolvedProjection): boolean {
