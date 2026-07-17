@@ -10,6 +10,7 @@ import {
 	type SearchFilterShape,
 } from "./filters.js";
 import type {
+	ResolvedProjection,
 	ResolvedProjectionField,
 	TopLevelProjection,
 } from "./projection.js";
@@ -112,6 +113,17 @@ export const MIN_AUTO_DATE_HISTOGRAM_BUCKETS = 256;
  */
 const AUTO_DATE_HISTOGRAM_HELPER = "ADH";
 
+/**
+ * Module-level helper the emitted free-text clause calls for each `@nested`
+ * sub-projection carrying searchable text. The nested-query skeleton is long
+ * and identical bar the path and field list, so factoring it out of the
+ * literal keeps wide projections under AppSync's 32 KB per-function cap —
+ * the same move as AUTO_DATE_HISTOGRAM_HELPER, and the fix issue #105 applied
+ * to the repeated nested-doc skeletons. The call sites stay static literals:
+ * no spec array, no runtime walk.
+ */
+const NESTED_TEXT_QUERY_HELPER = "NQ";
+
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
 // APPSYNC_JS does not honor self-extending Array iteration, so the emitted
 // function pre-allocates this many slots as a literal. Set well above any
@@ -126,16 +138,7 @@ export async function emitGraphQLResolver(
 	const queryFieldName = toGraphQLQueryFieldName(typeName);
 	const baseName = toKebabCase(typeName);
 
-	const textFields = projection.fields
-		.filter(
-			(f) =>
-				f.searchable &&
-				!f.keyword &&
-				!f.nested &&
-				!f.subProjection &&
-				hasTextType(f),
-		)
-		.map((f) => f.projectedName ?? f.name);
+	const textFields = collectTextFields(projection);
 
 	const keywordFields = projection.fields
 		.filter((f) => f.searchable && f.keyword)
@@ -225,6 +228,159 @@ export async function emitGraphQLResolver(
 	};
 }
 
+/**
+ * Free-text fields grouped by the query clause they belong in. `flat` holds
+ * root-document paths — top-level fields plus `object`-mapped sub-projection
+ * fields, which live in the same Lucene document and so are reachable by a
+ * dotted path. `nested` holds one group per `@nested` sub-projection that
+ * carries at least one `@searchable` text field; those are separate hidden
+ * documents, reachable only through a `nested` query naming their path.
+ */
+interface NestedTextGroup {
+	path: string;
+	fields: string[];
+}
+
+interface TextFieldCollection {
+	flat: string[];
+	nested: NestedTextGroup[];
+}
+
+/**
+ * Path-threading walk over the projection tree, mirroring the filter path's
+ * `buildShapeRecursive` (filters.ts). `@searchable` on a sub-projection's
+ * field is recorded in that sub-projection's own `fields` array, so a flat
+ * pass over `projection.fields` never sees it — the mapping emitter recurses,
+ * the resolver did not, and nested `@searchable` was inert (issue #158).
+ *
+ * Every path is fully known here, so the emitted clause is a static literal:
+ * no runtime spec-walking, and none of the APPSYNC_JS control-flow
+ * constraints that shape `applyFilterSpec` apply.
+ */
+function collectTextFields(
+	projection: ResolvedProjection,
+): TextFieldCollection {
+	const collection: TextFieldCollection = { flat: [], nested: [] };
+	collectTextFieldsRecursive(projection, undefined, undefined, collection);
+	return collection;
+}
+
+function collectTextFieldsRecursive(
+	projection: ResolvedProjection,
+	fieldPrefix: string | undefined,
+	nestedPath: string | undefined,
+	collection: TextFieldCollection,
+): void {
+	if (!projection.fields) return;
+
+	for (const field of projection.fields) {
+		const path = joinFieldPath(fieldPrefix, field.projectedName ?? field.name);
+
+		if (field.subProjection) {
+			// A `nested` sub-projection opens a new nested document; an `object`
+			// one keeps the current document and only extends the dotted path.
+			// OpenSearch accepts a fully-qualified inner path on a `nested`
+			// query, so nesting within nesting groups by the innermost path.
+			collectTextFieldsRecursive(
+				field.subProjection,
+				path,
+				field.nested ? path : nestedPath,
+				collection,
+			);
+			continue;
+		}
+
+		if (
+			!field.searchable ||
+			field.keyword ||
+			field.nested ||
+			!hasTextType(field)
+		) {
+			continue;
+		}
+
+		if (!nestedPath) {
+			collection.flat.push(path);
+			continue;
+		}
+
+		const group = collection.nested.find((g) => g.path === nestedPath);
+		if (group) {
+			group.fields.push(path);
+			continue;
+		}
+		collection.nested.push({ path: nestedPath, fields: [path] });
+	}
+}
+
+function joinFieldPath(parent: string | undefined, segment: string): string {
+	return parent ? `${parent}.${segment}` : segment;
+}
+
+/**
+ * Declaration of the nested-query helper, emitted only when the projection has
+ * nested text to search. `score_mode: "max"` scores a parent document by its
+ * best-matching child rather than by a sum over children, so one strong hit
+ * ranks a parent the way a root-field hit would.
+ */
+function renderNestedTextHelper(textFields: TextFieldCollection): string {
+	if (textFields.nested.length === 0) return "";
+
+	return `
+function ${NESTED_TEXT_QUERY_HELPER}(path, fields, queryText) {
+	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields" } } } };
+}
+`;
+}
+
+/**
+ * The `musts.push(...)` for the free-text clause. With no nested text fields
+ * this is the flat `multi_match` — byte-identical to what the emitter has
+ * always produced, so projections without nested `@searchable` are untouched.
+ * Otherwise each nested group contributes a `nested`-wrapped `multi_match` to
+ * a `bool.should` alongside the root-document clause, and
+ * `minimum_should_match: 1` keeps the clause a real constraint rather than a
+ * scoring hint.
+ */
+function renderTextQueryPush(textFields: TextFieldCollection): string {
+	const flatLiteral = JSON.stringify(textFields.flat);
+
+	if (textFields.nested.length === 0) {
+		return `		musts.push({
+			multi_match: {
+				query: queryText,
+				fields: ${flatLiteral},
+				type: "best_fields",
+			},
+		});`;
+	}
+
+	// A projection whose only searchable text lives in nested sub-models has
+	// no root-document fields to match, and `multi_match` with an empty
+	// `fields` falls back to querying every field — so omit the flat clause
+	// rather than emit one that matches on paths nobody marked @searchable.
+	const shoulds = textFields.flat.length
+		? [
+				`\t\t\t\t\t{ multi_match: { query: queryText, fields: ${flatLiteral}, type: "best_fields" } },`,
+			]
+		: [];
+
+	for (const group of textFields.nested) {
+		shoulds.push(
+			`\t\t\t\t\t${NESTED_TEXT_QUERY_HELPER}(${JSON.stringify(group.path)}, ${JSON.stringify(group.fields)}, queryText),`,
+		);
+	}
+
+	return `		musts.push({
+			bool: {
+				should: [
+${shoulds.join("\n")}
+				],
+				minimum_should_match: 1,
+			},
+		});`;
+}
+
 function hasTextType(field: ResolvedProjectionField): boolean {
 	const type = field.type;
 	if (type.kind === "Scalar") {
@@ -246,7 +402,7 @@ function hasTextType(field: ResolvedProjectionField): boolean {
  * into one when the projection fits under threshold.
  */
 function renderMonolithicResolver(
-	textFields: string[],
+	textFields: TextFieldCollection,
 	keywordFields: string[],
 	textSortFields: string[],
 	aggregations: AggregationEntry[],
@@ -254,7 +410,8 @@ function renderMonolithicResolver(
 	indexName: string,
 	options: ResolverOptions,
 ): string {
-	const textFieldsLiteral = JSON.stringify(textFields);
+	const textQueryPush = renderTextQueryPush(textFields);
+	const nestedTextHelper = renderNestedTextHelper(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
@@ -322,20 +479,14 @@ ${responseAggregationsPreamble}
 		},
 	};
 }
-${buildAggsFunction}
+${buildAggsFunction}${nestedTextHelper}
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
 	const mustNots = [];
 
 	if (queryText) {
-		musts.push({
-			multi_match: {
-				query: queryText,
-				fields: ${textFieldsLiteral},
-				type: "best_fields",
-			},
-		});
+${textQueryPush}
 	}
 
 	const keywordFields = ${keywordFieldsLiteral};
@@ -609,14 +760,15 @@ ${responseAggregationsPreamble}
  * aggregation mapping) under the 32 KB per-file APPSYNC_JS cap (issue #105).
  */
 function renderPrepareFunction(
-	textFields: string[],
+	textFields: TextFieldCollection,
 	keywordFields: string[],
 	textSortFields: string[],
 	aggregations: AggregationEntry[],
 	searchFilterShape: SearchFilterShape | undefined,
 	options: ResolverOptions,
 ): string {
-	const textFieldsLiteral = JSON.stringify(textFields);
+	const textQueryPush = renderTextQueryPush(textFields);
+	const nestedTextHelper = renderNestedTextHelper(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
 	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
@@ -659,20 +811,14 @@ ${aggsAssignment}
 export function response(ctx) {
 	return ctx.result;
 }
-${buildAggsFunction}
+${buildAggsFunction}${nestedTextHelper}
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
 	const mustNots = [];
 
 	if (queryText) {
-		musts.push({
-			multi_match: {
-				query: queryText,
-				fields: ${textFieldsLiteral},
-				type: "best_fields",
-			},
-		});
+${textQueryPush}
 	}
 
 	const keywordFields = ${keywordFieldsLiteral};
