@@ -334,13 +334,40 @@ function ${NESTED_TEXT_QUERY_HELPER}(path, fields, queryText) {
 }
 
 /**
+ * Module-level `TEXT_FIELDS`/`NESTED_TEXT_GROUPS` data the free-text clause
+ * reads at request time (issue #168). One `NQ(...)` call site per nested
+ * group scales the generated code with sub-model count — on a document with
+ * many `@nested` sub-projections (the counterparty shape: 15 groups) that
+ * approaches AppSync's 32 KB per-function cap even with the group's skeleton
+ * already factored into a helper. Emitting the (path, fields) pairs as a data
+ * array and looping over it at runtime keeps the code flat regardless of
+ * group count. Empty when there is no nested searchable text — the flat-only
+ * clause stays a static literal (see `renderTextQueryPush`).
+ */
+function renderTextSpecDeclaration(textFields: TextFieldCollection): string {
+	if (textFields.nested.length === 0) return "";
+
+	const flatLiteral = JSON.stringify(textFields.flat);
+	const groupsLiteral = `[${textFields.nested
+		.map((g) => `[${JSON.stringify(g.path)},${JSON.stringify(g.fields)}]`)
+		.join(",")}]`;
+
+	return `
+const TEXT_FIELDS = ${flatLiteral};
+const NESTED_TEXT_GROUPS = ${groupsLiteral};
+`;
+}
+
+/**
  * The `musts.push(...)` for the free-text clause. With no nested text fields
  * this is the flat `multi_match` — byte-identical to what the emitter has
  * always produced, so projections without nested `@searchable` are untouched.
- * Otherwise each nested group contributes a `nested`-wrapped `multi_match` to
- * a `bool.should` alongside the root-document clause, and
+ * Otherwise the loop reads `TEXT_FIELDS`/`NESTED_TEXT_GROUPS` (declared by
+ * `renderTextSpecDeclaration`) and builds one `nested`-wrapped `multi_match`
+ * per group into a `bool.should` alongside the root-document clause;
  * `minimum_should_match: 1` keeps the clause a real constraint rather than a
- * scoring hint.
+ * scoring hint. Same shoulds, same order, same clause shapes as the previous
+ * per-group unroll — only the code that builds them changed.
  */
 function renderTextQueryPush(textFields: TextFieldCollection): string {
 	const flatLiteral = JSON.stringify(textFields.flat);
@@ -359,23 +386,16 @@ function renderTextQueryPush(textFields: TextFieldCollection): string {
 	// no root-document fields to match, and `multi_match` with an empty
 	// `fields` falls back to querying every field — so omit the flat clause
 	// rather than emit one that matches on paths nobody marked @searchable.
-	const shoulds = textFields.flat.length
-		? [
-				`\t\t\t\t\t{ multi_match: { query: queryText, fields: ${flatLiteral}, type: "best_fields" } },`,
-			]
-		: [];
-
-	for (const group of textFields.nested) {
-		shoulds.push(
-			`\t\t\t\t\t${NESTED_TEXT_QUERY_HELPER}(${JSON.stringify(group.path)}, ${JSON.stringify(group.fields)}, queryText),`,
-		);
-	}
-
-	return `		musts.push({
+	return `		const shoulds = [];
+		if (TEXT_FIELDS.length > 0) {
+			shoulds.push({ multi_match: { query: queryText, fields: TEXT_FIELDS, type: "best_fields" } });
+		}
+		for (const group of NESTED_TEXT_GROUPS) {
+			shoulds.push(${NESTED_TEXT_QUERY_HELPER}(group[0], group[1], queryText));
+		}
+		musts.push({
 			bool: {
-				should: [
-${shoulds.join("\n")}
-				],
+				should: shoulds,
 				minimum_should_match: 1,
 			},
 		});`;
@@ -401,123 +421,12 @@ function hasTextType(field: ResolvedProjectionField): boolean {
  * which is pipeline-only). Issue #112 — collapses the 3-function pipeline
  * into one when the projection fits under threshold.
  */
-function renderMonolithicResolver(
-	textFields: TextFieldCollection,
-	keywordFields: string[],
-	textSortFields: string[],
-	aggregations: AggregationEntry[],
-	searchFilterShape: SearchFilterShape | undefined,
-	indexName: string,
-	options: ResolverOptions,
-): string {
-	const textQueryPush = renderTextQueryPush(textFields);
-	const nestedTextHelper = renderNestedTextHelper(textFields);
-	const keywordFieldsLiteral = JSON.stringify(keywordFields);
-	const textSortFieldsLiteral = JSON.stringify(textSortFields);
-	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
-	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
-	const buildAggsFunction = renderBuildAggsFunction(aggregations, options);
-	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
-	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
-	const responseAggregationsPreamble =
-		renderResponseAggregationsPreamble(aggregations);
-	const responseAggregations = renderResponseAggregations(aggregations);
-
-	return `import { util } from "@aws-appsync/utils";
-
-const FILTER_SPEC = ${filterSpecLiteral};
-${aggSpecDeclaration}
-export function request(ctx) {
-	const args = ctx.args;
-	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
-	const searchAfter = args.after ? JSON.parse(util.base64Decode(args.after)) : undefined;
-
-	const query = buildQuery(args.query, args.filter, args.searchFilter);
-	const sort = buildSort(args.sortBy);
-
-	const body = {
-		size: size + 1,
-		track_total_hits: ${options.trackTotalHitsUpTo},
-		sort,
-		query,
-	};
-
-	if (searchAfter) {
-		body.search_after = searchAfter;
-	}
-${aggsAssignment}
-	return {
-		operation: "GET",
-		path: "/${indexName}/_search",
-		params: { body },
-	};
-}
-
-export function response(ctx) {
-	if (ctx.error) {
-		return util.error(ctx.error.message, ctx.error.type);
-	}
-
-	const parsedBody = ctx.result;
-${renderSearchBodyGuard("parsedBody", "\t")}	const hits = parsedBody.hits.hits;
-	const totalHits = parsedBody.hits.total.value;
-	const args = ctx.args;
-	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
-
-	const hasNextPage = hits.length > size;
-	const edges = hits.slice(0, size).map((hit) => ({
-		node: hit._source,
-		cursor: util.base64Encode(JSON.stringify(hit.sort)),
-	}));
-${responseAggregationsPreamble}
-	return {
-		edges,
-		totalCount: totalHits,${responseAggregations}
-		pageInfo: {
-			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
-		},
-	};
-}
-${buildAggsFunction}${nestedTextHelper}
-function buildQuery(queryText, filter, searchFilter) {
-	const musts = [];
-	const filters = [];
-	const mustNots = [];
-
-	if (queryText) {
-${textQueryPush}
-	}
-
-	const keywordFields = ${keywordFieldsLiteral};
-	if (filter) {
-		for (const field of keywordFields) {
-			if (filter[field] != null) {
-				filters.push({ term: { [field]: filter[field] } });
-			}
-		}
-	}
-
-	if (searchFilter) {
-		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
-	}
-
-	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
-		return { match_all: {} };
-	}
-
-	return {
-		bool: {
-			...(musts.length > 0 ? { must: musts } : {}),
-			...(filters.length > 0 ? { filter: filters } : {}),
-			...(mustNots.length > 0 ? { must_not: mustNots } : {}),
-		},
-	};
-}
-
-const TEXT_SORT_FIELDS = ${textSortFieldsLiteral};
-
-function buildSort(sortBy) {
+/**
+ * `buildSort` — identical between the monolithic and pipeline shapes, so it
+ * is rendered once and shared rather than duplicated per emit mode.
+ */
+function renderBuildSortFunction(): string {
+	return `function buildSort(sortBy) {
 	const fallback = [{ _score: "desc" }, { _id: "asc" }];
 	if (!sortBy || sortBy.length === 0) {
 		return fallback;
@@ -538,8 +447,18 @@ function buildSort(sortBy) {
 	out.push({ _id: "asc" });
 	return out;
 }
+`;
+}
 
-function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
+/**
+ * `applyFilterSpec` — identical between the monolithic and pipeline shapes,
+ * so it is rendered once and shared rather than duplicated per emit mode.
+ * See FILTER_SPEC/stringifyNode for the compact node encoding this walks,
+ * and issues #99, #101, #105, #110 for why the walk uses fixed-size slot
+ * pools instead of recursion or growable arrays (APPSYNC_JS constraints).
+ */
+function renderApplyFilterSpecFunction(slotsLiteral: string): string {
+	return `function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
 	const procSlots = ${slotsLiteral};
@@ -701,6 +620,129 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 	}
 }
 `;
+}
+
+function renderMonolithicResolver(
+	textFields: TextFieldCollection,
+	keywordFields: string[],
+	textSortFields: string[],
+	aggregations: AggregationEntry[],
+	searchFilterShape: SearchFilterShape | undefined,
+	indexName: string,
+	options: ResolverOptions,
+): string {
+	const textQueryPush = renderTextQueryPush(textFields);
+	const textSpecDeclaration = renderTextSpecDeclaration(textFields);
+	const nestedTextHelper = renderNestedTextHelper(textFields);
+	const keywordFieldsLiteral = JSON.stringify(keywordFields);
+	const textSortFieldsLiteral = JSON.stringify(textSortFields);
+	const aggsAssignment = renderAggsAssignment(aggregations, "\t");
+	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
+	const buildAggsFunction = renderBuildAggsFunction(aggregations, options);
+	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
+	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
+	const buildSortFunction = renderBuildSortFunction();
+	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
+	const responseAggregationsPreamble =
+		renderResponseAggregationsPreamble(aggregations);
+	const responseAggregations = renderResponseAggregations(aggregations);
+
+	return `import { util } from "@aws-appsync/utils";
+
+const FILTER_SPEC = ${filterSpecLiteral};
+${aggSpecDeclaration}
+export function request(ctx) {
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+	const searchAfter = args.after ? JSON.parse(util.base64Decode(args.after)) : undefined;
+
+	const query = buildQuery(args.query, args.filter, args.searchFilter);
+	const sort = buildSort(args.sortBy);
+
+	const body = {
+		size: size + 1,
+		track_total_hits: ${options.trackTotalHitsUpTo},
+		sort,
+		query,
+	};
+
+	if (searchAfter) {
+		body.search_after = searchAfter;
+	}
+${aggsAssignment}
+	return {
+		operation: "GET",
+		path: "/${indexName}/_search",
+		params: { body },
+	};
+}
+
+export function response(ctx) {
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type);
+	}
+
+	const parsedBody = ctx.result;
+${renderSearchBodyGuard("parsedBody", "\t")}	const hits = parsedBody.hits.hits;
+	const totalHits = parsedBody.hits.total.value;
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+
+	const hasNextPage = hits.length > size;
+	const edges = hits.slice(0, size).map((hit) => ({
+		node: hit._source,
+		cursor: util.base64Encode(JSON.stringify(hit.sort)),
+	}));
+${responseAggregationsPreamble}
+	return {
+		edges,
+		totalCount: totalHits,${responseAggregations}
+		pageInfo: {
+			hasNextPage,
+			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+		},
+	};
+}
+${buildAggsFunction}${textSpecDeclaration}${nestedTextHelper}
+function buildQuery(queryText, filter, searchFilter) {
+	const musts = [];
+	const filters = [];
+	const mustNots = [];
+
+	if (queryText) {
+${textQueryPush}
+	}
+
+	const keywordFields = ${keywordFieldsLiteral};
+	if (filter) {
+		for (const field of keywordFields) {
+			if (filter[field] != null) {
+				filters.push({ term: { [field]: filter[field] } });
+			}
+		}
+	}
+
+	if (searchFilter) {
+		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+	}
+
+	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
+		return { match_all: {} };
+	}
+
+	return {
+		bool: {
+			...(musts.length > 0 ? { must: musts } : {}),
+			...(filters.length > 0 ? { filter: filters } : {}),
+			...(mustNots.length > 0 ? { must_not: mustNots } : {}),
+		},
+	};
+}
+
+const TEXT_SORT_FIELDS = ${textSortFieldsLiteral};
+
+${buildSortFunction}
+${applyFilterSpecFunction}`;
 }
 
 /**
@@ -768,6 +810,7 @@ function renderPrepareFunction(
 	options: ResolverOptions,
 ): string {
 	const textQueryPush = renderTextQueryPush(textFields);
+	const textSpecDeclaration = renderTextSpecDeclaration(textFields);
 	const nestedTextHelper = renderNestedTextHelper(textFields);
 	const keywordFieldsLiteral = JSON.stringify(keywordFields);
 	const textSortFieldsLiteral = JSON.stringify(textSortFields);
@@ -780,6 +823,8 @@ function renderPrepareFunction(
 	// gates work on the head < tail FIFO indexes (real items are written into
 	// slots[tail] before tail advances).
 	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
+	const buildSortFunction = renderBuildSortFunction();
+	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -811,7 +856,7 @@ ${aggsAssignment}
 export function response(ctx) {
 	return ctx.result;
 }
-${buildAggsFunction}${nestedTextHelper}
+${buildAggsFunction}${textSpecDeclaration}${nestedTextHelper}
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
@@ -849,229 +894,8 @@ ${textQueryPush}
 
 const TEXT_SORT_FIELDS = ${textSortFieldsLiteral};
 
-function buildSort(sortBy) {
-	const fallback = [{ _score: "desc" }, { _id: "asc" }];
-	if (!sortBy || sortBy.length === 0) {
-		return fallback;
-	}
-	const out = [];
-	for (const entry of sortBy) {
-		if (entry && entry.field) {
-			const direction = entry.direction === "ASC" ? "asc" : "desc";
-			// OpenSearch refuses to sort on \`text\` fields. The emit-mapping
-			// layer always adds a \`.keyword\` subfield for sortable text
-			// fields, so target that subfield at runtime.
-			const target = TEXT_SORT_FIELDS.indexOf(entry.field) >= 0
-				? entry.field + ".keyword"
-				: entry.field;
-			out.push({ [target]: direction });
-		}
-	}
-	// Always tie-break on _id for stable cursor pagination.
-	out.push({ _id: "asc" });
-	return out;
-}
-
-function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
-	if (!rootSpec || !rootInput) return;
-
-	// APPSYNC_JS forbids while, continue, C-style for(init;cond;update), and
-	// the increment/decrement unary operators (lint rules @aws-appsync/no-while,
-	// @aws-appsync/no-continue, @aws-appsync/no-for,
-	// @aws-appsync/no-disallowed-unary-operators), and recursion
-	// (@aws-appsync/no-recursion). It also does not honor the ECMA spec for
-	// Array's @@iterator: items pushed during \`for...of\` iteration are NOT
-	// visited (verified via aws appsync evaluate-code). Iteration is driven
-	// by fixed-length slot pools whose \`for...of\` runs exactly slots.length
-	// times; bodies check head/tail indexes to act on real work.
-	//
-	// Two pools, two phases (issue #110):
-	//   procSlots — FIFO process queue. Each process item walks a spec list,
-	//     enqueueing more process items for nested/object descents.
-	//   finSlots — finalize stack drained LIFO after all processing is done.
-	//     Each "nested" descent pushes one finalize item carrying the
-	//     child-clause arrays and the path to wrap them with. LIFO ordering
-	//     guarantees deepest-first wrapping, so an inner nested's clauses
-	//     are wrapped onto its outer parent's child-clause array BEFORE
-	//     that outer parent's finalize runs.
-	//
-	// The previous single-FIFO design ran a parent's finalize before
-	// descendant processing finished whenever a non-nested struct ("object"
-	// kind) sat between two leaves and a nested ancestor — the descendant
-	// term clause landed in childFilters AFTER finalize had already drained
-	// it, silently dropping the filter (issue #110). The same hazard
-	// applies to nested-of-nested: outer finalize ran before inner finalize
-	// populated its parent's child-clause array. Splitting process and
-	// finalize into separate pools fixes both.
-	const procSlots = ${slotsLiteral};
-	const finSlots = ${slotsLiteral};
-	procSlots[0] = {
-		spec: rootSpec,
-		input: rootInput,
-		outFilters: rootOutFilters,
-		outMustNots: rootOutMustNots,
-	};
-	let procHead = 0;
-	let procTail = 1;
-	let finTail = 0;
-
-	for (const _slot of procSlots) {
-		if (procHead < procTail) {
-			const item = procSlots[procHead];
-			procHead = procHead + 1;
-			const spec = item.spec;
-			const input = item.input;
-			const outFilters = item.outFilters;
-			const outMustNots = item.outMustNots;
-
-			// FILTER_SPEC nodes use compact keys to fit under AppSync's 32 KB
-			// per-function code cap (issue #99): i=inputName, k=kind, f=field,
-			// p=path, c=children. See stringifyNode in the emitter. Range
-			// kind carries one entry per field; the function expands the
-			// four bound inputs (i+"Gte"/Lte/Gt/Lt) at iteration time
-			// (issue #101).
-			for (const node of spec) {
-				const value = input[node.i];
-				if (node.k === "nested") {
-					if (value != null) {
-						const childFilters = [];
-						const childMustNots = [];
-						if (procTail + 1 > procSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
-						}
-						if (finTail + 1 > finSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed finalize-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
-						}
-						procSlots[procTail] = {
-							spec: node.c,
-							input: value,
-							outFilters: childFilters,
-							outMustNots: childMustNots,
-						};
-						procTail = procTail + 1;
-						finSlots[finTail] = {
-							path: node.p,
-							childFilters,
-							childMustNots,
-							parentFilters: outFilters,
-							parentMustNots: outMustNots,
-						};
-						finTail = finTail + 1;
-					}
-				} else if (node.k === "object") {
-					if (value != null) {
-						if (procTail + 1 > procSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
-						}
-						procSlots[procTail] = {
-							spec: node.c,
-							input: value,
-							outFilters,
-							outMustNots,
-						};
-						procTail = procTail + 1;
-					}
-				} else if (node.k === "term") {
-					if (value != null) {
-						outFilters.push({ term: { [node.f]: value } });
-					}
-				} else if (node.k === "term_negate") {
-					if (value != null) {
-						outMustNots.push({ term: { [node.f]: value } });
-					}
-				} else if (node.k === "terms") {
-					if (value != null && value.length > 0) {
-						outFilters.push({ terms: { [node.f]: value } });
-					}
-				} else if (node.k === "exists") {
-					if (value != null) {
-						if (value === true) {
-							outFilters.push({ exists: { field: node.f } });
-						} else {
-							outMustNots.push({ exists: { field: node.f } });
-						}
-					}
-				} else if (node.k === "nested_exists") {
-					if (value != null) {
-						const nestedClause = {
-							nested: { path: node.p, query: { match_all: {} } },
-						};
-						if (value === true) {
-							outFilters.push(nestedClause);
-						} else {
-							outMustNots.push(nestedClause);
-						}
-					}
-				} else if (node.k === "range") {
-					const base = node.i;
-					const bounds = {};
-					let any = false;
-					if (input[base + "Gte"] != null) {
-						bounds.gte = input[base + "Gte"];
-						any = true;
-					}
-					if (input[base + "Lte"] != null) {
-						bounds.lte = input[base + "Lte"];
-						any = true;
-					}
-					if (input[base + "Gt"] != null) {
-						bounds.gt = input[base + "Gt"];
-						any = true;
-					}
-					if (input[base + "Lt"] != null) {
-						bounds.lt = input[base + "Lt"];
-						any = true;
-					}
-					if (any) {
-						outFilters.push({ range: { [node.f]: bounds } });
-					}
-				} else if (node.k === "prefix") {
-					if (value != null && value !== "") {
-						outFilters.push({ prefix: { [node.f]: value } });
-					}
-				} else if (node.k === "match") {
-					if (value != null && value !== "") {
-						outFilters.push({ match: { [node.f]: value } });
-					}
-				}
-			}
-		}
-	}
-
-	// Finalize phase: drain LIFO. Deepest finalize first wraps its child
-	// clauses onto its parent's childFilters/childMustNots array; that
-	// parent's finalize, popped later, then sees those wrapped clauses and
-	// wraps them in its own nested+path on the way to the grandparent.
-	for (const _slot of finSlots) {
-		if (finTail > 0) {
-			finTail = finTail - 1;
-			const item = finSlots[finTail];
-			for (const clause of item.childFilters) {
-				item.parentFilters.push({
-					nested: {
-						path: item.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
-			}
-			for (const clause of item.childMustNots) {
-				item.parentMustNots.push({
-					nested: {
-						path: item.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
-			}
-		}
-	}
-}
-`;
+${buildSortFunction}
+${applyFilterSpecFunction}`;
 }
 
 /**
