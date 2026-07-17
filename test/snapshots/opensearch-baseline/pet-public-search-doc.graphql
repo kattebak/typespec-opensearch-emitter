@@ -5,16 +5,35 @@ type PetPublicSearchDoc {
   breed: String
   birthDate: String!
   createdAt: String!
-  tags: [String!]!
-  owner: String!
+  tags: [Tag!]!
+  owner: Owner!
   aliases: [String!]!
   nickname: String
   rank: Int!
   stock: Int!
   score: Float!
   active: Boolean!
-  approvals: [String!]!
-  bankAccountApprovals: [String!]!
+  approvals: [Approval!]!
+  bankAccountApprovals: [BankAccountApproval!]!
+}
+
+type Tag {
+  name: String!
+  note: String
+}
+
+type Owner {
+  name: String!
+}
+
+type Approval {
+  type: String!
+  grantedBy: String!
+}
+
+type BankAccountApproval {
+  accountId: String!
+  approvedBy: String!
 }
 
 input PetPublicSearchDocFilter {

@@ -280,6 +280,66 @@ describe("emitGraphQLSdl", () => {
 		assert.ok(result.content.includes("tags: [TagSearchDoc!]!"));
 	});
 
+	it("emits object type and a matching `type <Model>` block for a model-array field not redeclared as a projection (issue #160)", () => {
+		// A `@searchable` array-of-model field with no sub-projection (not
+		// redeclared, not on a `@searchInfer` path). The doc type and mapping
+		// describe it as a nested object; before the fix the SDL emitted
+		// `[String!]!`, contradicting both. Assert the object shape so the
+		// pre-fix fallback fails this test.
+		const typeProp = {
+			name: "type",
+			type: { kind: "Scalar", name: "string" },
+			optional: false,
+		};
+		const grantedByProp = {
+			name: "grantedBy",
+			type: { kind: "Scalar", name: "string" },
+			optional: false,
+		};
+		const approvalModel = {
+			kind: "Model",
+			name: "Approval",
+			properties: new Map([
+				["type", typeProp],
+				["grantedBy", grantedByProp],
+			]),
+		};
+		const searchable = new Set([typeProp, grantedByProp]);
+		const program = {
+			stateSet: () => searchable,
+			stateMap: () => ({ get: () => undefined, has: () => false }),
+		} as never;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "approvals",
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: approvalModel },
+					} as unknown as Type,
+				}),
+			],
+		});
+
+		const result = emitGraphQLSdl(program, projection, defaultOptions);
+		assert.ok(
+			result.content.includes("approvals: [Approval!]!"),
+			"response field references the model by name, not String",
+		);
+		assert.ok(
+			!result.content.includes("approvals: [String!]!"),
+			"the String fallback must not appear",
+		);
+		assert.ok(
+			result.content.match(/^type Approval \{/m),
+			"emits `type Approval { ... }` block",
+		);
+		assert.ok(result.content.includes("type: String!"));
+		assert.ok(result.content.includes("grantedBy: String!"));
+	});
+
 	it("emits `type <Name>` block for nested struct virtual sub-projections referenced from response shape", () => {
 		// Issue: when a projection references a nested struct (e.g. Address)
 		// via @searchInfer auto-recursion, only `input AddressSearchFilter`
