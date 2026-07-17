@@ -198,7 +198,9 @@ export async function $onEmit(
 
 		// Nested-only: stripped SDL fragment so parent projections that
 		// reference the type by name get a definition in the assembled
-		// schema. No resolver, no manifest entry — issue #123.
+		// schema. No resolver, no `resolvers[]` entry — issue #123. The
+		// fragment is named in the manifest's `nestedTypes` (issue #164) so a
+		// consumer assembling a schema from the manifest can find it.
 		for (const projection of nestedOnly) {
 			const sdlFile = emitGraphQLSdl(context.program, projection, {
 				...pageOptions,
@@ -270,6 +272,7 @@ export async function $onEmit(
 				resourcePathPrefix,
 				restOptions?.sdlFileName,
 			),
+			generateNestedTypeEntries(nestedOnly),
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
@@ -454,11 +457,33 @@ interface RestManifestEntry {
 	sdlFile: string;
 }
 
+interface NestedTypeManifestEntry {
+	projection: string;
+	sdlFile: string;
+}
+
+/**
+ * Nested-type manifest entries (issue #164). A nested-only projection has no
+ * Query field, resolver, or index, so it has nothing to say in `resolvers[]`
+ * — but its SDL fragment defines a type that top-level fragments reference by
+ * name. Without it in the manifest, a schema assembled from
+ * `resolvers[].sdlFile` alone dangles on that reference.
+ */
+function generateNestedTypeEntries(
+	nestedOnly: ResolvedProjection[],
+): NestedTypeManifestEntry[] {
+	return nestedOnly.map((projection) => ({
+		projection: projection.projectionModel.name,
+		sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,
+	}));
+}
+
 function generateGraphQLManifest(
 	projections: TopLevelProjection[],
 	resolverFiles: EmittedResolverFile[],
 	queryFieldDirectives?: string[][],
 	restEntries?: RestManifestEntry[],
+	nestedTypes?: NestedTypeManifestEntry[],
 ): string {
 	const resolvers = projections.map((projection, i) => {
 		const resolver = resolverFiles[i];
@@ -492,7 +517,16 @@ function generateGraphQLManifest(
 	// present the manifest is byte-identical to the OpenSearch-only emit.
 	const allResolvers = [...resolvers, ...(restEntries ?? [])];
 
-	return `${JSON.stringify({ resolvers: allResolvers }, null, 2)}\n`;
+	// `nestedTypes` (issue #164) is omitted when no projection is nested-only,
+	// so a spec without one emits a byte-identical manifest.
+	return `${JSON.stringify(
+		{
+			resolvers: allResolvers,
+			...(nestedTypes && nestedTypes.length > 0 ? { nestedTypes } : {}),
+		},
+		null,
+		2,
+	)}\n`;
 }
 
 /**
@@ -526,6 +560,7 @@ export const __test = {
 	generateTsConfig,
 	generateGraphQLManifest,
 	generateRestManifestEntries,
+	generateNestedTypeEntries,
 	generateGraphQLEntryPoint,
 	validateResourcePathPrefix,
 };

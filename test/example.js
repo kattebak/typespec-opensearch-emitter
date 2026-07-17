@@ -372,6 +372,82 @@ test("@searchProjection without @indexName is nested-only (issue #157)", async (
 	);
 });
 
+test("nested-only projections are discoverable through manifest.nestedTypes (issue #164)", async () => {
+	// PetSearchDoc's SDL references ApprovalSearchDoc and
+	// BankAccountApprovalSearchDoc by name. Both fragments are emitted and
+	// exported, but a consumer reading only `resolvers[].sdlFile` never
+	// learns of them and the assembled schema fails with `Unknown type`.
+	const manifest = JSON.parse(
+		await readFile(`${OUT_DIR}/graphql-resolvers.json`, "utf8"),
+	);
+
+	assert.deepEqual(
+		manifest.nestedTypes,
+		[
+			{
+				projection: "ApprovalSearchDoc",
+				sdlFile: "approval-search-doc.graphql",
+			},
+			{
+				projection: "BankAccountApprovalSearchDoc",
+				sdlFile: "bank-account-approval-search-doc.graphql",
+			},
+		],
+		"every nested-only projection must be named with its SDL fragment",
+	);
+
+	// The listed fragments carry the type definitions the parent dangles on.
+	for (const nested of manifest.nestedTypes) {
+		const sdl = await readFile(`${OUT_DIR}/${nested.sdlFile}`, "utf8");
+		assert.ok(
+			sdl.includes(`type ${nested.projection} {`),
+			`${nested.sdlFile} must define type ${nested.projection}`,
+		);
+	}
+
+	// Concatenating resolvers[].sdlFile + nestedTypes[].sdlFile must leave no
+	// referenced type undefined — that concatenation is the manifest's whole
+	// job, so assert it end-to-end rather than per-entry.
+	const sdlFiles = [
+		...manifest.resolvers.map((r) => r.sdlFile),
+		...manifest.nestedTypes.map((n) => n.sdlFile),
+	];
+	const assembled = (
+		await Promise.all(
+			sdlFiles.map((file) => readFile(`${OUT_DIR}/${file}`, "utf8")),
+		)
+	).join("\n");
+
+	const defined = new Set(
+		[...assembled.matchAll(/^(?:type|input|enum|interface)\s+(\w+)/gm)].map(
+			(match) => match[1],
+		),
+	);
+	const referenced = new Set(
+		[...assembled.matchAll(/^\s+\w+(?:\([^)]*\))?:\s*\[?(\w+)/gm)].map(
+			(match) => match[1],
+		),
+	);
+	const scalars = new Set([
+		"String",
+		"Int",
+		"Float",
+		"Boolean",
+		"ID",
+		"AWSJSON",
+	]);
+
+	for (const typeName of referenced) {
+		if (scalars.has(typeName) || defined.has(typeName)) continue;
+		assert.fail(`assembled schema dangles on unknown type "${typeName}"`);
+	}
+
+	// Nested types stay out of resolvers[] — no Query field, no index.
+	const projections = manifest.resolvers.map((r) => r.projection);
+	assert.ok(!projections.includes("ApprovalSearchDoc"));
+	assert.ok(!projections.includes("BankAccountApprovalSearchDoc"));
+});
+
 test("@indexName-backed projections keep their top-level wiring (issue #157)", async () => {
 	const manifest = JSON.parse(
 		await readFile(`${OUT_DIR}/graphql-resolvers.json`, "utf8"),
