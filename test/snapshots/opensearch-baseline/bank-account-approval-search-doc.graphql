@@ -1,0 +1,4 @@
+type BankAccountApprovalSearchDoc {
+  accountId: String!
+  approvedBy: String!
+}

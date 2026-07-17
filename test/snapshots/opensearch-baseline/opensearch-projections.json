@@ -132,6 +132,12 @@
           "optional": false,
           "keyword": false,
           "nested": false
+        },
+        {
+          "name": "bankAccountApprovals",
+          "optional": false,
+          "keyword": false,
+          "nested": false
         }
       ]
     },
@@ -236,6 +242,12 @@
         },
         {
           "name": "approvals",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "bankAccountApprovals",
           "optional": false,
           "keyword": false,
           "nested": false

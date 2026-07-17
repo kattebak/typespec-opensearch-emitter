@@ -10,8 +10,8 @@ import {
 	type SearchFilterShape,
 } from "./filters.js";
 import type {
-	ResolvedProjection,
 	ResolvedProjectionField,
+	TopLevelProjection,
 } from "./projection.js";
 import { toKebabCase } from "./utils.js";
 
@@ -119,7 +119,7 @@ const AUTO_DATE_HISTOGRAM_HELPER = "ADH";
 const FILTER_WORK_SLOT_COUNT = 256;
 
 export async function emitGraphQLResolver(
-	projection: ResolvedProjection,
+	projection: TopLevelProjection,
 	options: ResolverOptions,
 ): Promise<EmittedResolverFile> {
 	const typeName = projection.projectionModel.name;

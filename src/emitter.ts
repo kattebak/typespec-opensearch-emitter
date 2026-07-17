@@ -34,6 +34,7 @@ import {
 	isSearchProjectionModel,
 	type ResolvedProjection,
 	resolveProjectionModel,
+	type TopLevelProjection,
 } from "./projection.js";
 import {
 	collectRestOperations,
@@ -72,13 +73,18 @@ export async function $onEmit(
 	// are nested-only: they still get a doc type and a stripped SDL fragment
 	// so siblings can reference them, but no top-level wiring. This is a
 	// breaking change for fixtures relying on the old name-based behavior.
-	const topLevel = resolved.filter((projection) =>
-		isSearchProjection(context.program, projection.projectionModel),
-	);
-	const nestedOnly = resolved.filter(
-		(projection) =>
-			!isSearchProjection(context.program, projection.projectionModel),
-	);
+	//
+	// Issue #157 — `@indexName` is the second gate. A projection with no
+	// declared index has no index to query; emitting a Query field for it
+	// produced resolvers that failed at runtime against a nonexistent index.
+	const isTopLevel = (
+		projection: ResolvedProjection,
+	): projection is TopLevelProjection =>
+		isSearchProjection(context.program, projection.projectionModel) &&
+		projection.indexName !== undefined;
+
+	const topLevel = resolved.filter(isTopLevel);
+	const nestedOnly = resolved.filter((projection) => !isTopLevel(projection));
 
 	for (const projection of topLevel) {
 		const docTypeFile = emitDocType(context.program, projection);
@@ -366,7 +372,7 @@ function isTemplateDeclaration(model: Model): boolean {
 	return false;
 }
 
-function serializeProjections(resolved: ResolvedProjection[]) {
+function serializeProjections(resolved: TopLevelProjection[]) {
 	return {
 		projections: resolved.map((projection) => ({
 			name: projection.projectionModel.name,
@@ -447,7 +453,7 @@ interface RestManifestEntry {
 }
 
 function generateGraphQLManifest(
-	projections: ResolvedProjection[],
+	projections: TopLevelProjection[],
 	resolverFiles: EmittedResolverFile[],
 	queryFieldDirectives?: string[][],
 	restEntries?: RestManifestEntry[],

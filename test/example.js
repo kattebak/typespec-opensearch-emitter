@@ -312,6 +312,91 @@ test("nested-only projections emit a stripped SDL fragment + doc type, no top-le
 	assert.ok(!indexTs.includes("APPROVAL_SEARCH_DOC_INDEX_NAME"));
 });
 
+test("@searchProjection without @indexName is nested-only (issue #157)", async () => {
+	// BankAccountApprovalSearchDoc carries @searchProjection but declares no
+	// @indexName. There is no index for a resolver to query, so it must get
+	// the same nested-only treatment as an undecorated projection.
+	const manifest = JSON.parse(
+		await readFile(`${OUT_DIR}/graphql-resolvers.json`, "utf8"),
+	);
+	const names = manifest.resolvers.map((r) => r.queryFieldName);
+	assert.ok(
+		!names.includes("searchBankAccountApproval"),
+		"index-less projections must not appear in the resolver manifest",
+	);
+	// Every manifest entry that does exist names a real, declared index.
+	for (const resolver of manifest.resolvers.filter((r) => r.indexName)) {
+		assert.ok(
+			resolver.indexName,
+			`${resolver.queryFieldName} must carry a declared index name`,
+		);
+		assert.ok(
+			!resolver.indexName.endsWith("_search_doc") ||
+				[
+					"tag_search_doc",
+					"pet_public_search_doc",
+					"person_search_doc",
+				].includes(resolver.indexName),
+			`${resolver.queryFieldName} must not fall back to a derived index name`,
+		);
+	}
+
+	// No Query field in the SDL fragment, and no Connection plumbing behind it.
+	const sdl = await readFile(
+		`${OUT_DIR}/bank-account-approval-search-doc.graphql`,
+		"utf8",
+	);
+	assert.ok(sdl.includes("type BankAccountApprovalSearchDoc {"));
+	assert.ok(!sdl.includes("BankAccountApprovalSearchDocConnection"));
+	assert.ok(!sdl.includes("searchBankAccountApproval"));
+
+	// Doc type stays — the parent needs the TS shape for the array element.
+	const docType = await readFile(
+		`${OUT_DIR}/bank-account-approval-search-doc.ts`,
+		"utf8",
+	);
+	assert.ok(docType.includes("BankAccountApprovalSearchDoc"));
+
+	// No mapping, no resolver, no index constant.
+	await assert.rejects(
+		readFile(
+			`${OUT_DIR}/bank-account-approval-search-doc-search-mapping.json`,
+			"utf8",
+		),
+		"index-less projections must not emit a mapping file",
+	);
+	await assert.rejects(
+		readFile(`${OUT_DIR}/bank-account-approval-search-doc-resolver.js`, "utf8"),
+		"index-less projections must not emit a resolver",
+	);
+	const indexTs = await readFile(`${OUT_DIR}/index.ts`, "utf8");
+	assert.ok(!indexTs.includes("BANK_ACCOUNT_APPROVAL_SEARCH_DOC_INDEX_NAME"));
+
+	// The parent still references the type through the array element.
+	const petSdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
+	assert.ok(
+		petSdl.includes("bankAccountApprovals: [BankAccountApprovalSearchDoc!]!"),
+	);
+});
+
+test("@indexName-backed projections keep their top-level wiring (issue #157)", async () => {
+	const manifest = JSON.parse(
+		await readFile(`${OUT_DIR}/graphql-resolvers.json`, "utf8"),
+	);
+	const byField = new Map(manifest.resolvers.map((r) => [r.queryFieldName, r]));
+
+	for (const [field, indexName] of [
+		["searchPet", "pets_v1"],
+		["searchTag", "tag_search_doc"],
+		["searchPetPublic", "pet_public_search_doc"],
+		["searchPerson", "person_search_doc"],
+	]) {
+		const resolver = byField.get(field);
+		assert.ok(resolver, `${field} must still be emitted`);
+		assert.equal(resolver.indexName, indexName);
+	}
+});
+
 test("emits @graphqlDirectives on response-path types and surfaces them in the manifest (issue #121)", async () => {
 	const sdl = await readFile(`${OUT_DIR}/tag-search-doc.graphql`, "utf8");
 	const manifest = JSON.parse(
