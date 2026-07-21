@@ -929,9 +929,10 @@ describe("emitGraphQLSdl SearchFilter input", () => {
 		assert.ok(result.content.includes("updatedAtGte: String"));
 		assert.ok(!result.content.includes("createdAtGte: Int"));
 		assert.ok(!result.content.includes("updatedAtGte: Int"));
-		// Response type for int64 fields is unchanged (still Int) — out of scope
-		// for this fix; only filter inputs overflow at GraphQL parse time.
-		assert.ok(result.content.match(/createdAt: Int(?!\w)/));
+		// Response type for int64 fields maps to Float: AppSync rejects values
+		// > 2^31-1 during response coercion, nulling the whole query response.
+		assert.ok(result.content.match(/createdAt: Float(?!\w)/));
+		assert.ok(!result.content.match(/createdAt: Int(?!\w)/));
 	});
 
 	it("preserves Int for int32 range filter inputs (only int64 / uint64 are remapped)", () => {

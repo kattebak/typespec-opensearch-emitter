@@ -52,22 +52,16 @@ function scalarToGraphQL(scalar: Scalar, context: GraphQLEmitContext): string {
 				return "String";
 			case "int64":
 			case "uint64":
-				// AppSync GraphQL has no Long scalar; Int is 32-bit (max ~2.1B) so
-				// realistic int64 values (e.g. epoch-ms timestamps ~1.7T) overflow at
-				// parse time on filter inputs. Emit String for filter inputs so callers
-				// can serialize the 64-bit value as a numeric string. Response types
-				// keep Int for backward compatibility (a separate concern, since the
-				// resolver-side serialization path is already constrained by AppSync).
-				// The REST target maps to Float (issue #138): AppSync rejects values
-				// > 2^31-1 during response coercion, and Float (IEEE double) is exact
-				// for integers up to 2^53 — fine for epoch-ms timestamps.
-				if (context === "rest") return "Float";
-				return context === "filter" ? "String" : "Int";
+				// AppSync GraphQL has no Long scalar and its Int is 32-bit (max ~2.1B),
+				// so realistic values (epoch-ms ~1.7T) overflow. Response and rest map to
+				// Float: AppSync rejects values > 2^31-1 during response coercion (nulling
+				// the whole query response), and Float (IEEE double) is exact to 2^53.
+				// Filter maps to String because 64-bit values can exceed 2^53.
+				return context === "filter" ? "String" : "Float";
 			case "safeint":
-				// safeint spans up to 2^53, which also overflows GraphQL's 32-bit Int.
-				// The REST target maps it to Float (issue #138); the OpenSearch paths
-				// keep Int unchanged.
-				return context === "rest" ? "Float" : "Int";
+				// safeint spans up to 2^53, overflowing GraphQL's 32-bit Int. Response and
+				// rest map to Float (exact to 2^53); AppSync coerces the response otherwise.
+				return context === "filter" ? "Int" : "Float";
 			case "int32":
 			case "integer":
 			case "uint8":
