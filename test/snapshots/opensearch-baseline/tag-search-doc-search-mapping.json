@@ -1,5 +1,6 @@
 {
   "mappings": {
+    "date_detection": false,
     "properties": {
       "name": {
         "type": "keyword"

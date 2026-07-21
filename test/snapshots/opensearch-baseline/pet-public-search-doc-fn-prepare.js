@@ -81,6 +81,7 @@ function buildQuery(queryText, filter, searchFilter) {
 				query: queryText,
 				fields: ["id","breed","nickname"],
 				type: "best_fields",
+				lenient: true,
 			},
 		});
 	}

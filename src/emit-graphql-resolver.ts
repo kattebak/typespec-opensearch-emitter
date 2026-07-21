@@ -328,7 +328,7 @@ function renderNestedTextHelper(textFields: TextFieldCollection): string {
 
 	return `
 function ${NESTED_TEXT_QUERY_HELPER}(path, fields, queryText) {
-	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields" } } } };
+	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields", lenient: true } } } };
 }
 `;
 }
@@ -378,6 +378,7 @@ function renderTextQueryPush(textFields: TextFieldCollection): string {
 				query: queryText,
 				fields: ${flatLiteral},
 				type: "best_fields",
+				lenient: true,
 			},
 		});`;
 	}
@@ -388,7 +389,7 @@ function renderTextQueryPush(textFields: TextFieldCollection): string {
 	// rather than emit one that matches on paths nobody marked @searchable.
 	return `		const shoulds = [];
 		if (TEXT_FIELDS.length > 0) {
-			shoulds.push({ multi_match: { query: queryText, fields: TEXT_FIELDS, type: "best_fields" } });
+			shoulds.push({ multi_match: { query: queryText, fields: TEXT_FIELDS, type: "best_fields", lenient: true } });
 		}
 		for (const group of NESTED_TEXT_GROUPS) {
 			shoulds.push(${NESTED_TEXT_QUERY_HELPER}(group[0], group[1], queryText));

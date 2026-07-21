@@ -74,7 +74,7 @@ const TEXT_FIELDS = ["id","name","breed","nickname"];
 const NESTED_TEXT_GROUPS = [["tags",["tags.note"]]];
 
 function NQ(path, fields, queryText) {
-	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields" } } } };
+	return { nested: { path, score_mode: "max", query: { multi_match: { query: queryText, fields, type: "best_fields", lenient: true } } } };
 }
 
 function buildQuery(queryText, filter, searchFilter) {
@@ -85,7 +85,7 @@ function buildQuery(queryText, filter, searchFilter) {
 	if (queryText) {
 		const shoulds = [];
 		if (TEXT_FIELDS.length > 0) {
-			shoulds.push({ multi_match: { query: queryText, fields: TEXT_FIELDS, type: "best_fields" } });
+			shoulds.push({ multi_match: { query: queryText, fields: TEXT_FIELDS, type: "best_fields", lenient: true } });
 		}
 		for (const group of NESTED_TEXT_GROUPS) {
 			shoulds.push(NQ(group[0], group[1], queryText));
