@@ -33,7 +33,9 @@ export function emitMapping(
 		defaultIgnoreAbove,
 	);
 
-	const mappings: Record<string, unknown> = { mappings: { properties } };
+	const mappings: Record<string, unknown> = {
+		mappings: { date_detection: false, properties },
+	};
 
 	if (projection.indexSettings) {
 		(mappings as Record<string, unknown>).settings = projection.indexSettings;

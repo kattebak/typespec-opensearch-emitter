@@ -340,6 +340,7 @@ describe("emitGraphQLResolver", () => {
 										query: "rex",
 										fields: ["name", "owner.fullName"],
 										type: "best_fields",
+										lenient: true,
 									},
 								},
 								{
@@ -351,6 +352,7 @@ describe("emitGraphQLResolver", () => {
 												query: "rex",
 												fields: ["tags.label"],
 												type: "best_fields",
+												lenient: true,
 											},
 										},
 									},
@@ -398,6 +400,7 @@ describe("emitGraphQLResolver", () => {
 				query: queryText,
 				fields: ["name","description"],
 				type: "best_fields",
+				lenient: true,
 			},
 		});`),
 		);
@@ -437,6 +440,7 @@ describe("emitGraphQLResolver", () => {
 				query: "ABC",
 				fields: ["references.value"],
 				type: "best_fields",
+				lenient: true,
 			},
 		});
 	});
@@ -493,6 +497,7 @@ describe("emitGraphQLResolver", () => {
 												query: "rex",
 												fields: ["references.value", "references.issuer.code"],
 												type: "best_fields",
+												lenient: true,
 											},
 										},
 									},
@@ -506,6 +511,7 @@ describe("emitGraphQLResolver", () => {
 												query: "rex",
 												fields: ["tags.label"],
 												type: "best_fields",
+												lenient: true,
 											},
 										},
 									},

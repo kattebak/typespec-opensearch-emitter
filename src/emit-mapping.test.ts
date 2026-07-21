@@ -57,6 +57,7 @@ describe("mapping emitter", () => {
 		assert.equal(emitted.fileName, "product-search-doc-search-mapping.json");
 
 		const parsed = JSON.parse(emitted.content);
+		assert.equal(parsed.mappings.date_detection, false);
 		assert.equal(parsed.mappings.properties.title.type, "keyword");
 		assert.equal(parsed.mappings.properties.id.type, "text");
 		assert.equal(parsed.mappings.properties.id.analyzer, "edge_ngram");
@@ -75,6 +76,29 @@ describe("mapping emitter", () => {
 		assert.deepEqual(Object.keys(parsed.mappings.properties.tags.properties), [
 			"name",
 		]);
+	});
+
+	it("disables date_detection so string fields are never dynamically mapped as date", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable name: string;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+		assert.equal(parsed.mappings.date_detection, false);
 	});
 
 	it("maps arrays of scalars as text (no @nested)", async () => {
