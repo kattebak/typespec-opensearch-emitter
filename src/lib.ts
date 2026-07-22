@@ -175,6 +175,18 @@ export const $lib = createTypeSpecLibrary({
 					"Decorator @filterable requires at least one filter kind argument.",
 			},
 		},
+		"resolver-function-too-large": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Generated AppSync resolver function "${"file"}" is ${"bytes"} bytes, over AppSync's hard 32,768-byte per-function code limit. The pipeline split could not reduce it further — the projection concentrates too much filter/aggregation work in a single nested path. Reduce the @filterable/@aggregatable surface on that path, or split the projection.`,
+			},
+		},
+		"pipeline-too-many-functions": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Projection "${"name"}" needs ${"count"} pipeline functions after the resolver split, over AppSync's limit of 10 functions per pipeline resolver. Reduce the @filterable/@aggregatable surface, or split the projection into narrower documents.`,
+			},
+		},
 		"searchfilter-name-collision": {
 			severity: "error",
 			messages: {

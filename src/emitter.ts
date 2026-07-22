@@ -4,7 +4,7 @@ import type {
 	Namespace,
 	Program,
 } from "@typespec/compiler";
-import { emitFile, resolvePath } from "@typespec/compiler";
+import { emitFile, NoTarget, resolvePath } from "@typespec/compiler";
 import { isSearchProjection } from "./decorators.js";
 import {
 	collectSubProjections,
@@ -12,9 +12,11 @@ import {
 	toDocTypeFileName,
 } from "./emit-doc-type.js";
 import {
+	APPSYNC_FUNCTION_BYTE_LIMIT,
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 	type EmittedResolverFile,
 	emitGraphQLResolver,
+	MAX_PIPELINE_FUNCTIONS,
 } from "./emit-graphql-resolver.js";
 import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
@@ -184,6 +186,11 @@ export async function $onEmit(
 				resolverOptions,
 			);
 			resolverFiles.push(resolverFile);
+			assertResolverFilesFit(
+				context.program,
+				projection.projectionModel.name,
+				resolverFile,
+			);
 			await emitFile(context.program, {
 				path: resolvePath(context.emitterOutputDir, resolverFile.fileName),
 				content: resolverFile.content,
@@ -530,6 +537,49 @@ function generateGraphQLManifest(
 }
 
 /**
+ * Issue #173 — hard-fail compile when the emitted resolver code cannot deploy,
+ * so the over-cap case can never pass compile silently and only fail later at
+ * AppSync `CreateFunction`. Two conditions: any generated AppSync function file
+ * (the resolver-level after-mapping and every pipeline function) over the
+ * 32,768-byte per-function code limit, and a pipeline needing more functions
+ * than AppSync allows on one resolver. Both mean the recursive split ran out of
+ * room and the projection must shed filter/aggregation surface.
+ */
+function assertResolverFilesFit(
+	program: Program,
+	projectionName: string,
+	resolverFile: EmittedResolverFile,
+): void {
+	const files = [
+		{ fileName: resolverFile.fileName, content: resolverFile.content },
+		...resolverFile.functions.map((fn) => ({
+			fileName: fn.fileName,
+			content: fn.content,
+		})),
+	];
+	for (const file of files) {
+		const bytes = Buffer.byteLength(file.content, "utf-8");
+		if (bytes > APPSYNC_FUNCTION_BYTE_LIMIT) {
+			reportDiagnostic(program, {
+				code: "resolver-function-too-large",
+				format: { file: file.fileName, bytes: String(bytes) },
+				target: NoTarget,
+			});
+		}
+	}
+	if (resolverFile.functions.length > MAX_PIPELINE_FUNCTIONS) {
+		reportDiagnostic(program, {
+			code: "pipeline-too-many-functions",
+			format: {
+				name: projectionName,
+				count: String(resolverFile.functions.length),
+			},
+			target: NoTarget,
+		});
+	}
+}
+
+/**
  * Issue #157 — `@searchProjection` states an intent for top-level emission.
  * Without `@indexName` that intent is discarded, and the result is
  * byte-identical to an undecorated model, so the demotion is invisible in the
@@ -553,6 +603,7 @@ function reportDemotedProjections(
 export const __test = {
 	collectProjectionModels,
 	reportDemotedProjections,
+	assertResolverFilesFit,
 	isCandidateModel,
 	isTemplateDeclaration,
 	serializeProjections,
