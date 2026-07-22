@@ -10,7 +10,7 @@ type PetPublicSearchDoc {
   aliases: [String!]!
   nickname: String
   rank: Int!
-  stock: Int!
+  stock: Float!
   score: Float!
   active: Boolean!
   approvals: [Approval!]!
