@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Type } from "@typespec/compiler";
 import {
+	APPSYNC_FUNCTION_BYTE_LIMIT,
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 	emitGraphQLResolver,
 	MIN_AUTO_DATE_HISTOGRAM_BUCKETS,
@@ -3708,5 +3709,527 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		} finally {
 			await rm(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+// Issue #173 — the pipeline split is recursive and threshold-driven: it
+// measures every EMITTED function (not the monolithic render) and subdivides
+// the request side until each fits, so a wide @searchProjection can no longer
+// emit an over-cap `prepare` that only fails at AppSync CreateFunction.
+describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
+	// `monolithicThresholdBytes: 0` is the "always pipeline" sentinel; the
+	// emitter clamps it to the default per-function target, so a projection
+	// whose single prepare fits stays level 1. These fixtures push past that.
+	const forcePipeline = {
+		defaultPageSize: 20,
+		maxPageSize: 100,
+		trackTotalHitsUpTo: 10000,
+		monolithicThresholdBytes: 0,
+	};
+
+	function lowerFirst(s: string): string {
+		return s[0].toLowerCase() + s.slice(1);
+	}
+
+	// A filter-heavy, aggregation-light sub-model: several @filterable kinds per
+	// field make the FILTER_SPEC + walker the dominant cost, so the query side
+	// is what overflows and drives the level-2/3 split — mirroring the reported
+	// wide "find by nested reference" projection.
+	function filterHeavySub(name: string): ResolvedProjection {
+		return {
+			projectionModel: { name: `${name}SearchDoc` },
+			sourceModel: { name },
+			indexName: name.toLowerCase(),
+			fields: [
+				makeField({
+					name: `${lowerFirst(name)}Id`,
+					keyword: true,
+					filterables: ["term", "terms", "exists", "prefix"],
+				}),
+				makeField({
+					name: "code",
+					keyword: true,
+					filterables: ["term", "terms", "exists", "prefix"],
+				}),
+				makeField({
+					name: "type",
+					keyword: true,
+					filterables: ["term", "term_negate", "terms", "exists"],
+				}),
+				makeField({
+					name: "status",
+					keyword: true,
+					filterables: ["term", "term_negate", "terms", "exists"],
+				}),
+				makeField({ name: "label", filterables: ["prefix", "match"] }),
+				makeField({ name: "note", filterables: ["prefix", "match"] }),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+				}),
+				makeField({
+					name: "amount",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: ["terms"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+	}
+
+	function wideProjection(nestedCount: number): ResolvedProjection {
+		const shapes = Array.from({ length: nestedCount }, (_, i) => `Part${i}`);
+		return makeProjection({
+			name: "WidgetSearchDoc",
+			indexName: "widgets",
+			fields: [
+				makeField({
+					name: "widgetId",
+					keyword: true,
+					filterables: ["term", "terms", "exists", "prefix"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: ["min", "max"],
+				}),
+				...shapes.map((shape) =>
+					makeField({
+						name: `${shape.toLowerCase()}s`,
+						nested: true,
+						subProjection: filterHeavySub(shape),
+						filterables: ["exists"],
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				),
+			],
+		});
+	}
+
+	function functionsUnderCap(
+		result: EmitResult,
+	): { name: string; bytes: number }[] {
+		return [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
+		].map((f) => ({
+			name: f.name,
+			bytes: Buffer.byteLength(f.content, "utf-8"),
+		}));
+	}
+
+	it("level 2: splits an over-cap prepare into prepare-query + prepare-aggs, both NONE, then search on OPENSEARCH", async () => {
+		const result = await emitGraphQLResolver(wideProjection(18), forcePipeline);
+
+		assert.equal(result.mode, "pipeline");
+		assert.deepEqual(
+			result.functions.map((f) => ({ name: f.name, ds: f.dataSource })),
+			[
+				{ name: "prepare-query", ds: "NONE" },
+				{ name: "prepare-aggs", ds: "NONE" },
+				{ name: "search", ds: "OPENSEARCH" },
+			],
+		);
+		// prepare-query owns the FILTER_SPEC + free-text + sort; prepare-aggs owns
+		// the AGG_SPEC; both stash their contribution rather than a whole body.
+		const query = result.functions.find((f) => f.name === "prepare-query");
+		const aggs = result.functions.find((f) => f.name === "prepare-aggs");
+		assert.ok(query?.content.includes("const FILTER_SPEC = ["));
+		assert.ok(query?.content.includes("ctx.stash.filters"));
+		assert.ok(query?.content.includes("ctx.stash.sort"));
+		assert.ok(!query?.content.includes("const AGG_SPEC = ["));
+		assert.ok(aggs?.content.includes("const AGG_SPEC = ["));
+		assert.ok(aggs?.content.includes("ctx.stash.aggs"));
+		// search assembles the body from the stash and issues the one round-trip.
+		const search = result.functions.find((f) => f.name === "search");
+		assert.ok(search?.content.includes("ctx.stash.filters"));
+		assert.ok(search?.content.includes('operation: "GET"'));
+		assert.ok(search?.content.includes("/widgets/_search"));
+	});
+
+	it("level 3: partitions prepare-query across functions when the query workload alone overflows the cap", async () => {
+		const result = await emitGraphQLResolver(wideProjection(24), forcePipeline);
+
+		assert.equal(result.mode, "pipeline");
+		const queryFns = result.functions.filter((f) =>
+			f.name.startsWith("prepare-query"),
+		);
+		assert.ok(
+			queryFns.length >= 2,
+			`expected prepare-query to partition; got ${result.functions
+				.map((f) => f.name)
+				.join(", ")}`,
+		);
+		// The root query function keeps the request-wide work; the partitions
+		// carry only a filter-node slice and append to the shared stash arrays.
+		const root = result.functions.find((f) => f.name === "prepare-query");
+		assert.ok(root?.content.includes("ctx.stash.sort"));
+		assert.ok(root?.content.includes("buildSort"));
+		for (const fn of queryFns.filter((f) => f.name !== "prepare-query")) {
+			assert.ok(
+				fn.content.includes("applyFilterSpec(FILTER_SPEC"),
+				`${fn.name} must translate its filter slice`,
+			);
+			assert.ok(
+				!fn.content.includes("buildSort"),
+				`${fn.name} must not duplicate the sort/size work`,
+			);
+			assert.ok(fn.content.includes("ctx.stash.filters"));
+		}
+		// Every NONE function precedes the single trailing OPENSEARCH search.
+		const searchIndex = result.functions.findIndex(
+			(f) => f.dataSource === "OPENSEARCH",
+		);
+		assert.equal(searchIndex, result.functions.length - 1);
+		assert.equal(
+			result.functions.filter((f) => f.dataSource === "OPENSEARCH").length,
+			1,
+		);
+	});
+
+	it("keeps every emitted function under the 32,768-byte AppSync cap for a wide projection", async () => {
+		for (const nestedCount of [18, 22, 26]) {
+			const result = await emitGraphQLResolver(
+				wideProjection(nestedCount),
+				forcePipeline,
+			);
+			for (const file of functionsUnderCap(result)) {
+				assert.ok(
+					file.bytes < APPSYNC_FUNCTION_BYTE_LIMIT,
+					`${nestedCount}-nested ${file.name} is ${file.bytes} bytes; must stay under ${APPSYNC_FUNCTION_BYTE_LIMIT}. Headroom: ${APPSYNC_FUNCTION_BYTE_LIMIT - file.bytes}.`,
+				);
+			}
+		}
+	});
+
+	// Threads a shared ctx through the split pipeline: every NONE function's
+	// request runs in order (each mutating ctx.stash), then the OPENSEARCH
+	// function assembles and returns the body — the exact runtime contract.
+	function runSplitPipeline(
+		result: EmitResult,
+		info: { selectionSetList: string[] },
+		args: Record<string, unknown> = {},
+	): Record<string, unknown> {
+		const utilStub = {
+			base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+			base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+			error: (msg: string) => {
+				throw new Error(msg);
+			},
+		};
+		const ctx = { args, info, stash: {} as Record<string, unknown> };
+		function loadRequest(source: string) {
+			const stripped = source
+				.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+				.replace(/^export function /gm, "function ");
+			return new Function("util", `${stripped}\nreturn request;`)(utilStub) as (
+				c: unknown,
+			) => { params?: { body?: Record<string, unknown> } };
+		}
+		for (const fn of result.functions) {
+			if (fn.dataSource === "NONE") loadRequest(fn.content)(ctx);
+		}
+		const search = result.functions.find((f) => f.dataSource === "OPENSEARCH");
+		if (!search) throw new Error("split pipeline has no OPENSEARCH function");
+		const ret = loadRequest(search.content)(ctx);
+		if (!ret.params?.body) throw new Error("search produced no body");
+		return ret.params.body;
+	}
+
+	// A bool query's must/filter/must_not clauses are a commutative set, so the
+	// split (which appends per-partition) and the monolithic walk (one FIFO)
+	// may order them differently. Compare as sorted multisets.
+	function canonical(value: unknown): unknown {
+		if (Array.isArray(value)) {
+			return value
+				.map(canonical)
+				.map((v) => JSON.stringify(v))
+				.sort();
+		}
+		if (value && typeof value === "object") {
+			const out: Record<string, unknown> = {};
+			for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+				out[key] = canonical((value as Record<string, unknown>)[key]);
+			}
+			return out;
+		}
+		return value;
+	}
+
+	// A projection that fits monolithic; a 1-byte threshold forces the deepest
+	// split so the two paths can be compared on the same shape.
+	function comparableProjection(): ResolvedProjection {
+		function sub(name: string, fields: ResolvedProjection["fields"]) {
+			return {
+				projectionModel: { name: `${name}SearchDoc` },
+				sourceModel: { name },
+				indexName: name.toLowerCase(),
+				fields,
+			} as unknown as ResolvedProjection;
+		}
+		return makeProjection({
+			name: "WidgetSearchDoc",
+			indexName: "widgets",
+			fields: [
+				makeField({ name: "name", searchable: true }),
+				makeField({
+					name: "widgetId",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						"min",
+						"max",
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "parts",
+					nested: true,
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: sub("Part", [
+						makeField({
+							name: "partId",
+							keyword: true,
+							filterables: ["term", "terms", "exists"],
+							aggregations: ["terms"],
+						}),
+						makeField({
+							name: "status",
+							keyword: true,
+							filterables: ["term", "term_negate", "exists"],
+						}),
+						makeField({
+							name: "amount",
+							filterables: ["range"],
+							type: { kind: "Scalar", name: "float64" } as unknown as Type,
+						}),
+						makeField({ name: "label", searchable: true }),
+					]),
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: sub("Tag", [
+						makeField({
+							name: "tagId",
+							keyword: true,
+							filterables: ["term", "exists"],
+							aggregations: ["terms"],
+						}),
+						makeField({
+							name: "kind",
+							keyword: true,
+							filterables: ["term", "terms"],
+						}),
+					]),
+				}),
+			],
+		});
+	}
+
+	it("split pipeline assembles a body equivalent to the monolithic path", async () => {
+		const projection = comparableProjection();
+		const monolithic = await emitGraphQLResolver(projection, {
+			...forcePipeline,
+			monolithicThresholdBytes: 32000,
+		});
+		const split = await emitGraphQLResolver(projection, {
+			...forcePipeline,
+			monolithicThresholdBytes: 1,
+		});
+
+		assert.equal(monolithic.mode, "monolithic");
+		assert.equal(split.mode, "pipeline");
+		// The 1-byte threshold drives the split all the way to per-node
+		// partitions, exercising both the query and aggs level-3 paths.
+		assert.ok(
+			split.functions.filter((f) => f.name.startsWith("prepare-query"))
+				.length >= 2,
+		);
+		assert.ok(
+			split.functions.filter((f) => f.name.startsWith("prepare-aggs")).length >=
+				2,
+		);
+
+		const scenarios: {
+			name: string;
+			args: Record<string, unknown>;
+			info: { selectionSetList: string[] };
+		}[] = [
+			{ name: "match_all", args: {}, info: { selectionSetList: [] } },
+			{
+				name: "free-text + multi-field sort",
+				args: {
+					query: "rex",
+					sortBy: [
+						{ field: "createdAt", direction: "DESC" },
+						{ field: "name", direction: "ASC" },
+					],
+				},
+				info: { selectionSetList: [] },
+			},
+			{
+				name: "keyword + root + nested filters",
+				args: {
+					filter: { widgetId: "W1" },
+					searchFilter: {
+						widgetId: "W2",
+						widgetIdIn: ["a", "b"],
+						createdAtGte: "2020",
+						parts: { partId: "P1", statusNot: "X", amountGte: 5, amountLte: 9 },
+						tags: { tagId: "T1", kindIn: ["k1"] },
+					},
+				},
+				info: { selectionSetList: [] },
+			},
+			{
+				name: "nested existence + search_after",
+				args: {
+					after: Buffer.from(JSON.stringify([1, 2]), "utf8").toString("base64"),
+					searchFilter: { partsExists: true, tagsExists: false },
+				},
+				info: { selectionSetList: [] },
+			},
+			{
+				name: "aggregations across partitions",
+				args: {},
+				info: {
+					selectionSetList: [
+						"aggregations",
+						"aggregations/byWidgetId",
+						"aggregations/byCreatedAtOverTime",
+						"aggregations/byPartId",
+						"aggregations/byTagId",
+					],
+				},
+			},
+		];
+
+		for (const scenario of scenarios) {
+			const monoBody = evalRequestBody(
+				monolithic.content,
+				scenario.info,
+				scenario.args,
+			);
+			const splitBody = runSplitPipeline(split, scenario.info, scenario.args);
+			assert.deepEqual(
+				canonical(splitBody),
+				canonical(monoBody),
+				`split body diverges from monolithic for scenario "${scenario.name}"`,
+			);
+		}
+	});
+
+	it("divides the histogram bucket budget once across partitions, matching the monolithic path", async () => {
+		function sub(name: string, fields: ResolvedProjection["fields"]) {
+			return {
+				projectionModel: { name: `${name}SearchDoc` },
+				sourceModel: { name },
+				indexName: name.toLowerCase(),
+				fields,
+			} as unknown as ResolvedProjection;
+		}
+		// Two histograms under different top-level paths land in different aggs
+		// partitions under the deepest split; the per-request budget must still
+		// be divided across both, so the split search — not a partition — owns it.
+		const projection = makeProjection({
+			name: "WidgetSearchDoc",
+			indexName: "widgets",
+			fields: [
+				...Array.from({ length: 6 }, (_, i) =>
+					makeField({
+						name: `root${i}`,
+						type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+						aggregations: [
+							{ kind: "date_histogram", options: { interval: "month" } },
+						],
+					}),
+				),
+				makeField({
+					name: "parts",
+					nested: true,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: sub(
+						"Part",
+						Array.from({ length: 6 }, (_, i) =>
+							makeField({
+								name: `shipped${i}`,
+								type: {
+									kind: "Scalar",
+									name: "utcDateTime",
+								} as unknown as Type,
+								aggregations: [
+									{ kind: "date_histogram", options: { interval: "day" } },
+								],
+							}),
+						),
+					),
+				}),
+			],
+		});
+		const monolithic = await emitGraphQLResolver(projection, {
+			...forcePipeline,
+			monolithicThresholdBytes: 32000,
+		});
+		const split = await emitGraphQLResolver(projection, {
+			...forcePipeline,
+			monolithicThresholdBytes: 1,
+		});
+		assert.equal(monolithic.mode, "monolithic");
+		assert.ok(
+			split.functions.filter((f) => f.name.startsWith("prepare-aggs")).length >=
+				2,
+			"the aggs workload must partition so the cross-partition budget is exercised",
+		);
+
+		// Select every histogram: the budget divides across all 12.
+		const info = {
+			selectionSetList: [
+				"aggregations",
+				...Array.from(
+					{ length: 6 },
+					(_, i) => `aggregations/byRoot${i}OverTime`,
+				),
+				...Array.from(
+					{ length: 6 },
+					(_, i) => `aggregations/byPartShipped${i}OverTime`,
+				),
+			],
+		};
+		const monoBody = evalRequestBody(monolithic.content, info, {});
+		const splitBody = runSplitPipeline(split, info, {});
+		assert.deepEqual(
+			canonical(splitBody.aggs),
+			canonical(monoBody.aggs),
+			"split aggs (with search-side budget division) must match the monolithic aggs",
+		);
 	});
 });

@@ -754,3 +754,126 @@ describe("reportDemotedProjections (issue #157)", () => {
 		);
 	});
 });
+
+// Issue #173 — the split ships fitting output for realistic projections, but a
+// projection wide enough that even the fully split pipeline can't fit must fail
+// compile, not emit an undeployable resolver that only breaks at AppSync
+// CreateFunction. Two guards: any AppSync function file over the 32,768-byte
+// code cap, and a pipeline over AppSync's 10-function-per-resolver limit.
+const TOO_LARGE_CODE =
+	"@kattebak/typespec-opensearch-emitter/resolver-function-too-large";
+const TOO_MANY_CODE =
+	"@kattebak/typespec-opensearch-emitter/pipeline-too-many-functions";
+
+describe("assertResolverFilesFit (issue #173)", () => {
+	// runner.program is inaccessible until a compile/diagnose runs; a trivial
+	// source gives an empty program the guard can report onto.
+	async function emptyProgram() {
+		const runner = await createRunner();
+		await runner.diagnose("model Noop {}");
+		return runner.program;
+	}
+
+	function resolverFile(
+		functions: { name: string; fileName: string; content: string }[],
+		content = "// after-mapping\n",
+	) {
+		return {
+			queryFieldName: "searchWidget",
+			mode: "pipeline" as const,
+			fileName: "widget-search-doc-resolver.js",
+			content,
+			functions: functions.map((fn) => ({
+				...fn,
+				dataSource: "NONE" as const,
+			})),
+		};
+	}
+
+	it("hard-errors when a generated function exceeds the 32,768-byte AppSync cap", async () => {
+		const program = await emptyProgram();
+		const oversized = "x".repeat(33_000);
+		__test.assertResolverFilesFit(
+			program,
+			"WidgetSearchDoc",
+			resolverFile([
+				{
+					name: "prepare-query-1",
+					fileName: "widget-search-doc-fn-prepare-query-1.js",
+					content: oversized,
+				},
+			]),
+		);
+
+		const relevant = program.diagnostics.filter(
+			(d) => d.code === TOO_LARGE_CODE,
+		);
+		assert.equal(relevant.length, 1);
+		assert.equal(relevant[0].severity, "error");
+		assert.ok(
+			relevant[0].message.includes("widget-search-doc-fn-prepare-query-1.js"),
+		);
+		assert.ok(relevant[0].message.includes("33000"));
+	});
+
+	it("hard-errors when the resolver-level file itself exceeds the cap", async () => {
+		const program = await emptyProgram();
+		__test.assertResolverFilesFit(
+			program,
+			"WidgetSearchDoc",
+			resolverFile([], "y".repeat(40_000)),
+		);
+		assert.equal(
+			program.diagnostics.filter((d) => d.code === TOO_LARGE_CODE).length,
+			1,
+		);
+	});
+
+	it("hard-errors when the split needs more than 10 pipeline functions", async () => {
+		const program = await emptyProgram();
+		const functions = Array.from({ length: 11 }, (_, i) => ({
+			name: `prepare-query-${i}`,
+			fileName: `widget-search-doc-fn-prepare-query-${i}.js`,
+			content: "// small\n",
+		}));
+		__test.assertResolverFilesFit(
+			program,
+			"WidgetSearchDoc",
+			resolverFile(functions),
+		);
+
+		const relevant = program.diagnostics.filter(
+			(d) => d.code === TOO_MANY_CODE,
+		);
+		assert.equal(relevant.length, 1);
+		assert.equal(relevant[0].severity, "error");
+		assert.ok(relevant[0].message.includes("WidgetSearchDoc"));
+		assert.ok(relevant[0].message.includes("11"));
+	});
+
+	it("stays silent when every function fits and the pipeline is within the function limit", async () => {
+		const program = await emptyProgram();
+		__test.assertResolverFilesFit(
+			program,
+			"WidgetSearchDoc",
+			resolverFile([
+				{
+					name: "prepare-query",
+					fileName: "widget-search-doc-fn-prepare-query.js",
+					content: "// under cap\n",
+				},
+				{
+					name: "search",
+					fileName: "widget-search-doc-fn-search.js",
+					content: "// under cap\n",
+				},
+			]),
+		);
+		assert.equal(
+			program.diagnostics.filter(
+				(d) => d.code === TOO_LARGE_CODE || d.code === TOO_MANY_CODE,
+			).length,
+			0,
+		);
+	});
+});
