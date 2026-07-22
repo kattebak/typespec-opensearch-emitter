@@ -46,8 +46,29 @@ export interface EmittedResolverFile {
 	 * across functions keeps each file's APPSYNC_JS code under the 32 KB
 	 * per-function cap, which a single-resolver shape would exceed on wide
 	 * @searchInfer projections (issue #105). Empty for `mode === "monolithic"`.
+	 *
+	 * Two functions (`prepare` + `search`) when `prepare` fits the function
+	 * threshold; otherwise the prepare work splits across `prepareQuery[N]` /
+	 * `prepareAggs[N]` NONE functions that each stash their share of the
+	 * request body, assembled by the final `search` function. Function names
+	 * stay AppSync-safe (`[_A-Za-z][_0-9A-Za-z]*`) — consumers embed them in
+	 * AppSync Function names.
 	 */
 	functions: EmittedPipelineFunction[];
+	/**
+	 * Functions still over `functionThresholdBytes` after best-effort
+	 * splitting (a single spec entry too large, or the 10-function pipeline
+	 * ceiling reached). The emitter surfaces these as diagnostics; the
+	 * artifact is emitted regardless so the consumer's own guards can report
+	 * exact bytes.
+	 */
+	oversizedFunctions?: OversizedPipelineFunction[];
+}
+
+export interface OversizedPipelineFunction {
+	functionName: string;
+	bytes: number;
+	thresholdBytes: number;
 }
 
 export interface ResolverOptions {
@@ -65,9 +86,23 @@ export interface ResolverOptions {
 	 * aggregation declares no bounds. See DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS.
 	 */
 	autoDateHistogramBuckets?: number;
+	/**
+	 * Byte threshold above which a pipeline `prepare` function is split
+	 * further: first by workload (query vs aggregations), then by spec entry
+	 * across additional NONE functions. Measured against each rendered
+	 * function. Default 32,000 (32K cap minus headroom), matching the
+	 * monolithic threshold's convention.
+	 */
+	functionThresholdBytes?: number;
 }
 
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
+
+const DEFAULT_FUNCTION_THRESHOLD_BYTES = 32_000;
+
+// AWS hard ceiling on functions per pipeline resolver (not adjustable):
+// at most 9 NONE prepare functions plus the OPENSEARCH search function.
+const MAX_PIPELINE_FUNCTIONS = 10;
 
 /**
  * Per-histogram `buckets` ceiling for a bounds-less `auto_date_histogram`
@@ -203,29 +238,171 @@ export async function emitGraphQLResolver(
 		searchFilterShape,
 		options,
 	);
-	const searchContent = renderSearchFunction(projection.indexName);
 	const resolverContent = renderResolver(aggregations, options);
+	const functionThreshold =
+		options.functionThresholdBytes ?? DEFAULT_FUNCTION_THRESHOLD_BYTES;
+
+	if (Buffer.byteLength(prepareContent, "utf-8") <= functionThreshold) {
+		const searchContent = renderSearchFunction(projection.indexName);
+		return {
+			queryFieldName,
+			mode: "pipeline",
+			fileName: `${baseName}-resolver.js`,
+			content: resolverContent,
+			functions: [
+				{
+					name: "prepare",
+					fileName: `${baseName}-fn-prepare.js`,
+					content: prepareContent,
+					dataSource: "NONE",
+				},
+				{
+					name: "search",
+					fileName: `${baseName}-fn-search.js`,
+					content: searchContent,
+					dataSource: "OPENSEARCH",
+				},
+			],
+		};
+	}
+
+	// `prepare` itself is over the function threshold: split its independent
+	// workloads (query building vs aggregation assembly) across NONE functions,
+	// each partitioned further by spec entry while still over the threshold.
+	// The final search function assembles the request body from the stash —
+	// still one OpenSearch round-trip.
+	return renderSplitPipeline(
+		queryFieldName,
+		baseName,
+		projection.indexName,
+		textFields,
+		keywordFields,
+		textSortFields,
+		aggregations,
+		searchFilterShape,
+		options,
+		functionThreshold,
+		resolverContent,
+	);
+}
+
+function renderSplitPipeline(
+	queryFieldName: string,
+	baseName: string,
+	indexName: string,
+	textFields: TextFieldCollection,
+	keywordFields: string[],
+	textSortFields: string[],
+	aggregations: AggregationEntry[],
+	searchFilterShape: SearchFilterShape | undefined,
+	options: ResolverOptions,
+	functionThreshold: number,
+	resolverContent: string,
+): EmittedResolverFile {
+	const specNodes = searchFilterShape?.nodes ?? [];
+	const aggEntries = orderedAggEntries(aggregations);
+	const reservedForAggs = aggEntries.length > 0 ? 1 : 0;
+
+	const queryContents = packChunks(
+		specNodes,
+		(chunk, chunkIndex) =>
+			renderPrepareQueryFunction(
+				chunk,
+				chunkIndex === 0,
+				textFields,
+				keywordFields,
+				textSortFields,
+			),
+		functionThreshold,
+		MAX_PIPELINE_FUNCTIONS - 1 - reservedForAggs,
+	);
+	const aggsContents =
+		aggEntries.length === 0
+			? []
+			: packChunks(
+					aggEntries,
+					(chunk) => renderPrepareAggsFunction(chunk, aggEntries, options),
+					functionThreshold,
+					MAX_PIPELINE_FUNCTIONS - 1 - queryContents.length,
+				);
+
+	const functions: EmittedPipelineFunction[] = [
+		...queryContents.map((content, i) => ({
+			name: i === 0 ? "prepareQuery" : `prepareQuery${i + 1}`,
+			fileName:
+				i === 0
+					? `${baseName}-fn-prepare-query.js`
+					: `${baseName}-fn-prepare-query-${i + 1}.js`,
+			content,
+			dataSource: "NONE" as const,
+		})),
+		...aggsContents.map((content, i) => ({
+			name: i === 0 ? "prepareAggs" : `prepareAggs${i + 1}`,
+			fileName:
+				i === 0
+					? `${baseName}-fn-prepare-aggs.js`
+					: `${baseName}-fn-prepare-aggs-${i + 1}.js`,
+			content,
+			dataSource: "NONE" as const,
+		})),
+		{
+			name: "search",
+			fileName: `${baseName}-fn-search.js`,
+			content: renderAssembleSearchFunction(indexName, options),
+			dataSource: "OPENSEARCH" as const,
+		},
+	];
+
+	const oversizedFunctions = functions
+		.map((fn) => ({
+			functionName: fn.name,
+			bytes: Buffer.byteLength(fn.content, "utf-8"),
+			thresholdBytes: functionThreshold,
+		}))
+		.filter((fn) => fn.bytes > functionThreshold);
 
 	return {
 		queryFieldName,
 		mode: "pipeline",
 		fileName: `${baseName}-resolver.js`,
 		content: resolverContent,
-		functions: [
-			{
-				name: "prepare",
-				fileName: `${baseName}-fn-prepare.js`,
-				content: prepareContent,
-				dataSource: "NONE",
-			},
-			{
-				name: "search",
-				fileName: `${baseName}-fn-search.js`,
-				content: searchContent,
-				dataSource: "OPENSEARCH",
-			},
-		],
+		functions,
+		...(oversizedFunctions.length > 0 ? { oversizedFunctions } : {}),
 	};
+}
+
+/**
+ * Greedy sequential pack of spec entries into rendered chunks: entries join
+ * the current chunk until its rendered form exceeds the threshold, measured
+ * on real bytes rather than a size model so fixed per-function overhead (the
+ * applyFilterSpec engine, buildAggs, helpers) is priced in exactly. Capped at
+ * `maxChunks` — the remainder folds into the last chunk, and the caller
+ * reports any still-oversized function as a diagnostic.
+ */
+function packChunks<T>(
+	items: T[],
+	render: (chunk: T[], chunkIndex: number) => string,
+	thresholdBytes: number,
+	maxChunks: number,
+): string[] {
+	const cap = Math.max(1, maxChunks);
+	const chunks: T[][] = [[]];
+	for (const item of items) {
+		const current = chunks[chunks.length - 1];
+		if (
+			current.length > 0 &&
+			chunks.length < cap &&
+			Buffer.byteLength(
+				render([...current, item], chunks.length - 1),
+				"utf-8",
+			) > thresholdBytes
+		) {
+			chunks.push([item]);
+			continue;
+		}
+		current.push(item);
+	}
+	return chunks.map((chunk, i) => render(chunk, i));
 }
 
 /**
@@ -932,6 +1109,265 @@ ${renderSearchBodyGuard("ctx.result", "\t")}	return ctx.result;
 }
 
 /**
+ * Split-mode NONE function carrying (a share of) the query-building workload.
+ * The first function owns everything that exists exactly once — free-text
+ * musts, keyword filters, sort — plus its FILTER_SPEC share; later functions
+ * carry only a FILTER_SPEC share and the applyFilterSpec engine. Every clause
+ * lands in `ctx.stash.musts/filters/mustNots` (bool `filter`/`must_not`
+ * members are commutative, so shares merge cleanly); the search function
+ * assembles the final body.
+ */
+function renderPrepareQueryFunction(
+	chunk: FilterSpecNode[],
+	isFirst: boolean,
+	textFields: TextFieldCollection,
+	keywordFields: string[],
+	textSortFields: string[],
+): string {
+	const filterSpecLiteral = stringifySpec(chunk);
+	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
+	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
+
+	if (!isFirst) {
+		return `import { util } from "@aws-appsync/utils";
+
+const FILTER_SPEC = ${filterSpecLiteral};
+
+export function request(ctx) {
+	const args = ctx.args;
+	if (args.searchFilter) {
+		const filters = ctx.stash.filters;
+		const mustNots = ctx.stash.mustNots;
+		applyFilterSpec(FILTER_SPEC, args.searchFilter, filters, mustNots);
+		ctx.stash.filters = filters;
+		ctx.stash.mustNots = mustNots;
+	}
+	return { payload: null };
+}
+
+export function response(ctx) {
+	return ctx.result;
+}
+
+${applyFilterSpecFunction}`;
+	}
+
+	const textQueryPush = renderTextQueryPush(textFields);
+	const textSpecDeclaration = renderTextSpecDeclaration(textFields);
+	const nestedTextHelper = renderNestedTextHelper(textFields);
+	const keywordFieldsLiteral = JSON.stringify(keywordFields);
+	const textSortFieldsLiteral = JSON.stringify(textSortFields);
+	const buildSortFunction = renderBuildSortFunction();
+
+	return `import { util } from "@aws-appsync/utils";
+
+const FILTER_SPEC = ${filterSpecLiteral};
+
+export function request(ctx) {
+	const args = ctx.args;
+	const queryText = args.query;
+	const filter = args.filter;
+	const musts = [];
+	const filters = [];
+	const mustNots = [];
+
+	if (queryText) {
+${textQueryPush}
+	}
+
+	const keywordFields = ${keywordFieldsLiteral};
+	if (filter) {
+		for (const field of keywordFields) {
+			if (filter[field] != null) {
+				filters.push({ term: { [field]: filter[field] } });
+			}
+		}
+	}
+
+	if (args.searchFilter) {
+		applyFilterSpec(FILTER_SPEC, args.searchFilter, filters, mustNots);
+	}
+
+	ctx.stash.musts = musts;
+	ctx.stash.filters = filters;
+	ctx.stash.mustNots = mustNots;
+	ctx.stash.sort = buildSort(args.sortBy);
+	return { payload: null };
+}
+
+export function response(ctx) {
+	return ctx.result;
+}
+${textSpecDeclaration}${nestedTextHelper}
+const TEXT_SORT_FIELDS = ${textSortFieldsLiteral};
+
+${buildSortFunction}
+${applyFilterSpecFunction}`;
+}
+
+/**
+ * Split-mode NONE function carrying a share of the aggregation workload. Each
+ * function merges its selected AGG_SPEC entries into `ctx.stash.aggs`
+ * (assigned only when something was requested, so the search function can
+ * omit `aggs` entirely). AGG_NAMES carries every declared aggregation name —
+ * not just this function's share — so the alias fallback fires identically to
+ * the unsplit emit; AGG_H_NAMES likewise carries every auto-histogram name so
+ * the per-request bucket budget is divided by the request-wide selection
+ * count, not a per-function one (issue #155).
+ */
+function renderPrepareAggsFunction(
+	chunk: AggregationEntry[],
+	allEntries: AggregationEntry[],
+	options: ResolverOptions,
+): string {
+	const chunkLiteral = `[${chunk.map(renderAggSpecItem).join(", ")}]`;
+	const helper = chunk.some(usesAutoDateHistogram)
+		? `\nconst ${AUTO_DATE_HISTOGRAM_HELPER} = (f, m) => ({ auto_date_histogram: { field: f, minimum_interval: m } });`
+		: "";
+	const aggNamesLiteral = JSON.stringify(allEntries.map((e) => e.aggName));
+
+	const hasAuto = chunk.some(usesAutoDateHistogram);
+	const cap =
+		options.autoDateHistogramBuckets ?? DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS;
+	const histogramNamesDeclaration = hasAuto
+		? `\nconst AGG_H_NAMES = ${JSON.stringify(
+				allEntries.filter(usesAutoDateHistogram).map((e) => e.aggName),
+			)};`
+		: "";
+	const histogramDecl = hasAuto ? "\n\tconst histograms = [];" : "";
+	const trackHistogram = hasAuto
+		? "\n\t\t\tif (spec.h) histograms.push(spec);"
+		: "";
+	const budgetBlock = hasAuto
+		? `
+	// search.max_buckets caps the whole request: divide a soft budget across
+	// the selected histograms, counted over AGG_H_NAMES (every prepareAggs
+	// function's share) so the split shares one request-wide budget (issue #155).
+	if (histograms.length > 0) {
+		let selected = 0;
+		for (const name of AGG_H_NAMES) {
+			if (aliased || selectionSetList.indexOf("aggregations/" + name) >= 0) {
+				selected = selected + 1;
+			}
+		}
+		let budget = Math.floor(${PER_REQUEST_BUCKET_BUDGET} / selected);
+		if (budget > ${cap}) budget = ${cap};
+		if (budget < ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS}) budget = ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS};
+		for (const spec of histograms) {
+			spec.a.auto_date_histogram.buckets = budget;
+		}
+	}`
+		: "";
+
+	return `import { util } from "@aws-appsync/utils";
+${helper}
+const AGG_SPEC = ${chunkLiteral};
+const AGG_NAMES = ${aggNamesLiteral};${histogramNamesDeclaration}
+
+export function request(ctx) {
+	const aggs = ctx.stash.aggs || {};
+	if (buildAggs(ctx.info.selectionSetList, aggs)) {
+		ctx.stash.aggs = aggs;
+	}
+	return { payload: null };
+}
+
+export function response(ctx) {
+	return ctx.result;
+}
+
+function buildAggs(selectionSetList, aggs) {
+	// A first segment under \`aggregations/\` naming no declared aggregation is
+	// an alias, whose target is not recoverable here — send every aggregation
+	// rather than none. AGG_NAMES holds every declared name, not just this
+	// function's AGG_SPEC share, so detection matches the unsplit emit.
+	let aliased = false;
+	for (const path of selectionSetList) {
+		if (path.indexOf("aggregations/") === 0) {
+			const rest = path.substring(13);
+			const slash = rest.indexOf("/");
+			const name = slash < 0 ? rest : rest.substring(0, slash);
+			if (AGG_NAMES.indexOf(name) < 0 && name !== "__typename") aliased = true;
+		}
+	}
+	let requested = false;${histogramDecl}
+	for (const spec of AGG_SPEC) {
+		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
+			requested = true;${trackHistogram}
+			if (spec.g) {
+				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
+				group.aggs[spec.n] = spec.a;
+				aggs[spec.g] = group;
+			} else {
+				aggs[spec.n] = spec.a;
+			}
+		}
+	}${budgetBlock}
+	return requested;
+}
+`;
+}
+
+/**
+ * Split-mode OPENSEARCH function: assembles the request body from the stash
+ * shares the prepare functions wrote and executes the search — one OpenSearch
+ * round-trip, same body shape (and key order) as the unsplit prepare built.
+ */
+function renderAssembleSearchFunction(
+	indexName: string,
+	options: ResolverOptions,
+): string {
+	return `import { util } from "@aws-appsync/utils";
+
+export function request(ctx) {
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+	const musts = ctx.stash.musts || [];
+	const filters = ctx.stash.filters || [];
+	const mustNots = ctx.stash.mustNots || [];
+
+	const query =
+		musts.length === 0 && filters.length === 0 && mustNots.length === 0
+			? { match_all: {} }
+			: {
+					bool: {
+						...(musts.length > 0 ? { must: musts } : {}),
+						...(filters.length > 0 ? { filter: filters } : {}),
+						...(mustNots.length > 0 ? { must_not: mustNots } : {}),
+					},
+				};
+
+	const body = {
+		size: size + 1,
+		track_total_hits: ${options.trackTotalHitsUpTo},
+		sort: ctx.stash.sort,
+		query,
+	};
+
+	if (args.after) {
+		body.search_after = JSON.parse(util.base64Decode(args.after));
+	}
+	if (ctx.stash.aggs) {
+		body.aggs = ctx.stash.aggs;
+	}
+
+	return {
+		operation: "GET",
+		path: "/${indexName}/_search",
+		params: { body },
+	};
+}
+
+export function response(ctx) {
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type, null, ctx.result);
+	}
+${renderSearchBodyGuard("ctx.result", "\t")}	return ctx.result;
+}
+`;
+}
+
+/**
  * Guard an OpenSearch response body before anything dereferences `.hits`.
  *
  * Covers three failure shapes the datasource can hand back without setting
@@ -1064,8 +1500,19 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
 	if (aggregations.length === 0) {
 		return "[]";
 	}
+	return `[${orderedAggEntries(aggregations).map(renderAggSpecItem).join(", ")}]`;
+}
 
-	const flatItems: string[] = [];
+/**
+ * The ordered, deduped aggregation entry list behind AGG_SPEC: flat entries
+ * first, then nested ones grouped by path, first-wins on duplicate aggName
+ * (matching the response-side mapping). Shared by the single-function literal
+ * and the split-mode chunking so both see the same entries in the same order.
+ */
+function orderedAggEntries(
+	aggregations: AggregationEntry[],
+): AggregationEntry[] {
+	const flat: AggregationEntry[] = [];
 	const flatSeen = new Set<string>();
 	const byPath = new Map<string, AggregationEntry[]>();
 	const seenInPath = new Map<string, Set<string>>();
@@ -1073,9 +1520,7 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
 		if (!entry.nestedPath) {
 			if (flatSeen.has(entry.aggName)) continue;
 			flatSeen.add(entry.aggName);
-			flatItems.push(
-				`{n:${JSON.stringify(entry.aggName)},a:${renderAggInner(entry)}${histogramFlag(entry)}}`,
-			);
+			flat.push(entry);
 			continue;
 		}
 		const seen = seenInPath.get(entry.nestedPath) ?? new Set<string>();
@@ -1089,19 +1534,14 @@ function renderAggSpecLiteral(aggregations: AggregationEntry[]): string {
 			byPath.set(entry.nestedPath, [entry]);
 		}
 	}
+	return [...flat, ...[...byPath.values()].flat()];
+}
 
-	const groupItems: string[] = [];
-	for (const [path, group] of byPath) {
-		const groupKey = JSON.stringify(nestedAggGroupKey(path));
-		const pathLit = JSON.stringify(path);
-		for (const entry of group) {
-			groupItems.push(
-				`{n:${JSON.stringify(entry.aggName)},g:${groupKey},p:${pathLit},a:${renderAggInner(entry)}${histogramFlag(entry)}}`,
-			);
-		}
+function renderAggSpecItem(entry: AggregationEntry): string {
+	if (!entry.nestedPath) {
+		return `{n:${JSON.stringify(entry.aggName)},a:${renderAggInner(entry)}${histogramFlag(entry)}}`;
 	}
-
-	return `[${[...flatItems, ...groupItems].join(", ")}]`;
+	return `{n:${JSON.stringify(entry.aggName)},g:${JSON.stringify(nestedAggGroupKey(entry.nestedPath))},p:${JSON.stringify(entry.nestedPath)},a:${renderAggInner(entry)}${histogramFlag(entry)}}`;
 }
 
 /**
@@ -1404,4 +1844,7 @@ export const __test = {
 	renderBuildAggsFunction,
 	renderResponseAggregations,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
+	DEFAULT_FUNCTION_THRESHOLD_BYTES,
+	MAX_PIPELINE_FUNCTIONS,
+	packChunks,
 };

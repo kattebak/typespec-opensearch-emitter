@@ -24,6 +24,14 @@ export interface GraphQLEmitterOptions {
 	 */
 	"monolithic-threshold-bytes"?: number;
 	/**
+	 * Byte threshold above which a pipeline `prepare` function is split
+	 * further: by workload (query vs aggregations), then by spec entry across
+	 * additional NONE functions, up to AppSync's 10-functions-per-pipeline
+	 * ceiling. Measured against each rendered function. Default: 32000 (32K
+	 * AppSync per-file cap minus headroom).
+	 */
+	"function-threshold-bytes"?: number;
+	/**
 	 * `buckets` for the `auto_date_histogram` emitted when a
 	 * `@aggregatable("date_histogram", ...)` declares no bounds. It is the
 	 * ceiling on returned buckets, so it decides how wide a range still keeps
@@ -175,6 +183,12 @@ export const $lib = createTypeSpecLibrary({
 					"Decorator @filterable requires at least one filter kind argument.",
 			},
 		},
+		"pipeline-function-over-threshold": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Pipeline function "${"functionName"}" renders to ${"bytes"} bytes, over the ${"threshold"}-byte function threshold even after splitting (AppSync rejects APPSYNC_JS files over 32,768 bytes). Reduce the projection's filterable/aggregatable surface, or raise graphql.function-threshold-bytes if the AppSync cap still leaves headroom.`,
+			},
+		},
 		"searchfilter-name-collision": {
 			severity: "error",
 			messages: {
@@ -270,6 +284,11 @@ export const $lib = createTypeSpecLibrary({
 							default: 10000,
 						},
 						"monolithic-threshold-bytes": {
+							type: "number",
+							nullable: true,
+							default: 32000,
+						},
+						"function-threshold-bytes": {
 							type: "number",
 							nullable: true,
 							default: 32000,

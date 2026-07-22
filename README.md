@@ -370,6 +370,7 @@ In the example above:
 | `graphql.max-page-size` | `number` | `100` | Maximum allowed page size. |
 | `graphql.track-total-hits-up-to` | `number` | `10000` | OpenSearch `track_total_hits` limit. |
 | `graphql.monolithic-threshold-bytes` | `number` | `32000` | Rendered-resolver size above which the pipeline split is emitted instead of a single file. See [Resolver code-size budget](#resolver-code-size-budget). |
+| `graphql.function-threshold-bytes` | `number` | `32000` | Rendered-function size above which the pipeline `prepare` splits into further `NONE` functions — by workload, then by spec entry. See [Splitting `prepare`](#splitting-prepare). |
 | `graphql.auto-date-histogram-buckets` | `number` | `10000` | Bucket ceiling for a `date_histogram` declared without `bounds`. Decides how wide a range keeps the declared interval before OpenSearch steps to a coarser one. Must stay under `search.max_buckets` (default 65,535). See [Bounding a `date_histogram`](#bounding-a-date_histogram). |
 
 The `emitter-output-dir` option is a standard TypeSpec compiler option that controls the output directory.
@@ -608,8 +609,20 @@ The emitter renders the single-file shape, measures it, and picks a mode:
 | --- | --- | --- |
 | ≤ `graphql.monolithic-threshold-bytes` (default `32000`) | `monolithic` | `*-resolver.js` |
 | above the threshold | `pipeline` | `*-resolver.js` (after-mapping), `*-fn-prepare.js` (`NONE`), `*-fn-search.js` (`OPENSEARCH`) |
+| pipeline, and `prepare` above `graphql.function-threshold-bytes` (default `32000`) | `pipeline` | `*-resolver.js`, `*-fn-prepare-query[-N].js` (`NONE`), `*-fn-prepare-aggs[-N].js` (`NONE`), `*-fn-search.js` (`OPENSEARCH`) |
 
 Each pipeline file gets its own 32,768-byte budget. Splitting the work is what makes wide `@searchInfer` projections deployable: the filter and aggregation specs stop competing with the response mapping for one budget.
+
+#### Splitting `prepare`
+
+`prepare` is data-dominated — `FILTER_SPEC` and `AGG_SPEC` grow with every searchable/aggregatable field — so on a wide enough projection it outgrows its own budget while the other pipeline files stay small. When the rendered `prepare` exceeds `graphql.function-threshold-bytes`, the emitter splits it along the same threshold-driven principle as the monolithic→pipeline flip, recursively:
+
+1. **By workload.** `prepareQuery` (`NONE`) carries `FILTER_SPEC`, the free-text spec, keyword filters and sort — it stashes `ctx.stash.musts/filters/mustNots/sort`. `prepareAggs` (`NONE`) carries `AGG_SPEC` and stashes `ctx.stash.aggs` (omitted entirely for projections without aggregations).
+2. **By spec entry.** A workload function still over the threshold partitions its spec across further functions (`prepareQuery2…`, `prepareAggs2…`), packed greedily on rendered bytes. Partial shares merge cleanly: bool `filter`/`must_not` members are commutative, and aggregation shares merge by key into the stashed map. Alias detection and the per-request histogram bucket budget read full-projection name lists (`AGG_NAMES`, `AGG_H_NAMES`), so behavior is identical to the unsplit emit.
+
+The final `search` function (`OPENSEARCH`) assembles the request body from the stash — still one OpenSearch round-trip; the extra `NONE` functions are pure compute. Consumers wire the manifest's `functions[]` in order, as before; function names stay AppSync-safe (`[_A-Za-z][_0-9A-Za-z]*`).
+
+AWS caps a pipeline resolver at **10 functions** (not adjustable), bounding the split at 9 `NONE` shares plus `search`. If a function still exceeds the threshold at that ceiling — or a single spec entry alone is too large — the emitter reports a `pipeline-function-over-threshold` error naming the function and its size, and emits the artifact anyway so downstream size guards can print exact numbers. Past the ceiling the escape hatch is a different data source (e.g. Lambda), which is out of the emitter's scope.
 
 #### Staying inside the budget
 
@@ -642,7 +655,7 @@ CI goes red on the guard, and AppSync refuses the deploy. The assertion message 
 The message names the file and its size. Work in this order:
 
 1. **Check whether the growth is per-field.** Code that repeats once per field or per sub-model belongs in a spec entry, not in the emitted body. This is the fix for #101 and #105 and the first thing to try.
-2. **Check the mode.** A monolithic projection tipping past the threshold falls back to the pipeline split on its own. A pipeline file over the cap has no further automatic split.
+2. **Check the mode.** A monolithic projection tipping past the threshold falls back to the pipeline split on its own, and a `prepare` over `graphql.function-threshold-bytes` splits further on its own (see [Splitting `prepare`](#splitting-prepare)). A red guard on a split function means the 10-function ceiling or a single oversized spec entry — the `pipeline-function-over-threshold` diagnostic names it.
 3. **Fall back to spec-as-data-asset.** Loading `FILTER_SPEC` from a data source instead of inlining it removes the size bound entirely, at the cost of one indirection. This is lever 3 from #101 and is not implemented.
 
 Do not raise the constant in the assertion. 32,768 is an AWS limit, not a project policy — a green test with a raised cap fails at deploy instead.

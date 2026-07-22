@@ -3710,3 +3710,553 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		}
 	});
 });
+
+describe("emitGraphQLResolver prepare split (function threshold)", () => {
+	const splitBase = {
+		defaultPageSize: 20,
+		maxPageSize: 100,
+		trackTotalHitsUpTo: 10000,
+		monolithicThresholdBytes: 0,
+	};
+
+	function lowerFirst(s: string): string {
+		return s[0].toLowerCase() + s.slice(1);
+	}
+
+	/**
+	 * Wide fixture whose 2-fn `prepare` renders to ~31.6 KB: 14 nested
+	 * sub-models each carrying filterables, aggregations (incl. a bounds-less
+	 * date_histogram) and a searchable text field, plus flat keyword/range/text
+	 * fields — every workload the split has to partition.
+	 */
+	function makeSplitProjection(): ResolvedProjection {
+		const subShapes = Array.from({ length: 14 }, (_, i) => `Sub${i}`);
+		return makeProjection({
+			name: "WideSearchDoc",
+			indexName: "wide_v1",
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "status",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "createdAt",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						"sum",
+						"avg",
+						"min",
+						"max",
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				...subShapes.map((shape) =>
+					makeField({
+						name: `${shape.toLowerCase()}s`,
+						nested: true,
+						subProjection: {
+							projectionModel: { name: `${shape}SearchDoc` },
+							sourceModel: { name: shape },
+							indexName: shape.toLowerCase(),
+							fields: [
+								makeField({ name: "label" }),
+								makeField({
+									name: `${lowerFirst(shape)}Id`,
+									keyword: true,
+									filterables: ["term", "terms", "exists"],
+									aggregations: ["terms"],
+								}),
+								makeField({
+									name: "type",
+									keyword: true,
+									filterables: ["term", "terms", "exists"],
+									aggregations: ["terms"],
+								}),
+								makeField({
+									name: "createdAt",
+									filterables: ["range"],
+									type: {
+										kind: "Scalar",
+										name: "utcDateTime",
+									} as unknown as Type,
+									aggregations: [
+										"sum",
+										"avg",
+										"min",
+										"max",
+										{ kind: "date_histogram", options: { interval: "month" } },
+									],
+								}),
+								makeField({
+									name: "updatedAt",
+									filterables: ["range"],
+									type: {
+										kind: "Scalar",
+										name: "utcDateTime",
+									} as unknown as Type,
+									aggregations: ["sum", "avg", "min", "max"],
+								}),
+							],
+						} as unknown as ResolvedProjection,
+						filterables: ["exists"],
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				),
+			],
+		});
+	}
+
+	/**
+	 * Evaluates a split pipeline end-to-end: runs each NONE function's request
+	 * handler against one shared ctx (stash mutations persist between pipeline
+	 * functions, as in the AppSync runtime) and returns the body the final
+	 * OPENSEARCH function's request assembles.
+	 */
+	function evalPipelineBody(
+		result: EmitResult,
+		info: { selectionSetList: string[] },
+		args: Record<string, unknown> = {},
+	): Record<string, unknown> {
+		const utilStub = {
+			base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+			base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+			error: (msg: string) => {
+				throw new Error(msg);
+			},
+		};
+		const ctx = { args, info, stash: {} as Record<string, unknown> };
+		for (const fn of result.functions) {
+			const stripped = fn.content
+				.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+				.replace(/^export function /gm, "function ");
+			const factory = new Function("util", `${stripped}\nreturn request;`) as (
+				util: unknown,
+			) => (c: unknown) => { params?: { body?: Record<string, unknown> } };
+			const ret = factory(utilStub)(ctx);
+			if (fn.dataSource === "OPENSEARCH") {
+				if (!ret?.params?.body) {
+					throw new Error("search request produced no body");
+				}
+				return ret.params.body;
+			}
+		}
+		throw new Error("pipeline had no OPENSEARCH function");
+	}
+
+	/**
+	 * The split emits chunk-local clauses in chunk order, while the unsplit
+	 * prepare finalizes every nested wrapper after every direct clause — same
+	 * clauses, different array order. bool `filter`/`must_not` members are
+	 * commutative (filter context, no scoring), so compare them as multisets.
+	 */
+	function withSortedClauses(
+		body: Record<string, unknown>,
+	): Record<string, unknown> {
+		const clone = structuredClone(body) as {
+			query?: { bool?: Record<string, unknown> };
+		};
+		const bool = clone.query?.bool;
+		if (bool) {
+			for (const key of ["filter", "must_not"]) {
+				const clauses = bool[key];
+				if (Array.isArray(clauses)) {
+					bool[key] = [...clauses].sort((a, b) =>
+						JSON.stringify(a).localeCompare(JSON.stringify(b)),
+					);
+				}
+			}
+		}
+		return clone;
+	}
+
+	const fullArgs = {
+		query: "acme",
+		filter: { counterpartyId: "c9" },
+		searchFilter: {
+			status: "Active",
+			counterpartyIdIn: ["c1", "c2"],
+			createdAtGte: 100,
+			createdAtLt: 900,
+			sub0sExists: true,
+			sub0s: { sub0Id: "a", typeIn: ["T1"], createdAtGte: 1 },
+			sub7s: { typeExists: false },
+			sub13s: { sub13Id: "z", updatedAtLte: 42 },
+		},
+		sortBy: [{ field: "counterpartyId", direction: "ASC" }],
+		after: Buffer.from(JSON.stringify([123, "abc"])).toString("base64"),
+		first: 30,
+	};
+	const fullSelection = {
+		selectionSetList: [
+			"edges",
+			"edges/node",
+			"edges/node/name",
+			"aggregations",
+			"aggregations/byStatus",
+			"aggregations/bySub0Type",
+			"aggregations/bySub13Type",
+			"aggregations/sub13UpdatedAtSum",
+		],
+	};
+
+	it("splits an over-threshold prepare by workload, then by spec entry, and every file fits", async () => {
+		const result = await emitGraphQLResolver(makeSplitProjection(), {
+			...splitBase,
+			functionThresholdBytes: 12_000,
+		});
+
+		assert.equal(result.mode, "pipeline");
+		assert.deepEqual(
+			result.functions.map((f) => f.name),
+			[
+				"prepareQuery",
+				"prepareQuery2",
+				"prepareAggs",
+				"prepareAggs2",
+				"prepareAggs3",
+				"search",
+			],
+		);
+		assert.deepEqual(
+			result.functions.map((f) => f.dataSource),
+			["NONE", "NONE", "NONE", "NONE", "NONE", "OPENSEARCH"],
+		);
+		assert.deepEqual(
+			result.functions.map((f) => f.fileName),
+			[
+				"wide-search-doc-fn-prepare-query.js",
+				"wide-search-doc-fn-prepare-query-2.js",
+				"wide-search-doc-fn-prepare-aggs.js",
+				"wide-search-doc-fn-prepare-aggs-2.js",
+				"wide-search-doc-fn-prepare-aggs-3.js",
+				"wide-search-doc-fn-search.js",
+			],
+		);
+		for (const fn of result.functions) {
+			// Consumers embed fn.name in AppSync Function names, whose pattern
+			// is [_A-Za-z][_0-9A-Za-z]* — a hyphenated name fails at deploy.
+			assert.match(fn.name, /^[A-Za-z][0-9A-Za-z]*$/);
+			const bytes = Buffer.byteLength(fn.content, "utf-8");
+			assert.ok(
+				bytes <= 12_000,
+				`${fn.name} is ${bytes} bytes; every split file must fit the 12,000-byte function threshold`,
+			);
+		}
+		assert.equal(result.oversizedFunctions, undefined);
+	});
+
+	it("keeps the 2-function pipeline byte-identical when prepare fits the function threshold", async () => {
+		const projection = makeSplitProjection();
+		const unsplit = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 1_000_000_000,
+		});
+		const defaulted = await emitGraphQLResolver(projection, splitBase);
+
+		assert.deepEqual(
+			unsplit.functions.map((f) => f.name),
+			["prepare", "search"],
+		);
+		// This fixture's prepare renders under the 32,000-byte default, so the
+		// defaulted emit must be byte-identical to the effectively-unlimited one.
+		assert.deepEqual(defaulted, unsplit);
+	});
+
+	it("split pipeline assembles the same OpenSearch body as the unsplit prepare", async () => {
+		const projection = makeSplitProjection();
+		const split = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 12_000,
+		});
+		const unsplit = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 1_000_000_000,
+		});
+
+		const splitBody = evalPipelineBody(split, fullSelection, fullArgs);
+		const unsplitBody = evalRequestBody(
+			prepareFunctionContent(unsplit),
+			fullSelection,
+			fullArgs,
+		);
+		assert.deepEqual(
+			withSortedClauses(splitBody),
+			withSortedClauses(unsplitBody),
+		);
+
+		// No args at all: match_all, no aggs key — on both shapes.
+		const emptySelection = { selectionSetList: [] as string[] };
+		const splitEmpty = evalPipelineBody(split, emptySelection, {});
+		const unsplitEmpty = evalRequestBody(
+			prepareFunctionContent(unsplit),
+			emptySelection,
+			{},
+		);
+		assert.deepEqual(splitEmpty, unsplitEmpty);
+		assert.deepEqual(splitEmpty.query, { match_all: {} });
+		assert.ok(!("aggs" in splitEmpty));
+	});
+
+	it("divides the histogram bucket budget by the request-wide selection, not per function", async () => {
+		const split = await emitGraphQLResolver(makeSplitProjection(), {
+			...splitBase,
+			functionThresholdBytes: 12_000,
+		});
+
+		// Three bounds-less histograms selected across different prepareAggs
+		// functions: the budget divides by 3 everywhere, exactly as unsplit.
+		const selection = {
+			selectionSetList: [
+				"aggregations/byCreatedAtOverTime",
+				"aggregations/bySub0CreatedAtOverTime",
+				"aggregations/bySub13CreatedAtOverTime",
+			],
+		};
+		const body = evalPipelineBody(split, selection, {}) as {
+			aggs: Record<
+				string,
+				{
+					auto_date_histogram?: { buckets: number };
+					aggs?: Record<string, { auto_date_histogram: { buckets: number } }>;
+				}
+			>;
+		};
+
+		const expected = Math.floor(PER_REQUEST_BUCKET_BUDGET / 3);
+		assert.ok(expected < DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS);
+		assert.ok(expected > MIN_AUTO_DATE_HISTOGRAM_BUCKETS);
+		assert.equal(
+			body.aggs.byCreatedAtOverTime.auto_date_histogram?.buckets,
+			expected,
+		);
+		assert.equal(
+			body.aggs._sub0s.aggs?.bySub0CreatedAtOverTime.auto_date_histogram
+				.buckets,
+			expected,
+		);
+		assert.equal(
+			body.aggs._sub13s.aggs?.bySub13CreatedAtOverTime.auto_date_histogram
+				.buckets,
+			expected,
+		);
+	});
+
+	it("falls back to sending every aggregation on an alias, in every function's share", async () => {
+		const projection = makeSplitProjection();
+		const split = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 12_000,
+		});
+		const unsplit = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 1_000_000_000,
+		});
+
+		// `renamed` names no declared aggregation anywhere — every function must
+		// read it as an alias and contribute its full share.
+		const selection = { selectionSetList: ["aggregations/renamed"] };
+		const splitBody = evalPipelineBody(split, selection, {});
+		const unsplitBody = evalRequestBody(
+			prepareFunctionContent(unsplit),
+			selection,
+			{},
+		);
+		assert.deepEqual(splitBody, unsplitBody);
+
+		const aggs = splitBody.aggs as Record<string, unknown>;
+		assert.ok(aggs.byStatus, "flat share from the first function");
+		assert.ok(aggs._sub13s, "nested share from the last function");
+	});
+
+	it("respects the 10-function pipeline ceiling and reports still-oversized functions", async () => {
+		const result = await emitGraphQLResolver(makeSplitProjection(), {
+			...splitBase,
+			functionThresholdBytes: 3_000,
+		});
+
+		assert.ok(result.functions.length <= 10);
+		assert.equal(result.functions.at(-1)?.name, "search");
+		assert.ok(result.oversizedFunctions);
+		assert.ok(result.oversizedFunctions.length > 0);
+		for (const oversized of result.oversizedFunctions) {
+			assert.ok(oversized.bytes > 3_000);
+			assert.equal(oversized.thresholdBytes, 3_000);
+			assert.ok(
+				result.functions.some((f) => f.name === oversized.functionName),
+			);
+		}
+	});
+
+	it("omits prepareAggs functions entirely for a projection without aggregations", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name" }),
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "terms", "exists"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+			],
+		});
+		const split = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 0,
+		});
+		const unsplit = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 1_000_000_000,
+		});
+
+		assert.ok(split.functions.every((f) => !f.name.startsWith("prepareAggs")));
+		const selection = { selectionSetList: [] as string[] };
+		const args = {
+			query: "rex",
+			searchFilter: { species: "dog", rankGte: 3 },
+		};
+		const splitBody = evalPipelineBody(split, selection, args);
+		const unsplitBody = evalRequestBody(
+			prepareFunctionContent(unsplit),
+			selection,
+			args,
+		);
+		assert.deepEqual(
+			withSortedClauses(splitBody),
+			withSortedClauses(unsplitBody),
+		);
+		assert.ok(!("aggs" in splitBody));
+	});
+
+	it("split output passes @aws-appsync/eslint-plugin recommended config", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term", "term_negate"],
+					aggregations: ["terms", "cardinality", "missing"],
+				}),
+				makeField({
+					name: "rank",
+					filterables: ["range"],
+					type: { kind: "Scalar", name: "int32" } as unknown as Type,
+				}),
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeSubProjection("TagSearchDoc", [
+						makeField({ name: "value" }),
+						makeField({
+							name: "key",
+							keyword: true,
+							filterables: ["term", "terms"],
+							aggregations: ["terms"],
+						}),
+					]),
+					filterables: ["exists"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, {
+			...splitBase,
+			functionThresholdBytes: 0,
+		});
+		assert.ok(result.functions.length > 2, "fixture must actually split");
+
+		const { ESLint } = await import("eslint");
+		// @ts-expect-error — plugin ships no type declarations.
+		const { default: appsyncPlugin } = await import(
+			"@aws-appsync/eslint-plugin"
+		);
+
+		const dir = await mkdtemp(join(tmpdir(), "appsync-lint-split-"));
+		try {
+			const files = [
+				{ fileName: "resolver.js", content: result.content },
+				...result.functions,
+			];
+			for (const file of files) {
+				await writeFile(join(dir, file.fileName), file.content);
+			}
+			await writeFile(
+				join(dir, "tsconfig.json"),
+				JSON.stringify({
+					compilerOptions: {
+						target: "ES2022",
+						module: "ES2022",
+						allowJs: true,
+						checkJs: false,
+						noEmit: true,
+					},
+					include: files.map((f) => f.fileName),
+				}),
+			);
+			const eslint = new ESLint({
+				cwd: dir,
+				overrideConfigFile: true,
+				overrideConfig: [
+					{
+						...appsyncPlugin.configs.recommended,
+						languageOptions: {
+							...appsyncPlugin.configs.recommended.languageOptions,
+							sourceType: "module",
+							ecmaVersion: 2022,
+							parserOptions: {
+								project: "./tsconfig.json",
+								tsconfigRootDir: dir,
+								ecmaVersion: 2022,
+								sourceType: "module",
+							},
+						},
+					},
+				],
+			});
+			const lintResults = await eslint.lintFiles(
+				files.map((f) => join(dir, f.fileName)),
+			);
+			const messages = lintResults.flatMap((r) =>
+				r.messages.map(
+					(m) =>
+						`[${m.ruleId ?? "fatal"}] ${r.filePath.split("/").pop()} line ${m.line ?? "?"}: ${m.message}`,
+				),
+			);
+			assert.deepEqual(
+				messages,
+				[],
+				`@aws-appsync/eslint-plugin reported issues on split output:\n${messages.join("\n")}`,
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});

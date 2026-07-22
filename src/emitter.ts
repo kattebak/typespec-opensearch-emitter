@@ -166,6 +166,8 @@ export async function $onEmit(
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
 			monolithicThresholdBytes:
 				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
+			functionThresholdBytes:
+				graphqlOptions["function-threshold-bytes"] ?? 32000,
 			autoDateHistogramBuckets:
 				graphqlOptions["auto-date-histogram-buckets"] ??
 				DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
@@ -183,6 +185,17 @@ export async function $onEmit(
 				projection,
 				resolverOptions,
 			);
+			for (const oversized of resolverFile.oversizedFunctions ?? []) {
+				reportDiagnostic(context.program, {
+					code: "pipeline-function-over-threshold",
+					format: {
+						functionName: oversized.functionName,
+						bytes: String(oversized.bytes),
+						threshold: String(oversized.thresholdBytes),
+					},
+					target: projection.projectionModel,
+				});
+			}
 			resolverFiles.push(resolverFile);
 			await emitFile(context.program, {
 				path: resolvePath(context.emitterOutputDir, resolverFile.fileName),
