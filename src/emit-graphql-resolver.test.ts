@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Type } from "@typespec/compiler";
 import {
+	__test,
 	APPSYNC_FUNCTION_BYTE_LIMIT,
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 	emitGraphQLResolver,
@@ -388,10 +389,16 @@ describe("emitGraphQLResolver", () => {
 			],
 		});
 
-		const baseline = combinedContent(
+		// The request side only: an inert nested sub-projection still widens the
+		// response shape the after-mapping reconciles, and that is not what this
+		// test pins.
+		const requestSide = (result: EmitResult): string =>
+			result.functions.map((fn) => fn.content).join("\n");
+
+		const baseline = requestSide(
 			await emitGraphQLResolver(withoutNested, defaultOptions),
 		);
-		const actual = combinedContent(
+		const actual = requestSide(
 			await emitGraphQLResolver(withInertNested, defaultOptions),
 		);
 
@@ -1616,7 +1623,7 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				", hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)",
+				", hits: (b.hits?.hits?.hits ?? []).map((h) => normalizeNode(h._source)).filter((h) => h != null)",
 			),
 			"terms response must unwrap hits.hits._source onto the bucket's hits field",
 		);
@@ -1648,7 +1655,7 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				", latestValidTo: b.latestValidTo?.value ?? null, hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)",
+				", latestValidTo: b.latestValidTo?.value ?? null, hits: (b.hits?.hits?.hits ?? []).map((h) => normalizeNode(h._source)).filter((h) => h != null)",
 			),
 		);
 	});
@@ -4231,5 +4238,265 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 			canonical(monoBody.aggs),
 			"split aggs (with search-side budget division) must match the monolithic aggs",
 		);
+	});
+});
+
+describe("stale-document tolerance", () => {
+	const monolithicOptions = {
+		...defaultOptions,
+		monolithicThresholdBytes: 32_000,
+	};
+
+	function arrayOfModel(): Type {
+		return {
+			kind: "Model",
+			name: "Array",
+			indexer: { value: { kind: "Model" } },
+		} as unknown as Type;
+	}
+
+	function arrayOfString(): Type {
+		return {
+			kind: "Model",
+			name: "Array",
+			indexer: { value: { kind: "Scalar", name: "string" } },
+		} as unknown as Type;
+	}
+
+	function tradeProjection(): ResolvedProjection {
+		const volumeSubProjection = makeSubProjection("VolumeSearchDoc", [
+			makeField({ name: "volumeId", keyword: true }),
+		]);
+		const legSubProjection = makeSubProjection("LegSearchDoc", [
+			makeField({ name: "legId", keyword: true }),
+			makeField({
+				name: "volumes",
+				nested: true,
+				subProjection: volumeSubProjection,
+				type: arrayOfModel(),
+			}),
+		]);
+		return makeProjection({
+			name: "TradeSearchDoc",
+			indexName: "trades",
+			fields: [
+				makeField({ name: "tradeId", keyword: true }),
+				makeField({ name: "side", keyword: true, optional: true }),
+				makeField({
+					name: "legs",
+					nested: true,
+					subProjection: legSubProjection,
+					type: arrayOfModel(),
+				}),
+				makeField({
+					name: "legExternallyDefinedAttributes",
+					nested: true,
+					subProjection: makeSubProjection("LegAttributeSearchDoc", [
+						makeField({ name: "legId", keyword: true }),
+					]),
+					type: arrayOfModel(),
+				}),
+				makeField({
+					name: "aliases",
+					keyword: true,
+					optional: true,
+					type: arrayOfString(),
+				}),
+			],
+		});
+	}
+
+	function searchResult(sources: Record<string, unknown>[]): unknown {
+		return {
+			args: {},
+			result: {
+				hits: {
+					total: { value: sources.length },
+					hits: sources.map((source, index) => ({
+						_id: `doc-${index}`,
+						_source: source,
+						sort: [index],
+					})),
+				},
+			},
+		};
+	}
+
+	type Connection = {
+		edges: Array<{ node: Record<string, unknown> }>;
+		totalCount: number;
+	};
+
+	it("defaults an absent required list to an empty list", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([{ tradeId: "T-1", legs: [] }]),
+		) as Connection;
+
+		assert.equal(connection.edges.length, 1);
+		assert.deepEqual(
+			connection.edges[0].node.legExternallyDefinedAttributes,
+			[],
+		);
+	});
+
+	it("defaults an absent required list nested inside a sub-document", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{
+					tradeId: "T-1",
+					legs: [{ legId: "L-1" }],
+					legExternallyDefinedAttributes: [],
+				},
+			]),
+		) as Connection;
+
+		const legs = connection.edges[0].node.legs as Array<
+			Record<string, unknown>
+		>;
+		assert.deepEqual(legs[0].volumes, []);
+	});
+
+	it("leaves a present list untouched", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{
+					tradeId: "T-1",
+					legs: [],
+					legExternallyDefinedAttributes: [{ legId: "L-9" }],
+				},
+			]),
+		) as Connection;
+
+		assert.deepEqual(connection.edges[0].node.legExternallyDefinedAttributes, [
+			{ legId: "L-9" },
+		]);
+	});
+
+	it("invents nothing for absent optional fields", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{ tradeId: "T-1", legs: [], legExternallyDefinedAttributes: [] },
+			]),
+		) as Connection;
+
+		assert.ok(!("side" in connection.edges[0].node));
+		assert.ok(!("aliases" in connection.edges[0].node));
+	});
+
+	it("drops a document missing a required scalar and keeps its siblings", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{ legs: [], legExternallyDefinedAttributes: [] },
+				{ tradeId: "T-2", legs: [], legExternallyDefinedAttributes: [] },
+			]),
+		) as Connection;
+
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.tradeId),
+			["T-2"],
+		);
+		assert.equal(connection.totalCount, 2);
+	});
+
+	it("drops a document whose sub-document is missing a required scalar", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{
+					tradeId: "T-1",
+					legs: [{ legId: "L-1", volumes: [] }, { volumes: [] }],
+					legExternallyDefinedAttributes: [],
+				},
+				{ tradeId: "T-2", legs: [], legExternallyDefinedAttributes: [] },
+			]),
+		) as Connection;
+
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.tradeId),
+			["T-2"],
+		);
+	});
+
+	it("normalizes identically in the pipeline shape", async () => {
+		const result = await emitGraphQLResolver(tradeProjection(), defaultOptions);
+
+		assert.equal(result.mode, "pipeline");
+		const ctx = searchResult([{ tradeId: "T-1", legs: [] }]) as {
+			result: unknown;
+			args: unknown;
+		};
+		const connection = evalResponse(result.content, {
+			args: ctx.args,
+			prev: { result: ctx.result },
+		}) as Connection;
+
+		assert.deepEqual(
+			connection.edges[0].node.legExternallyDefinedAttributes,
+			[],
+		);
+	});
+
+	it("collects the non-null shape level by level", () => {
+		const spec = __test.collectDocumentSpec(tradeProjection());
+
+		assert.deepEqual(spec, [
+			{
+				path: [],
+				lists: ["legs", "legExternallyDefinedAttributes"],
+				values: ["tradeId"],
+			},
+			{ path: ["legs"], lists: ["volumes"], values: ["legId"] },
+			{ path: ["legs", "volumes"], lists: [], values: ["volumeId"] },
+			{
+				path: ["legExternallyDefinedAttributes"],
+				lists: [],
+				values: ["legId"],
+			},
+		]);
+	});
+
+	it("emits no walker for a projection with no non-null response fields", async () => {
+		const projection = makeProjection({
+			fields: [makeField({ name: "name", optional: true })],
+		});
+		const result = await emitGraphQLResolver(projection, monolithicOptions);
+
+		assert.ok(!result.content.includes("DOC_SPEC"));
+		assert.ok(result.content.includes("node: hit._source"));
 	});
 });
