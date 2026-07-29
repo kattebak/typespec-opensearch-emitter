@@ -284,7 +284,7 @@ export const $lib = createTypeSpecLibrary({
 						"monolithic-threshold-bytes": {
 							type: "number",
 							nullable: true,
-							default: 32000,
+							default: 31000,
 						},
 						"auto-date-histogram-buckets": {
 							type: "number",

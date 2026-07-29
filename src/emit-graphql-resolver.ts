@@ -67,7 +67,7 @@ export interface ResolverOptions {
 	autoDateHistogramBuckets?: number;
 }
 
-const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 32_000;
+const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 31_000;
 
 /**
  * AppSync's hard per-function code limit. `CreateFunction` rejects any resolver
@@ -254,50 +254,61 @@ export async function emitGraphQLResolver(
 	// Level 1: the single prepare fits the per-function target, so ship the
 	// original two-function shape byte-for-byte. Only when the whole request
 	// side overflows the cap does the recursive split take over (issue #173).
-	if (Buffer.byteLength(prepareContent, "utf-8") <= functionThreshold) {
-		return {
-			queryFieldName,
-			mode: "pipeline",
-			fileName: `${baseName}-resolver.js`,
-			content: resolverContent,
-			functions: [
-				{
-					name: "prepare",
-					fileName: `${baseName}-fn-prepare.js`,
-					content: prepareContent,
-					dataSource: "NONE",
-				},
-				{
-					name: "search",
-					fileName: `${baseName}-fn-search.js`,
-					content: renderSearchFunction(projection.indexName),
-					dataSource: "OPENSEARCH",
-				},
-			],
-		};
-	}
+	const requestFunctions: EmittedPipelineFunction[] =
+		Buffer.byteLength(prepareContent, "utf-8") <= functionThreshold
+			? [
+					{
+						name: "prepare",
+						fileName: `${baseName}-fn-prepare.js`,
+						content: prepareContent,
+						dataSource: "NONE",
+					},
+					{
+						name: "search",
+						fileName: `${baseName}-fn-search.js`,
+						content: renderSearchFunction(projection.indexName),
+						dataSource: "OPENSEARCH",
+					},
+				]
+			: // Levels 2/3: split the request side across NONE functions that each
+				// contribute to shared ctx.stash structures, and let the OPENSEARCH
+				// `search` function assemble the body from them (issue #173).
+				buildSplitPipeline({
+					baseName,
+					indexName: projection.indexName,
+					textFields,
+					keywordFields,
+					textSortFields,
+					aggregations,
+					searchFilterShape,
+					options,
+					functionThreshold,
+				});
 
-	// Levels 2/3: split the request side across NONE functions that each
-	// contribute to shared ctx.stash structures, and let the OPENSEARCH `search`
-	// function assemble the body from them (issue #173).
-	const functions = buildSplitPipeline({
-		baseName,
-		indexName: projection.indexName,
-		textFields,
-		keywordFields,
-		textSortFields,
-		aggregations,
-		searchFilterShape,
-		options,
-		functionThreshold,
-	});
+	// The resolver-level after-mapping carries the response walker (issue #178
+	// unrolled it into per-level literal blocks) and the aggregation mapping.
+	// Neither is measured by the request-side split above, so a wide non-null
+	// response shape can overflow the cap with no split path at all (issue
+	// #179). When it does, partition the walker across further NONE functions
+	// that run after `search` and mutate the shared hits in place; the
+	// resolver-level file then only assembles the already-normalized page.
+	const responseSplit =
+		documentSpec.length > 0 &&
+		Buffer.byteLength(resolverContent, "utf-8") > functionThreshold
+			? buildNormalizeFunctions(baseName, documentSpec, functionThreshold)
+			: [];
+
+	const finalResolverContent =
+		responseSplit.length > 0
+			? renderSplitNormalizeResolver(aggregations, documentSpec, options)
+			: resolverContent;
 
 	return {
 		queryFieldName,
 		mode: "pipeline",
 		fileName: `${baseName}-resolver.js`,
-		content: resolverContent,
-		functions,
+		content: finalResolverContent,
+		functions: [...requestFunctions, ...responseSplit],
 	};
 }
 
@@ -820,6 +831,189 @@ function renderPathSegmentBlock(name: string): string {
 			}
 			containers = next;
 		}`;
+}
+
+/**
+ * Response-side split (issue #179): a level's traversal always re-derives its
+ * `containers` frontier from `node` (the hit's `_source`), never from a prior
+ * level's result, so levels apply commutatively — the same property the
+ * request-side FILTER_SPEC split (issue #173) relies on. A level whose parent
+ * list is still unfilled just sees an empty frontier and applies no defaults
+ * for that branch, which is the same outcome as the parent already being `[]`;
+ * order across levels — and across whichever pipeline function renders them —
+ * never changes the result.
+ *
+ * Used inside the per-hit loop of a `normalize` pipeline function rather than
+ * a standalone `node => node | null` helper: a hit is dropped by marking the
+ * shared `__searchDropped` flag on the hit wrapper (never on `_source`, which
+ * is what the GraphQL response reads), so the loop can keep going instead of
+ * returning out of the whole function.
+ */
+function renderDocumentLevelBlockForHitLoop(level: DocumentLevelSpec): string {
+	const traversalBlocks = level.path
+		.map(([name]) => renderPathSegmentBlock(name))
+		.join("\n");
+
+	return `		{
+			let containers = [node];
+${traversalBlocks}
+			for (const container of containers) {
+				for (const name of ${JSON.stringify(level.lists)}) {
+					if (container[name] == null) container[name] = [];
+				}
+				for (const name of ${JSON.stringify(level.values)}) {
+					if (container[name] == null) invalid = true;
+				}
+			}
+		}`;
+}
+
+/**
+ * A NONE pipeline function that applies a slice of the document-level walker
+ * to every hit on the page, mutating each hit's `_source` in place (issue
+ * #179). Runs after `search`; `isFirst` reads the OpenSearch body straight
+ * from `ctx.prev.result` and stashes it for every function downstream
+ * (including the resolver-level after-mapping), since the split may need
+ * several of these before the page is fully normalized.
+ */
+function renderNormalizeFunction(
+	levels: DocumentLevelSpec[],
+	isFirst: boolean,
+): string {
+	const levelBlocks = levels.map(renderDocumentLevelBlockForHitLoop).join("\n");
+	const intake = isFirst
+		? `	const parsedBody = ctx.prev.result;
+	ctx.stash.parsedBody = parsedBody;
+	const hits = parsedBody.hits.hits;`
+		: `	const hits = ctx.stash.parsedBody.hits.hits;`;
+
+	return `import { util } from "@aws-appsync/utils";
+
+export function request(ctx) {
+${intake}
+	for (const hit of hits) {
+		if (hit.__searchDropped) continue;
+		const node = hit._source;
+		if (node == null) {
+			hit.__searchDropped = true;
+			continue;
+		}
+		let invalid = false;
+${levelBlocks}
+		if (invalid) hit.__searchDropped = true;
+	}
+	return { payload: null };
+}
+
+export function response(ctx) {
+	return ctx.result;
+}
+`;
+}
+
+/**
+ * Partitions the document-level walker across `normalize`/`normalize-N` NONE
+ * functions when the resolver-level after-mapping alone overflows the
+ * threshold (issue #179) — the response-side counterpart to
+ * `buildQueryFunctions`/`buildAggsFunctions`. Packing measures every bin
+ * against the `isFirst` render, which is the larger of the two shapes (it
+ * carries the `ctx.prev.result` intake), so the actual first bin never
+ * exceeds what packing already verified.
+ */
+function buildNormalizeFunctions(
+	baseName: string,
+	levels: DocumentLevelSpec[],
+	functionThreshold: number,
+): EmittedPipelineFunction[] {
+	const bins = packByThreshold(
+		levels,
+		(bin) => renderNormalizeFunction(bin, true),
+		functionThreshold,
+	);
+	return bins.map((bin, i) => ({
+		name: i === 0 ? "normalize" : `normalize-${i}`,
+		fileName:
+			i === 0
+				? `${baseName}-fn-normalize.js`
+				: `${baseName}-fn-normalize-${i}.js`,
+		content: renderNormalizeFunction(bin, i === 0),
+		dataSource: "NONE" as const,
+	}));
+}
+
+/**
+ * Resolver-level after-mapping used once the response walker has been split
+ * across `normalize` functions (issue #179). Those functions already
+ * mutated every hit's `_source` in place and marked undeliverable documents
+ * via `__searchDropped`, so this file only assembles the page — no walker
+ * code lives here, which is the point of the split.
+ */
+function renderSplitNormalizeResolver(
+	aggregations: AggregationEntry[],
+	documentSpec: DocumentLevelSpec[],
+	options: ResolverOptions,
+): string {
+	// A `terms` aggregation's `sub.topHits` embeds hits from an aggregation
+	// bucket — a different OS response subtree than the top-level `hits.hits`
+	// the `normalize` functions mutate — so it still needs the walker inline
+	// here. That combination is rare; keep it correct rather than folding it
+	// into the split.
+	const aggregationsNeedWalker = aggregations.some(aggregationHasTopHits);
+	const walkerDocumentSpec = aggregationsNeedWalker ? documentSpec : [];
+	const normalizeNodeHelper = aggregationsNeedWalker
+		? renderNormalizeNodeHelper(documentSpec)
+		: "";
+	const responseAggregationsPreamble =
+		renderResponseAggregationsPreamble(aggregations);
+	const responseAggregations = renderResponseAggregations(
+		aggregations,
+		walkerDocumentSpec,
+	);
+
+	return `import { util } from "@aws-appsync/utils";
+
+export function request(ctx) {
+	return {};
+}
+
+export function response(ctx) {
+	if (ctx.error) {
+		return util.error(ctx.error.message, ctx.error.type);
+	}
+
+	const parsedBody = ctx.stash.parsedBody;
+	const hits = parsedBody.hits.hits;
+	const totalHits = parsedBody.hits.total.value;
+	const args = ctx.args;
+	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
+
+	const hasNextPage = hits.length > size;
+	const page = hits.slice(0, size);
+	const edges = [];
+	for (const hit of page) {
+		if (hit.__searchDropped) {
+			console.log("dropping unrepresentable document", hit._id);
+		} else {
+			edges.push({ node: hit._source, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
+		}
+	}
+${responseAggregationsPreamble}
+	return {
+		edges,
+		totalCount: totalHits,${responseAggregations}
+		pageInfo: {
+			hasNextPage,
+			endCursor: page.length > 0 ? util.base64Encode(JSON.stringify(page[page.length - 1].sort)) : null,
+		},
+	};
+}
+${normalizeNodeHelper}`;
+}
+
+function aggregationHasTopHits(entry: AggregationEntry): boolean {
+	if (entry.kind !== "terms") return false;
+	const opts = (entry.options ?? {}) as { topHits?: number };
+	return typeof opts.topHits === "number" && opts.topHits > 0;
 }
 
 /**

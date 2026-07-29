@@ -4110,8 +4110,12 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 				c: unknown,
 			) => { params?: { body?: Record<string, unknown> } };
 		}
+		// `normalize*` functions (issue #179) run after `search` and mutate
+		// response hits, not the request body this helper assembles — skip them.
 		for (const fn of result.functions) {
-			if (fn.dataSource === "NONE") loadRequest(fn.content)(ctx);
+			if (fn.dataSource === "NONE" && !fn.name.startsWith("normalize")) {
+				loadRequest(fn.content)(ctx);
+			}
 		}
 		const search = result.functions.find((f) => f.dataSource === "OPENSEARCH");
 		if (!search) throw new Error("split pipeline has no OPENSEARCH function");
@@ -4407,6 +4411,250 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 			canonical(splitBody.aggs),
 			canonical(monoBody.aggs),
 			"split aggs (with search-side budget division) must match the monolithic aggs",
+		);
+	});
+});
+
+// Issue #179 — the recursive split (issue #173) only measured and subdivided
+// the request-side prepare/query/aggs functions. The resolver-level
+// after-mapping — which carries the response walker (normalizeNode, unrolled
+// per document level since issue #178) and the aggregation response mapping
+// — was never measured against the threshold and had no split path, so a wide
+// non-null response shape could ship a resolver-level file sitting just under
+// the 32,768-byte hard cap with no headroom (production: 31,011 bytes, 94% of
+// the cap). These tests cover the response-side split that closes that gap.
+describe("emitGraphQLResolver response-side split (issue #179)", () => {
+	const forcePipeline = {
+		defaultPageSize: 20,
+		maxPageSize: 100,
+		trackTotalHitsUpTo: 10000,
+		monolithicThresholdBytes: 0,
+	};
+
+	// No filterables/aggregations, so FILTER_SPEC/AGG_SPEC stay tiny and
+	// `prepare` never approaches the threshold — only the response walker
+	// (one document level per nested part, all fields required/non-null)
+	// grows with `nestedCount`, isolating the response-side split from the
+	// request-side one covered by the issue #173 tests above.
+	function wideResponseProjection(
+		nestedCount: number,
+		fieldsPerSub: number,
+	): ResolvedProjection {
+		const shapes = Array.from({ length: nestedCount }, (_, i) => `Part${i}`);
+		return makeProjection({
+			name: "WidgetSearchDoc",
+			indexName: "widgets",
+			fields: [
+				makeField({ name: "widgetId", keyword: true }),
+				...shapes.map((shape) =>
+					makeField({
+						name: `${shape.toLowerCase()}s`,
+						nested: true,
+						subProjection: makeSubProjection(
+							`${shape}SearchDoc`,
+							Array.from({ length: fieldsPerSub }, (_, j) =>
+								makeField({ name: `field${j}` }),
+							),
+						),
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				),
+			],
+		});
+	}
+
+	function allFiles(
+		result: EmitResult,
+	): { name: string; content: string; bytes: number }[] {
+		return [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
+		].map((f) => ({ ...f, bytes: Buffer.byteLength(f.content, "utf-8") }));
+	}
+
+	it("ships a single resolver-level file, unsplit, when the response walker fits under the threshold", async () => {
+		const result = await emitGraphQLResolver(
+			wideResponseProjection(20, 5),
+			forcePipeline,
+		);
+
+		assert.equal(result.mode, "pipeline");
+		assert.deepEqual(
+			result.functions.map((f) => f.name),
+			["prepare", "search"],
+		);
+		assert.ok(result.content.includes("let containers = [node];"));
+		for (const file of allFiles(result)) {
+			assert.ok(
+				file.bytes <= 31_000,
+				`${file.name} is ${file.bytes} bytes; expected to fit under the 31,000 B threshold unsplit`,
+			);
+		}
+	});
+
+	it("splits the response walker across normalize functions when the resolver-level file exceeds the 31,000 B threshold", async () => {
+		const result = await emitGraphQLResolver(
+			wideResponseProjection(48, 5),
+			forcePipeline,
+		);
+
+		assert.equal(result.mode, "pipeline");
+		const names = result.functions.map((f) => f.name);
+		assert.deepEqual(names, ["prepare", "search", "normalize", "normalize-1"]);
+		assert.deepEqual(
+			result.functions.map((f) => f.dataSource),
+			["NONE", "OPENSEARCH", "NONE", "NONE"],
+		);
+
+		// The resolver-level file no longer carries any walker code — that's
+		// the point of the split.
+		assert.ok(!result.content.includes("let containers = [node];"));
+		assert.ok(result.content.includes("ctx.stash.parsedBody"));
+		assert.ok(
+			result.functions
+				.filter((f) => f.name.startsWith("normalize"))
+				.every((f) => f.content.includes("let containers = [node];")),
+		);
+
+		for (const file of allFiles(result)) {
+			assert.ok(
+				file.bytes < 31_000,
+				`${file.name} is ${file.bytes} bytes; must stay under the 31,000 B split threshold`,
+			);
+			assert.ok(
+				file.bytes < APPSYNC_FUNCTION_BYTE_LIMIT,
+				`${file.name} is ${file.bytes} bytes; must stay under the 32,768 B AppSync hard cap`,
+			);
+		}
+	});
+
+	it("keeps every part under both caps across a range of response-heavy widths", async () => {
+		for (const nestedCount of [40, 48, 60, 90]) {
+			const result = await emitGraphQLResolver(
+				wideResponseProjection(nestedCount, 5),
+				forcePipeline,
+			);
+			for (const file of allFiles(result)) {
+				assert.ok(
+					file.bytes < 31_000,
+					`${nestedCount}-nested ${file.name} is ${file.bytes} bytes; must stay under 31,000 B`,
+				);
+				assert.ok(
+					file.bytes < APPSYNC_FUNCTION_BYTE_LIMIT,
+					`${nestedCount}-nested ${file.name} is ${file.bytes} bytes; must stay under ${APPSYNC_FUNCTION_BYTE_LIMIT}`,
+				);
+			}
+		}
+	});
+
+	it("split resolver-level file and normalize functions pass AppSync's APPSYNC_JS static check", async () => {
+		const result = await emitGraphQLResolver(
+			wideResponseProjection(48, 5),
+			forcePipeline,
+		);
+		assert.ok(result.functions.some((f) => f.name.startsWith("normalize")));
+
+		assertAllAppsyncJsTypeSafe(
+			allFiles(result).map((f) => ({
+				name: `emitted ${f.name}`,
+				content: f.content,
+			})),
+		);
+	});
+
+	// Threads a fake OpenSearch response through the split normalize functions
+	// exactly as the runtime would (search's response *is* the OS body; each
+	// NONE normalize function mutates hits in place and stashes/reads
+	// ctx.stash.parsedBody), then evaluates the resolver-level response() to
+	// build the final page — and compares it against the monolithic path
+	// (same fixture, threshold high enough to stay single-file) to prove the
+	// split doesn't change what a caller sees.
+	function runNormalizeChainAndRespond(
+		result: EmitResult,
+		osBody: Record<string, unknown>,
+		args: Record<string, unknown>,
+	): unknown {
+		const utilStub = {
+			base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
+			base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
+			error: (msg: string) => {
+				throw new Error(msg);
+			},
+		};
+		function loadRequest(source: string) {
+			const stripped = source
+				.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
+				.replace(/^export function /gm, "function ");
+			return new Function("util", `${stripped}\nreturn request;`)(utilStub) as (
+				c: unknown,
+			) => unknown;
+		}
+		const ctx = {
+			args,
+			stash: {} as Record<string, unknown>,
+			prev: { result: osBody },
+		};
+		for (const fn of result.functions) {
+			if (fn.name.startsWith("normalize")) loadRequest(fn.content)(ctx);
+		}
+		return evalResponse(result.content, ctx);
+	}
+
+	it("split-mode response matches the monolithic path: same drops, same list defaults, same page", async () => {
+		const projection = wideResponseProjection(60, 2);
+		const split = await emitGraphQLResolver(projection, forcePipeline);
+		assert.ok(split.functions.some((f) => f.name.startsWith("normalize")));
+
+		const monolithic = await emitGraphQLResolver(projection, {
+			...forcePipeline,
+			monolithicThresholdBytes: 10_000_000,
+		});
+		assert.equal(monolithic.mode, "monolithic");
+
+		function makeHit(id: string, opts: { dropWidget?: boolean } = {}) {
+			const parts: Record<string, unknown>[] = [];
+			for (let i = 0; i < 60; i++) {
+				parts.push({ field0: `v${i}`, field1: `w${i}` });
+			}
+			return {
+				_id: id,
+				sort: [id],
+				_source: {
+					widgetId: opts.dropWidget ? undefined : id,
+					...Object.fromEntries(
+						Array.from({ length: 60 }, (_, i) => [`part${i}s`, parts]),
+					),
+				},
+			};
+		}
+
+		const osBody = {
+			hits: {
+				total: { value: 2 },
+				hits: [makeHit("w1"), makeHit("w2", { dropWidget: true })],
+			},
+		};
+
+		const args = { first: 10 };
+		const splitResponse = runNormalizeChainAndRespond(
+			split,
+			JSON.parse(JSON.stringify(osBody)),
+			args,
+		);
+		const monoResponse = evalResponse(monolithic.content, {
+			args,
+			result: JSON.parse(JSON.stringify(osBody)),
+		});
+
+		assert.deepEqual(splitResponse, monoResponse);
+		assert.equal(
+			(splitResponse as { edges: unknown[] }).edges.length,
+			1,
+			"the hit missing the required widgetId must be dropped in both modes",
 		);
 	});
 });
