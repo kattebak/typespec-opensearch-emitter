@@ -26,10 +26,16 @@ export function response(ctx) {
 	const size = Math.min(args.first || 20, 100);
 
 	const hasNextPage = hits.length > size;
-	const edges = hits.slice(0, size).map((hit) => ({
-		node: hit._source,
-		cursor: util.base64Encode(JSON.stringify(hit.sort)),
-	}));
+	const page = hits.slice(0, size);
+	const edges = [];
+	for (const hit of page) {
+		const node = normalizeNode(hit._source);
+		if (node == null) {
+			console.log("dropping unrepresentable document", hit._id);
+		} else {
+			edges.push({ node, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
+		}
+	}
 	const _a = parsedBody.aggregations || {};
 	return {
 		edges,
@@ -42,7 +48,41 @@ export function response(ctx) {
 		},
 		pageInfo: {
 			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+			endCursor: page.length > 0 ? util.base64Encode(JSON.stringify(page[page.length - 1].sort)) : null,
 		},
 	};
+}
+
+const DOC_SPEC = [[[],["tags","aliases","approvals","bankAccountApprovals"],["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]]];
+
+function normalizeNode(node) {
+	if (node == null) return null;
+	for (const level of DOC_SPEC) {
+		let containers = [node];
+		for (const segment of level[0]) {
+			const next = [];
+			for (const container of containers) {
+				const value = container[segment];
+				if (value != null) {
+					if (Array.isArray(value)) {
+						for (const item of value) {
+							if (item != null) next.push(item);
+						}
+					} else {
+						next.push(value);
+					}
+				}
+			}
+			containers = next;
+		}
+		for (const container of containers) {
+			for (const name of level[1]) {
+				if (container[name] == null) container[name] = [];
+			}
+			for (const name of level[2]) {
+				if (container[name] == null) return null;
+			}
+		}
+	}
+	return node;
 }

@@ -150,6 +150,22 @@ const NESTED_TEXT_QUERY_HELPER = "NQ";
 // realistic SearchFilter shape; runtime util.error fires if exceeded.
 const FILTER_WORK_SLOT_COUNT = 256;
 
+/**
+ * Module-level helper that reconciles a hit's `_source` with the SDL before it
+ * becomes a response node. A search index is a derived projection and drifts
+ * behind the schema that reads it: a document written before a field existed
+ * carries no key for it, and the raw `_source` then hands GraphQL `null` for a
+ * non-null field.
+ *
+ * Absent state for a list is an empty list, so the helper fills those in and
+ * the document stays readable. An absent required scalar or object has no
+ * honest stand-in, so the helper rejects the document instead of inventing
+ * one; the resolver drops it from `edges` and the rest of the page still
+ * renders. Non-null propagation would otherwise turn one stale document into a
+ * null response for every sibling on the page.
+ */
+const NORMALIZE_NODE_HELPER = "normalizeNode";
+
 export async function emitGraphQLResolver(
 	projection: TopLevelProjection,
 	options: ResolverOptions,
@@ -184,6 +200,7 @@ export async function emitGraphQLResolver(
 
 	const aggregations = collectAggregations(projection);
 	const searchFilterShape = buildSearchFilterShape(projection);
+	const documentSpec = collectDocumentSpec(projection);
 
 	const threshold =
 		options.monolithicThresholdBytes ?? DEFAULT_MONOLITHIC_THRESHOLD_BYTES;
@@ -207,6 +224,7 @@ export async function emitGraphQLResolver(
 		aggregations,
 		searchFilterShape,
 		projection.indexName,
+		documentSpec,
 		options,
 	);
 	const monolithicBytes = Buffer.byteLength(monolithicContent, "utf-8");
@@ -223,7 +241,7 @@ export async function emitGraphQLResolver(
 
 	// Pipeline fallback. The resolver-level file holds the after-mapping;
 	// prepare runs on NONE, search on OPENSEARCH (issue #105).
-	const resolverContent = renderResolver(aggregations, options);
+	const resolverContent = renderResolver(aggregations, documentSpec, options);
 	const prepareContent = renderPrepareFunction(
 		textFields,
 		keywordFields,
@@ -647,6 +665,178 @@ function joinFieldPath(parent: string | undefined, segment: string): string {
 }
 
 /**
+ * The non-null fields of one document level, addressed by the segment path
+ * that reaches that level from the document root. Lists and values are split
+ * because they degrade differently: a list is fillable, a value is not.
+ */
+export interface DocumentLevelSpec {
+	path: string[];
+	lists: string[];
+	values: string[];
+}
+
+/**
+ * The non-null response shape the SDL declares, level by level. Only
+ * `searchable` fields reach the SDL, so filter-only and aggregatable-only
+ * fields are absent here too. Levels are collected outermost-first, so the
+ * emitted walker fills a parent list before descending into it.
+ */
+function collectDocumentSpec(
+	projection: ResolvedProjection,
+): DocumentLevelSpec[] {
+	const levels: DocumentLevelSpec[] = [];
+	collectDocumentSpecRecursive(projection, [], levels);
+	return levels.filter(
+		(level) => level.lists.length > 0 || level.values.length > 0,
+	);
+}
+
+function collectDocumentSpecRecursive(
+	projection: ResolvedProjection,
+	path: string[],
+	levels: DocumentLevelSpec[],
+): void {
+	if (!projection.fields) return;
+
+	const level: DocumentLevelSpec = { path, lists: [], values: [] };
+	levels.push(level);
+
+	const children: Array<{ projection: ResolvedProjection; path: string[] }> =
+		[];
+
+	for (const field of projection.fields) {
+		if (!field.searchable) continue;
+
+		const name = field.projectedName ?? field.name;
+
+		if (!field.optional) {
+			if (isArrayType(field.type)) {
+				level.lists.push(name);
+			} else {
+				level.values.push(name);
+			}
+		}
+
+		if (field.subProjection) {
+			children.push({ projection: field.subProjection, path: [...path, name] });
+		}
+	}
+
+	for (const child of children) {
+		collectDocumentSpecRecursive(child.projection, child.path, levels);
+	}
+}
+
+function isArrayType(type: ResolvedProjectionField["type"]): boolean {
+	return (
+		type.kind === "Model" &&
+		type.name === "Array" &&
+		type.indexer?.value !== undefined
+	);
+}
+
+/**
+ * Runtime walker declaration, emitted only when the projection declares a
+ * non-null response field. APPSYNC_JS rejects recursion, so the walker carries
+ * its own frontier of parent objects and steps one path segment at a time.
+ * Returns `null` for a document that cannot be made schema-valid; the caller
+ * drops it rather than letting non-null propagation null the whole page.
+ */
+function renderNormalizeNodeHelper(levels: DocumentLevelSpec[]): string {
+	if (levels.length === 0) return "";
+
+	const specLiteral = JSON.stringify(
+		levels.map((level) => [level.path, level.lists, level.values]),
+	);
+
+	return `
+const DOC_SPEC = ${specLiteral};
+
+function ${NORMALIZE_NODE_HELPER}(node) {
+	if (node == null) return null;
+	for (const level of DOC_SPEC) {
+		let containers = [node];
+		for (const segment of level[0]) {
+			const next = [];
+			for (const container of containers) {
+				const value = container[segment];
+				if (value != null) {
+					if (Array.isArray(value)) {
+						for (const item of value) {
+							if (item != null) next.push(item);
+						}
+					} else {
+						next.push(value);
+					}
+				}
+			}
+			containers = next;
+		}
+		for (const container of containers) {
+			for (const name of level[1]) {
+				if (container[name] == null) container[name] = [];
+			}
+			for (const name of level[2]) {
+				if (container[name] == null) return null;
+			}
+		}
+	}
+	return node;
+}
+`;
+}
+
+/**
+ * Reads `_source` through the walker when the projection has a non-null shape
+ * to reconcile, and raw otherwise.
+ */
+function renderNormalizedSource(
+	levels: DocumentLevelSpec[],
+	sourceExpression: string,
+): string {
+	if (levels.length === 0) return sourceExpression;
+	return `${NORMALIZE_NODE_HELPER}(${sourceExpression})`;
+}
+
+/**
+ * The `edges` assembly. With a non-null shape to reconcile it becomes a loop
+ * that skips the documents the walker rejects; `.map` cannot drop an element.
+ */
+function renderEdgesAssembly(levels: DocumentLevelSpec[]): string {
+	if (levels.length === 0) {
+		return `	const edges = hits.slice(0, size).map((hit) => ({
+		node: hit._source,
+		cursor: util.base64Encode(JSON.stringify(hit.sort)),
+	}));`;
+	}
+
+	return `	const page = hits.slice(0, size);
+	const edges = [];
+	for (const hit of page) {
+		const node = ${NORMALIZE_NODE_HELPER}(hit._source);
+		if (node == null) {
+			console.log("dropping unrepresentable document", hit._id);
+		} else {
+			edges.push({ node, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
+		}
+	}`;
+}
+
+/**
+ * The `endCursor` expression. It marks a position in the index, not in the
+ * response, so it comes from the last hit on the page rather than the last
+ * surviving edge — a page whose documents were all dropped still advances the
+ * cursor instead of stranding the caller. Identical to the last edge's cursor
+ * whenever nothing was dropped.
+ */
+function renderEndCursor(levels: DocumentLevelSpec[]): string {
+	if (levels.length === 0) {
+		return "edges.length > 0 ? edges[edges.length - 1].cursor : null";
+	}
+	return "page.length > 0 ? util.base64Encode(JSON.stringify(page[page.length - 1].sort)) : null";
+}
+
+/**
  * Declaration of the nested-query helper, emitted only when the projection has
  * nested text to search. `score_mode: "max"` scores a parent document by its
  * best-matching child rather than by a sum over children, so one strong hit
@@ -959,6 +1149,7 @@ function renderMonolithicResolver(
 	aggregations: AggregationEntry[],
 	searchFilterShape: SearchFilterShape | undefined,
 	indexName: string,
+	documentSpec: DocumentLevelSpec[],
 	options: ResolverOptions,
 ): string {
 	const textQueryPush = renderTextQueryPush(textFields);
@@ -975,7 +1166,13 @@ function renderMonolithicResolver(
 	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
 	const responseAggregationsPreamble =
 		renderResponseAggregationsPreamble(aggregations);
-	const responseAggregations = renderResponseAggregations(aggregations);
+	const responseAggregations = renderResponseAggregations(
+		aggregations,
+		documentSpec,
+	);
+	const normalizeNodeHelper = renderNormalizeNodeHelper(documentSpec);
+	const edgesAssembly = renderEdgesAssembly(documentSpec);
+	const endCursor = renderEndCursor(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1019,21 +1216,18 @@ ${renderSearchBodyGuard("parsedBody", "\t")}	const hits = parsedBody.hits.hits;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
 
 	const hasNextPage = hits.length > size;
-	const edges = hits.slice(0, size).map((hit) => ({
-		node: hit._source,
-		cursor: util.base64Encode(JSON.stringify(hit.sort)),
-	}));
+${edgesAssembly}
 ${responseAggregationsPreamble}
 	return {
 		edges,
 		totalCount: totalHits,${responseAggregations}
 		pageInfo: {
 			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+			endCursor: ${endCursor},
 		},
 	};
 }
-${buildAggsFunction}${textSpecDeclaration}${nestedTextHelper}
+${normalizeNodeHelper}${buildAggsFunction}${textSpecDeclaration}${nestedTextHelper}
 function buildQuery(queryText, filter, searchFilter) {
 	const musts = [];
 	const filters = [];
@@ -1083,11 +1277,18 @@ ${applyFilterSpecFunction}`;
  */
 function renderResolver(
 	aggregations: AggregationEntry[],
+	documentSpec: DocumentLevelSpec[],
 	options: ResolverOptions,
 ): string {
 	const responseAggregationsPreamble =
 		renderResponseAggregationsPreamble(aggregations);
-	const responseAggregations = renderResponseAggregations(aggregations);
+	const responseAggregations = renderResponseAggregations(
+		aggregations,
+		documentSpec,
+	);
+	const normalizeNodeHelper = renderNormalizeNodeHelper(documentSpec);
+	const edgesAssembly = renderEdgesAssembly(documentSpec);
+	const endCursor = renderEndCursor(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1107,21 +1308,18 @@ ${renderSearchBodyGuard("parsedBody", "\t")}	const hits = parsedBody.hits.hits;
 	const size = Math.min(args.first || ${options.defaultPageSize}, ${options.maxPageSize});
 
 	const hasNextPage = hits.length > size;
-	const edges = hits.slice(0, size).map((hit) => ({
-		node: hit._source,
-		cursor: util.base64Encode(JSON.stringify(hit.sort)),
-	}));
+${edgesAssembly}
 ${responseAggregationsPreamble}
 	return {
 		edges,
 		totalCount: totalHits,${responseAggregations}
 		pageInfo: {
 			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+			endCursor: ${endCursor},
 		},
 	};
 }
-`;
+${normalizeNodeHelper}`;
 }
 
 /**
@@ -1924,7 +2122,10 @@ function renderResponseAggregationsPreamble(
 	return lines.join("\n");
 }
 
-function renderResponseAggregations(aggregations: AggregationEntry[]): string {
+function renderResponseAggregations(
+	aggregations: AggregationEntry[],
+	documentSpec: DocumentLevelSpec[],
+): string {
 	if (aggregations.length === 0) {
 		return "";
 	}
@@ -1935,13 +2136,16 @@ function renderResponseAggregations(aggregations: AggregationEntry[]): string {
 	for (const entry of aggregations) {
 		if (seen.has(entry.aggName)) continue;
 		seen.add(entry.aggName);
-		lines.push(renderResponseAggregationLine(entry));
+		lines.push(renderResponseAggregationLine(entry, documentSpec));
 	}
 
 	return `\n\t\taggregations: {\n${lines.join("\n")}\n\t\t},`;
 }
 
-function renderResponseAggregationLine(entry: AggregationEntry): string {
+function renderResponseAggregationLine(
+	entry: AggregationEntry,
+	documentSpec: DocumentLevelSpec[],
+): string {
 	const path = entry.nestedPath
 		? `_a${nestedAggGroupKey(entry.nestedPath)}.${entry.aggName}`
 		: `_a.${entry.aggName}`;
@@ -1960,7 +2164,7 @@ function renderResponseAggregationLine(entry: AggregationEntry): string {
 				.map(([name]) => `, ${name}: b.${name}?.value ?? null`)
 				.join("");
 			const hitsField = hasTopHits
-				? `, hits: (b.hits?.hits?.hits ?? []).map((h) => h._source)`
+				? `, hits: (b.hits?.hits?.hits ?? []).map((h) => ${renderNormalizedSource(documentSpec, "h._source")}).filter((h) => h != null)`
 				: "";
 			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count${subFields}${hitsField} })),`;
 		}
@@ -2020,6 +2224,7 @@ export const __test = {
 	renderAggSpecLiteral,
 	renderBuildAggsFunction,
 	renderResponseAggregations,
+	collectDocumentSpec,
 	partitionAggregationsByTopPath,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,
 };
