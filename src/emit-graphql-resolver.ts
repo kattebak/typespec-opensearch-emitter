@@ -665,12 +665,19 @@ function joinFieldPath(parent: string | undefined, segment: string): string {
 }
 
 /**
+ * One step from a document level to the level below it. The boolean records
+ * whether the schema declares that step a list, resolved when the spec is
+ * built so the emitted walker never has to ask at runtime.
+ */
+export type DocumentPathSegment = [string, boolean];
+
+/**
  * The non-null fields of one document level, addressed by the segment path
  * that reaches that level from the document root. Lists and values are split
  * because they degrade differently: a list is fillable, a value is not.
  */
 export interface DocumentLevelSpec {
-	path: string[];
+	path: DocumentPathSegment[];
 	lists: string[];
 	values: string[];
 }
@@ -693,7 +700,7 @@ function collectDocumentSpec(
 
 function collectDocumentSpecRecursive(
 	projection: ResolvedProjection,
-	path: string[],
+	path: DocumentPathSegment[],
 	levels: DocumentLevelSpec[],
 ): void {
 	if (!projection.fields) return;
@@ -701,16 +708,19 @@ function collectDocumentSpecRecursive(
 	const level: DocumentLevelSpec = { path, lists: [], values: [] };
 	levels.push(level);
 
-	const children: Array<{ projection: ResolvedProjection; path: string[] }> =
-		[];
+	const children: Array<{
+		projection: ResolvedProjection;
+		path: DocumentPathSegment[];
+	}> = [];
 
 	for (const field of projection.fields) {
 		if (!field.searchable) continue;
 
 		const name = field.projectedName ?? field.name;
+		const list = isArrayType(field.type);
 
 		if (!field.optional) {
-			if (isArrayType(field.type)) {
+			if (list) {
 				level.lists.push(name);
 			} else {
 				level.values.push(name);
@@ -718,7 +728,10 @@ function collectDocumentSpecRecursive(
 		}
 
 		if (field.subProjection) {
-			children.push({ projection: field.subProjection, path: [...path, name] });
+			children.push({
+				projection: field.subProjection,
+				path: [...path, [name, list]],
+			});
 		}
 	}
 
@@ -741,6 +754,10 @@ function isArrayType(type: ResolvedProjectionField["type"]): boolean {
  * its own frontier of parent objects and steps one path segment at a time.
  * Returns `null` for a document that cannot be made schema-valid; the caller
  * drops it rather than letting non-null propagation null the whole page.
+ *
+ * Each path segment carries its own list flag. APPSYNC_JS has no `Array`
+ * global to test a value against, and it needs none: the projection already
+ * says which steps are lists.
  */
 function renderNormalizeNodeHelper(levels: DocumentLevelSpec[]): string {
 	if (levels.length === 0) return "";
@@ -759,9 +776,9 @@ function ${NORMALIZE_NODE_HELPER}(node) {
 		for (const segment of level[0]) {
 			const next = [];
 			for (const container of containers) {
-				const value = container[segment];
+				const value = container[segment[0]];
 				if (value != null) {
-					if (Array.isArray(value)) {
+					if (segment[1]) {
 						for (const item of value) {
 							if (item != null) next.push(item);
 						}

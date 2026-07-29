@@ -2201,14 +2201,28 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
-	it("emitted resolver contains no forbidden global coercion calls (String, Number, Boolean, Array, Object)", async () => {
+	it("emitted resolver references no unsupported global", async () => {
 		// APPSYNC_JS rejects these globals at deploy time even though
 		// @aws-appsync/eslint-plugin doesn't flag them (no rule covers
-		// global function calls). Use template literals (\`${x}\`) for
-		// string coercion and arithmetic / comparisons for the others.
+		// global function calls) and the emitter's own tests eval in Node,
+		// where they all exist. This regex is the only gate, so it covers
+		// both call and member form: `Array.isArray(...)` shipped once
+		// because a call-only pattern let it through.
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "name" }),
+				makeField({
+					name: "legs",
+					nested: true,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: makeSubProjection("LegSearchDoc", [
+						makeField({ name: "legId", keyword: true }),
+					]),
+				}),
 				makeField({
 					name: "validFrom",
 					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
@@ -2246,18 +2260,34 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		const forbidden = ["String", "Number", "Boolean", "Array", "Object"];
+		// `Object.keys`/`entries`/`values` are supported, so only the coercion
+		// call form is forbidden for it; the rest are absent from the runtime
+		// entirely, so any reference to them is a deploy-time failure.
+		const callOnly = ["String", "Number", "Boolean", "Object"];
+		const anyReference = [
+			"Array",
+			"Promise",
+			"Date",
+			"RegExp",
+			"Symbol",
+			"Map",
+			"Set",
+		];
+		const forbidden = [
+			...callOnly.map((name) => ({ name, pattern: `\\b${name}\\s*\\(` })),
+			...anyReference.map((name) => ({ name, pattern: `\\b${name}\\s*[(.]` })),
+		];
 		const allFiles = [
 			{ name: "resolver", content: result.content },
 			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
 		];
 		for (const file of allFiles) {
-			for (const name of forbidden) {
-				const re = new RegExp(`\\b${name}\\s*\\(`);
+			for (const { name, pattern } of forbidden) {
+				const re = new RegExp(pattern);
 				assert.equal(
 					re.test(file.content),
 					false,
-					`emitted ${file.name} must not call \`${name}(...)\` — APPSYNC_JS rejects global coercion calls.\n--- emitted ---\n${file.content}\n--- end ---`,
+					`emitted ${file.name} must not reference the \`${name}\` global — APPSYNC_JS does not provide it.\n--- emitted ---\n${file.content}\n--- end ---`,
 				);
 			}
 		}
@@ -4306,6 +4336,31 @@ describe("stale-document tolerance", () => {
 		});
 	}
 
+	function petProjection(): ResolvedProjection {
+		return makeProjection({
+			name: "PetSearchDoc",
+			indexName: "pets",
+			fields: [
+				makeField({ name: "petId", keyword: true }),
+				makeField({
+					name: "owner",
+					subProjection: makeSubProjection("OwnerSearchDoc", [
+						makeField({ name: "ownerName", keyword: true }),
+					]),
+					type: { kind: "Model", name: "Owner" } as unknown as Type,
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: makeSubProjection("TagSearchDoc", [
+						makeField({ name: "tagName", keyword: true }),
+					]),
+					type: arrayOfModel(),
+				}),
+			],
+		});
+	}
+
 	function searchResult(sources: Record<string, unknown>[]): unknown {
 		return {
 			args: {},
@@ -4501,14 +4556,71 @@ describe("stale-document tolerance", () => {
 				lists: ["legs", "legExternallyDefinedAttributes"],
 				values: ["tradeId"],
 			},
-			{ path: ["legs"], lists: ["volumes"], values: ["legId"] },
-			{ path: ["legs", "volumes"], lists: [], values: ["volumeId"] },
+			{ path: [["legs", true]], lists: ["volumes"], values: ["legId"] },
 			{
-				path: ["legExternallyDefinedAttributes"],
+				path: [
+					["legs", true],
+					["volumes", true],
+				],
+				lists: [],
+				values: ["volumeId"],
+			},
+			{
+				path: [["legExternallyDefinedAttributes", true]],
 				lists: [],
 				values: ["legId"],
 			},
 		]);
+	});
+
+	it("marks a single-object path segment as not a list", () => {
+		const spec = __test.collectDocumentSpec(petProjection());
+
+		assert.deepEqual(spec, [
+			{ path: [], lists: ["tags"], values: ["petId", "owner"] },
+			{ path: [["owner", false]], lists: [], values: ["ownerName"] },
+			{ path: [["tags", true]], lists: [], values: ["tagName"] },
+		]);
+	});
+
+	it("emits no Array global — APPSYNC_JS has none", async () => {
+		const monolithic = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+		const pipeline = await emitGraphQLResolver(
+			tradeProjection(),
+			defaultOptions,
+		);
+
+		const emitted = [
+			monolithic.content,
+			pipeline.content,
+			...pipeline.functions.map((fn) => fn.content),
+		];
+		for (const content of emitted) {
+			assert.ok(content.indexOf("Array") === -1);
+		}
+	});
+
+	it("descends through a single-object level without a runtime type test", async () => {
+		const result = await emitGraphQLResolver(
+			petProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{ petId: "P-1", owner: { ownerName: "Ada" }, tags: [{ tagName: "a" }] },
+				{ petId: "P-2", owner: {}, tags: [] },
+			]),
+		) as Connection;
+
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.petId),
+			["P-1"],
+		);
 	});
 
 	it("emits no walker for a projection with no non-null response fields", async () => {
