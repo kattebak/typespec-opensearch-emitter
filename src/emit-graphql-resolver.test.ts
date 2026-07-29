@@ -4657,6 +4657,284 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 			"the hit missing the required widgetId must be dropped in both modes",
 		);
 	});
+
+	// The tests above cover exactly one shape: a missing top-level scalar on a
+	// synthetic wide projection. The response walker also has to reconcile a
+	// required field nested below the root, a nested list, and — the pair that
+	// actually broke in production between 2.0.9 and 2.0.11 — a nested value
+	// whose runtime shape (single object vs array) doesn't match what the
+	// projection declares. These tests extend `wideResponseProjection` (kept
+	// only for its byte-padding "PartN" fields, which force the response
+	// walker across the split threshold) with four fields shaped for those
+	// scenarios, then run the same document through both modes and require
+	// identical results.
+	function shapeDriftProjection(): ResolvedProjection {
+		const wide = wideResponseProjection(48, 5);
+		return {
+			...wide,
+			fields: [
+				...wide.fields,
+				// Single nested object (declared, non-list): requiredness of a
+				// field *below* it must still propagate up from whichever
+				// normalize partition holds that child level.
+				makeField({
+					name: "customer",
+					subProjection: makeSubProjection("CustomerSearchDoc", [
+						makeField({ name: "fullName" }),
+					]),
+				}),
+				// A genuine nested list: absence must default to `[]`, not drop
+				// the document, in both modes.
+				makeField({
+					name: "tags",
+					nested: true,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: makeSubProjection("TagSearchDoc", [
+						makeField({ name: "label" }),
+					]),
+				}),
+				// Declared as a list, but the fixture below hands back a bare
+				// object for it — the walker's shape tolerance (`value.length
+				// !== undefined`) must treat it as a single container.
+				makeField({
+					name: "driftToSingle",
+					nested: true,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: makeSubProjection("DriftSearchDoc", [
+						makeField({ name: "value" }),
+					]),
+				}),
+				// The reverse: declared as a single object, but the fixture
+				// hands back an array — the walker must expand it into one
+				// container per element.
+				makeField({
+					name: "driftToList",
+					subProjection: makeSubProjection("DriftSearchDoc", [
+						makeField({ name: "value" }),
+					]),
+				}),
+			],
+		} as ResolvedProjection;
+	}
+
+	function fillerSource(): Record<string, unknown> {
+		const item = {
+			field0: "v0",
+			field1: "v1",
+			field2: "v2",
+			field3: "v3",
+			field4: "v4",
+		};
+		const source: Record<string, unknown> = {};
+		for (let i = 0; i < 48; i++) source[`part${i}s`] = [item];
+		return source;
+	}
+
+	async function compareSplitAndMonolithic(
+		projection: ResolvedProjection,
+		osBody: Record<string, unknown>,
+		args: Record<string, unknown> = { first: 10 },
+	): Promise<{ split: unknown; monolithic: unknown }> {
+		const split = await emitGraphQLResolver(projection, forcePipeline);
+		assert.ok(split.functions.some((f) => f.name.startsWith("normalize")));
+
+		const monolithic = await emitGraphQLResolver(projection, {
+			...forcePipeline,
+			monolithicThresholdBytes: 10_000_000,
+		});
+		assert.equal(monolithic.mode, "monolithic");
+
+		const splitResponse = runNormalizeChainAndRespond(
+			split,
+			JSON.parse(JSON.stringify(osBody)),
+			args,
+		);
+		const monoResponse = evalResponse(monolithic.content, {
+			args,
+			result: JSON.parse(JSON.stringify(osBody)),
+		});
+		return { split: splitResponse, monolithic: monoResponse };
+	}
+
+	it("drops a hit whose missing required field is nested below the root, identically in both modes", async () => {
+		const projection = shapeDriftProjection();
+
+		function makeHit(id: string, opts: { dropFullName?: boolean } = {}) {
+			return {
+				_id: id,
+				sort: [id],
+				_source: {
+					widgetId: id,
+					...fillerSource(),
+					customer: opts.dropFullName ? {} : { fullName: "Ada Lovelace" },
+					tags: [{ label: "a" }],
+					driftToSingle: [{ value: "x" }],
+					driftToList: { value: "y" },
+				},
+			};
+		}
+
+		const osBody = {
+			hits: {
+				total: { value: 2 },
+				hits: [makeHit("w1"), makeHit("w2", { dropFullName: true })],
+			},
+		};
+
+		const { split, monolithic } = await compareSplitAndMonolithic(
+			projection,
+			osBody,
+		);
+		assert.deepEqual(split, monolithic);
+		assert.equal(
+			(split as { edges: unknown[] }).edges.length,
+			1,
+			"the hit missing the nested required field must be dropped in both modes",
+		);
+	});
+
+	it("defaults a missing nested list to [] identically in both modes", async () => {
+		const projection = shapeDriftProjection();
+
+		function makeHit(id: string, tags: unknown) {
+			return {
+				_id: id,
+				sort: [id],
+				_source: {
+					widgetId: id,
+					...fillerSource(),
+					customer: { fullName: "Ada Lovelace" },
+					tags,
+					driftToSingle: [{ value: "x" }],
+					driftToList: { value: "y" },
+				},
+			};
+		}
+
+		const osBody = {
+			hits: {
+				total: { value: 2 },
+				hits: [
+					makeHit("w1", [{ label: "a" }, { label: "b" }]),
+					makeHit("w2", undefined),
+				],
+			},
+		};
+
+		const { split, monolithic } = await compareSplitAndMonolithic(
+			projection,
+			osBody,
+		);
+		assert.deepEqual(split, monolithic);
+		const edges = (split as { edges: { node: { tags: unknown[] } }[] }).edges;
+		assert.equal(edges.length, 2, "a missing list must default, not drop");
+		assert.deepEqual(edges[1]?.node.tags, []);
+	});
+
+	it("tolerates a nested single object where the projection declares a list, identically in both modes", async () => {
+		const projection = shapeDriftProjection();
+
+		const hit = {
+			_id: "w1",
+			sort: ["w1"],
+			_source: {
+				widgetId: "w1",
+				...fillerSource(),
+				customer: { fullName: "Ada Lovelace" },
+				tags: [{ label: "a" }],
+				// Declared a list; the fixture hands back a bare object.
+				driftToSingle: { value: "solo" },
+				driftToList: { value: "y" },
+			},
+		};
+		const osBody = { hits: { total: { value: 1 }, hits: [hit] } };
+
+		const { split, monolithic } = await compareSplitAndMonolithic(
+			projection,
+			osBody,
+		);
+		assert.deepEqual(split, monolithic);
+		const edges = (split as { edges: { node: { driftToSingle: unknown } }[] })
+			.edges;
+		assert.equal(edges.length, 1);
+		assert.deepEqual(edges[0]?.node.driftToSingle, { value: "solo" });
+	});
+
+	it("tolerates a nested list where the projection declares a single object, identically in both modes", async () => {
+		const projection = shapeDriftProjection();
+
+		const hit = {
+			_id: "w1",
+			sort: ["w1"],
+			_source: {
+				widgetId: "w1",
+				...fillerSource(),
+				customer: { fullName: "Ada Lovelace" },
+				tags: [{ label: "a" }],
+				driftToSingle: [{ value: "x" }],
+				// Declared a single object; the fixture hands back an array.
+				driftToList: [{ value: "a" }, { value: "b" }],
+			},
+		};
+		const osBody = { hits: { total: { value: 1 }, hits: [hit] } };
+
+		const { split, monolithic } = await compareSplitAndMonolithic(
+			projection,
+			osBody,
+		);
+		assert.deepEqual(split, monolithic);
+		const edges = (split as { edges: { node: { driftToList: unknown } }[] })
+			.edges;
+		assert.equal(edges.length, 1);
+		assert.deepEqual(edges[0]?.node.driftToList, [
+			{ value: "a" },
+			{ value: "b" },
+		]);
+	});
+
+	it("split resolver-level file and normalize functions for the shape-drift projection pass AppSync's APPSYNC_JS static check", async () => {
+		// Unlike wideResponseProjection (every "PartN" level shaped identically),
+		// this projection mixes single-object and list-declared nested levels in
+		// the same document spec — the heterogeneous shape that made AppSync's
+		// checker infer the wrong element type for a computed property access
+		// in production (see the comment on assertAllAppsyncJsTypeSafe above).
+		const result = await emitGraphQLResolver(
+			shapeDriftProjection(),
+			forcePipeline,
+		);
+		assert.ok(result.functions.some((f) => f.name.startsWith("normalize")));
+
+		assertAllAppsyncJsTypeSafe(
+			allFiles(result).map((f) => ({
+				name: `emitted ${f.name}`,
+				content: f.content,
+			})),
+		);
+	});
+
+	it("an empty result set (hits.hits: []) matches between split and monolithic modes", async () => {
+		const projection = shapeDriftProjection();
+		const osBody = { hits: { total: { value: 0 }, hits: [] } };
+
+		const { split, monolithic } = await compareSplitAndMonolithic(
+			projection,
+			osBody,
+		);
+		assert.deepEqual(split, monolithic);
+		assert.deepEqual(split, {
+			edges: [],
+			totalCount: 0,
+			pageInfo: { hasNextPage: false, endCursor: null },
+		});
+	});
 });
 
 describe("stale-document tolerance", () => {
