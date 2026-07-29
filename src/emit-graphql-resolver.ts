@@ -810,8 +810,9 @@ function renderEdgesAssembly(levels: DocumentLevelSpec[]): string {
 	}));`;
 	}
 
-	return `	const edges = [];
-	for (const hit of hits.slice(0, size)) {
+	return `	const page = hits.slice(0, size);
+	const edges = [];
+	for (const hit of page) {
 		const node = ${NORMALIZE_NODE_HELPER}(hit._source);
 		if (node == null) {
 			console.log("dropping unrepresentable document", hit._id);
@@ -819,6 +820,20 @@ function renderEdgesAssembly(levels: DocumentLevelSpec[]): string {
 			edges.push({ node, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
 		}
 	}`;
+}
+
+/**
+ * The `endCursor` expression. It marks a position in the index, not in the
+ * response, so it comes from the last hit on the page rather than the last
+ * surviving edge — a page whose documents were all dropped still advances the
+ * cursor instead of stranding the caller. Identical to the last edge's cursor
+ * whenever nothing was dropped.
+ */
+function renderEndCursor(levels: DocumentLevelSpec[]): string {
+	if (levels.length === 0) {
+		return "edges.length > 0 ? edges[edges.length - 1].cursor : null";
+	}
+	return "page.length > 0 ? util.base64Encode(JSON.stringify(page[page.length - 1].sort)) : null";
 }
 
 /**
@@ -1157,6 +1172,7 @@ function renderMonolithicResolver(
 	);
 	const normalizeNodeHelper = renderNormalizeNodeHelper(documentSpec);
 	const edgesAssembly = renderEdgesAssembly(documentSpec);
+	const endCursor = renderEndCursor(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1207,7 +1223,7 @@ ${responseAggregationsPreamble}
 		totalCount: totalHits,${responseAggregations}
 		pageInfo: {
 			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+			endCursor: ${endCursor},
 		},
 	};
 }
@@ -1272,6 +1288,7 @@ function renderResolver(
 	);
 	const normalizeNodeHelper = renderNormalizeNodeHelper(documentSpec);
 	const edgesAssembly = renderEdgesAssembly(documentSpec);
+	const endCursor = renderEndCursor(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1298,7 +1315,7 @@ ${responseAggregationsPreamble}
 		totalCount: totalHits,${responseAggregations}
 		pageInfo: {
 			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+			endCursor: ${endCursor},
 		},
 	};
 }

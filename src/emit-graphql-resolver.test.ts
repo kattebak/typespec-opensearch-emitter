@@ -4452,6 +4452,27 @@ describe("stale-document tolerance", () => {
 		);
 	});
 
+	it("advances the cursor past a page whose documents were all dropped", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{ legs: [], legExternallyDefinedAttributes: [] },
+				{ legs: [], legExternallyDefinedAttributes: [] },
+			]),
+		) as Connection & { pageInfo: { endCursor: string | null } };
+
+		assert.deepEqual(connection.edges, []);
+		assert.equal(
+			connection.pageInfo.endCursor,
+			Buffer.from("[1]", "utf8").toString("base64"),
+		);
+	});
+
 	it("normalizes identically in the pipeline shape", async () => {
 		const result = await emitGraphQLResolver(tradeProjection(), defaultOptions);
 

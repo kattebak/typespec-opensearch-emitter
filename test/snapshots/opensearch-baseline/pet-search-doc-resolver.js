@@ -26,8 +26,9 @@ export function response(ctx) {
 	const size = Math.min(args.first || 20, 100);
 
 	const hasNextPage = hits.length > size;
+	const page = hits.slice(0, size);
 	const edges = [];
-	for (const hit of hits.slice(0, size)) {
+	for (const hit of page) {
 		const node = normalizeNode(hit._source);
 		if (node == null) {
 			console.log("dropping unrepresentable document", hit._id);
@@ -51,7 +52,7 @@ export function response(ctx) {
 		},
 		pageInfo: {
 			hasNextPage,
-			endCursor: edges.length > 0 ? edges[edges.length - 1].cursor : null,
+			endCursor: page.length > 0 ? util.base64Encode(JSON.stringify(page[page.length - 1].sort)) : null,
 		},
 	};
 }
