@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { Type } from "@typespec/compiler";
+import ts from "typescript";
 import {
 	__test,
 	APPSYNC_FUNCTION_BYTE_LIMIT,
@@ -116,6 +117,86 @@ function assertNoForbiddenGlobals(fileName: string, content: string): void {
 			re.test(content),
 			false,
 			`${fileName} must not reference the \`${name}\` global — APPSYNC_JS does not provide it.\n--- content ---\n${content}\n--- end ---`,
+		);
+	}
+}
+
+// AppSync's APPSYNC_JS static check rejects resolver code that a globals
+// regex can't see: an emitted table-driven walker whose sibling rows carry
+// differently-shaped nested arrays (e.g. a per-level path mixed with a
+// per-level string list) makes AppSync's TypeScript-based checker infer the
+// wrong element type for a later computed property access, and it rejects
+// the resolver at CloudFormation deploy time with a real `TS2538` diagnostic
+// ("... cannot be used as an index type") — this bit `renderNormalizeNodeHelper`
+// in production (cos-infra SearchApiStack.Deploy, 2026-07-29). AppSync has no
+// offline emulator, but its checker is a real TypeScript `checkJs` pass, so
+// running the same content through the `typescript` compiler API locally
+// reproduces the identical diagnostic without needing live AWS credentials.
+const APPSYNC_UTILS_STUB_PATH = "/appsync-utils-stub.d.ts";
+const APPSYNC_UTILS_STUB =
+	'declare module "@aws-appsync/utils" {\n\texport const util: any;\n\texport const runtime: any;\n}\n';
+
+// Building one `ts.Program` per file re-parses the standard lib every call,
+// which dominates runtime once dozens of files are checked. All callers in
+// one test run share this single program instead.
+function assertAllAppsyncJsTypeSafe(
+	files: Array<{ name: string; content: string }>,
+): void {
+	const pathByName = new Map(
+		files.map((file, index) => [file.name, `/resolver-${index}.js`]),
+	);
+	const textByPath = new Map<string, string>([
+		[APPSYNC_UTILS_STUB_PATH, APPSYNC_UTILS_STUB],
+		...files.map(
+			(file) => [pathByName.get(file.name), file.content] as [string, string],
+		),
+	]);
+
+	const compilerOptions: ts.CompilerOptions = {
+		allowJs: true,
+		checkJs: true,
+		noEmit: true,
+		target: ts.ScriptTarget.ES2020,
+		module: ts.ModuleKind.ESNext,
+		moduleResolution: ts.ModuleResolutionKind.Bundler,
+	};
+
+	const host = ts.createCompilerHost(compilerOptions);
+	const getSourceFile = host.getSourceFile.bind(host);
+	host.getSourceFile = (name, languageVersion, ...rest) => {
+		const text = textByPath.get(name);
+		if (text === undefined)
+			return getSourceFile(name, languageVersion, ...rest);
+		return ts.createSourceFile(
+			name,
+			text,
+			languageVersion,
+			true,
+			name.endsWith(".d.ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS,
+		);
+	};
+	host.fileExists = (name) => textByPath.has(name) || ts.sys.fileExists(name);
+	host.readFile = (name) => textByPath.get(name) ?? ts.sys.readFile(name);
+
+	const program = ts.createProgram(
+		[APPSYNC_UTILS_STUB_PATH, ...textByPath.keys()],
+		compilerOptions,
+		host,
+	);
+	const diagnostics = ts.getPreEmitDiagnostics(program);
+
+	for (const file of files) {
+		const path = pathByName.get(file.name);
+		const fileDiagnostics = diagnostics
+			.filter((diagnostic) => diagnostic.file?.fileName === path)
+			.map(
+				(diagnostic) =>
+					`TS${diagnostic.code}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
+			);
+		assert.deepEqual(
+			fileDiagnostics,
+			[],
+			`${file.name} fails AppSync's APPSYNC_JS static check\n--- content ---\n${file.content}\n--- end ---`,
 		);
 	}
 }
@@ -2305,6 +2386,51 @@ describe("emitGraphQLResolver search filter DSL", () => {
 			const content = await readFile(join("test/snapshots", fileName), "utf8");
 			assertNoForbiddenGlobals(`test/snapshots/${fileName}`, content);
 		}
+	});
+
+	it("emitted normalizeNode walker passes AppSync's APPSYNC_JS static check (regression: jagged DOC_SPEC broke computed indexing)", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "packageId", keyword: true }),
+				makeField({
+					name: "members",
+					nested: true,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: makeSubProjection("PackageMemberDoc", [
+						makeField({ name: "productId", keyword: true }),
+						makeField({ name: "productCode", keyword: true }),
+					]),
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+
+		const allFiles = [
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
+		];
+
+		const snapshotFileNames = (
+			await readdir("test/snapshots", { recursive: true })
+		).filter((fileName) => fileName.endsWith(".js"));
+		const snapshotFiles = await Promise.all(
+			snapshotFileNames.map(async (fileName) => ({
+				name: `test/snapshots/${fileName}`,
+				content: await readFile(join("test/snapshots", fileName), "utf8"),
+			})),
+		);
+
+		assertAllAppsyncJsTypeSafe([
+			...allFiles.map((file) => ({
+				...file,
+				name: `emitted ${file.name}`,
+			})),
+			...snapshotFiles,
+		]);
 	});
 
 	it("emitted resolver passes @aws-appsync/eslint-plugin recommended config", async () => {

@@ -755,30 +755,59 @@ function isArrayType(type: ResolvedProjectionField["type"]): boolean {
  * Returns `null` for a document that cannot be made schema-valid; the caller
  * drops it rather than letting non-null propagation null the whole page.
  *
- * Each path segment carries its own list flag, but a mapping can still hand
- * back a single object where the schema declares a list (or vice versa).
- * APPSYNC_JS has no `Array` global and no try/catch, so the flag is only
- * intent: `value.length !== undefined` is the actual list test, safe here
- * because a segment value is always an object or an array of objects.
+ * Every level and segment is unrolled into its own literal block at emit
+ * time rather than driven off a shared data table walked generically:
+ * AppSync's APPSYNC_JS static checker infers a single element type across
+ * all rows of a JS array literal, and a table whose rows carry
+ * different-shaped nested arrays (one level's path segments vs another's)
+ * gets that type wrong, rejecting a later `container[computedKey]` with
+ * "type ... cannot be used as an index type" even though every runtime value
+ * is a plain string. Emitting a literal property access per segment sidesteps
+ * the inference entirely.
+ *
+ * A mapping can still hand back a single object where the schema declares a
+ * list (or vice versa). APPSYNC_JS has no `Array` global and no try/catch, so
+ * `value.length !== undefined` is the list test, safe here because a segment
+ * value is always an object or an array of objects.
  */
 function renderNormalizeNodeHelper(levels: DocumentLevelSpec[]): string {
 	if (levels.length === 0) return "";
 
-	const specLiteral = JSON.stringify(
-		levels.map((level) => [level.path, level.lists, level.values]),
-	);
+	const levelBlocks = levels.map(renderDocumentLevelBlock).join("\n");
 
 	return `
-const DOC_SPEC = ${specLiteral};
-
 function ${NORMALIZE_NODE_HELPER}(node) {
 	if (node == null) return null;
-	for (const level of DOC_SPEC) {
+${levelBlocks}
+	return node;
+}
+`;
+}
+
+function renderDocumentLevelBlock(level: DocumentLevelSpec): string {
+	const traversalBlocks = level.path
+		.map(([name]) => renderPathSegmentBlock(name))
+		.join("\n");
+
+	return `	{
 		let containers = [node];
-		for (const segment of level[0]) {
+${traversalBlocks}
+		for (const container of containers) {
+			for (const name of ${JSON.stringify(level.lists)}) {
+				if (container[name] == null) container[name] = [];
+			}
+			for (const name of ${JSON.stringify(level.values)}) {
+				if (container[name] == null) return null;
+			}
+		}
+	}`;
+}
+
+function renderPathSegmentBlock(name: string): string {
+	return `		{
 			const next = [];
 			for (const container of containers) {
-				const value = container[segment[0]];
+				const value = container[${JSON.stringify(name)}];
 				if (value != null) {
 					if (value.length !== undefined) {
 						for (const item of value) {
@@ -790,19 +819,7 @@ function ${NORMALIZE_NODE_HELPER}(node) {
 				}
 			}
 			containers = next;
-		}
-		for (const container of containers) {
-			for (const name of level[1]) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of level[2]) {
-				if (container[name] == null) return null;
-			}
-		}
-	}
-	return node;
-}
-`;
+		}`;
 }
 
 /**
