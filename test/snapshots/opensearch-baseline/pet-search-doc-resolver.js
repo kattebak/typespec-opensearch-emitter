@@ -57,16 +57,26 @@ export function response(ctx) {
 	};
 }
 
-const DOC_SPEC = [[[],["tags","aliases","approvals","bankAccountApprovals"],["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]],[[["tags",true]],[],["name"]],[[["approvals",true]],[],["type","grantedBy"]],[[["bankAccountApprovals",true]],[],["accountId","approvedBy"]]];
-
 function normalizeNode(node) {
 	if (node == null) return null;
-	for (const level of DOC_SPEC) {
+	{
 		let containers = [node];
-		for (const segment of level[0]) {
+
+		for (const container of containers) {
+			for (const name of ["tags","aliases","approvals","bankAccountApprovals"]) {
+				if (container[name] == null) container[name] = [];
+			}
+			for (const name of ["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]) {
+				if (container[name] == null) return null;
+			}
+		}
+	}
+	{
+		let containers = [node];
+		{
 			const next = [];
 			for (const container of containers) {
-				const value = container[segment[0]];
+				const value = container["tags"];
 				if (value != null) {
 					if (value.length !== undefined) {
 						for (const item of value) {
@@ -80,10 +90,64 @@ function normalizeNode(node) {
 			containers = next;
 		}
 		for (const container of containers) {
-			for (const name of level[1]) {
+			for (const name of []) {
 				if (container[name] == null) container[name] = [];
 			}
-			for (const name of level[2]) {
+			for (const name of ["name"]) {
+				if (container[name] == null) return null;
+			}
+		}
+	}
+	{
+		let containers = [node];
+		{
+			const next = [];
+			for (const container of containers) {
+				const value = container["approvals"];
+				if (value != null) {
+					if (value.length !== undefined) {
+						for (const item of value) {
+							if (item != null) next.push(item);
+						}
+					} else {
+						next.push(value);
+					}
+				}
+			}
+			containers = next;
+		}
+		for (const container of containers) {
+			for (const name of []) {
+				if (container[name] == null) container[name] = [];
+			}
+			for (const name of ["type","grantedBy"]) {
+				if (container[name] == null) return null;
+			}
+		}
+	}
+	{
+		let containers = [node];
+		{
+			const next = [];
+			for (const container of containers) {
+				const value = container["bankAccountApprovals"];
+				if (value != null) {
+					if (value.length !== undefined) {
+						for (const item of value) {
+							if (item != null) next.push(item);
+						}
+					} else {
+						next.push(value);
+					}
+				}
+			}
+			containers = next;
+		}
+		for (const container of containers) {
+			for (const name of []) {
+				if (container[name] == null) container[name] = [];
+			}
+			for (const name of ["accountId","approvedBy"]) {
 				if (container[name] == null) return null;
 			}
 		}
