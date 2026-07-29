@@ -167,7 +167,7 @@ export async function $onEmit(
 			maxPageSize: pageOptions.maxPageSize,
 			trackTotalHitsUpTo: graphqlOptions["track-total-hits-up-to"] ?? 10000,
 			monolithicThresholdBytes:
-				graphqlOptions["monolithic-threshold-bytes"] ?? 32000,
+				graphqlOptions["monolithic-threshold-bytes"] ?? 31000,
 			autoDateHistogramBuckets:
 				graphqlOptions["auto-date-histogram-buckets"] ??
 				DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
