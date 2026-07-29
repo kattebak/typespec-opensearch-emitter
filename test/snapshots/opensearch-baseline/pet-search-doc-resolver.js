@@ -68,7 +68,7 @@ function normalizeNode(node) {
 			for (const container of containers) {
 				const value = container[segment[0]];
 				if (value != null) {
-					if (segment[1]) {
+					if (value.length !== undefined) {
 						for (const item of value) {
 							if (item != null) next.push(item);
 						}

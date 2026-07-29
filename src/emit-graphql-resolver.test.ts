@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -82,6 +82,42 @@ function liftAggregations(
 	return raw.map((entry) =>
 		typeof entry === "string" ? { kind: entry } : entry,
 	) as ResolvedProjection["fields"][0]["aggregations"];
+}
+
+// APPSYNC_JS rejects these globals at deploy time even though
+// @aws-appsync/eslint-plugin doesn't flag them (no rule covers global
+// function calls). `Object.keys`/`entries`/`values` are supported, so only
+// the coercion call form is forbidden for it; the rest are absent from the
+// runtime entirely, so any reference to them is a deploy-time failure. This
+// regex is the only gate, so it covers both call and member form —
+// `Array.isArray(...)` shipped once because a call-only pattern let it through.
+const CALL_ONLY_GLOBALS = ["String", "Number", "Boolean", "Object"];
+const ANY_REFERENCE_GLOBALS = [
+	"Array",
+	"Promise",
+	"Date",
+	"RegExp",
+	"Symbol",
+	"Map",
+	"Set",
+];
+const FORBIDDEN_GLOBALS = [
+	...CALL_ONLY_GLOBALS.map((name) => ({ name, pattern: `\\b${name}\\s*\\(` })),
+	...ANY_REFERENCE_GLOBALS.map((name) => ({
+		name,
+		pattern: `\\b${name}\\s*[(.]`,
+	})),
+];
+
+function assertNoForbiddenGlobals(fileName: string, content: string): void {
+	for (const { name, pattern } of FORBIDDEN_GLOBALS) {
+		const re = new RegExp(pattern);
+		assert.equal(
+			re.test(content),
+			false,
+			`${fileName} must not reference the \`${name}\` global — APPSYNC_JS does not provide it.\n--- content ---\n${content}\n--- end ---`,
+		);
+	}
 }
 
 /**
@@ -2202,12 +2238,6 @@ describe("emitGraphQLResolver search filter DSL", () => {
 	});
 
 	it("emitted resolver references no unsupported global", async () => {
-		// APPSYNC_JS rejects these globals at deploy time even though
-		// @aws-appsync/eslint-plugin doesn't flag them (no rule covers
-		// global function calls) and the emitter's own tests eval in Node,
-		// where they all exist. This regex is the only gate, so it covers
-		// both call and member form: `Array.isArray(...)` shipped once
-		// because a call-only pattern let it through.
 		const projection = makeProjection({
 			fields: [
 				makeField({ name: "name" }),
@@ -2260,36 +2290,20 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		// `Object.keys`/`entries`/`values` are supported, so only the coercion
-		// call form is forbidden for it; the rest are absent from the runtime
-		// entirely, so any reference to them is a deploy-time failure.
-		const callOnly = ["String", "Number", "Boolean", "Object"];
-		const anyReference = [
-			"Array",
-			"Promise",
-			"Date",
-			"RegExp",
-			"Symbol",
-			"Map",
-			"Set",
-		];
-		const forbidden = [
-			...callOnly.map((name) => ({ name, pattern: `\\b${name}\\s*\\(` })),
-			...anyReference.map((name) => ({ name, pattern: `\\b${name}\\s*[(.]` })),
-		];
 		const allFiles = [
 			{ name: "resolver", content: result.content },
 			...result.functions.map((fn) => ({ name: fn.name, content: fn.content })),
 		];
 		for (const file of allFiles) {
-			for (const { name, pattern } of forbidden) {
-				const re = new RegExp(pattern);
-				assert.equal(
-					re.test(file.content),
-					false,
-					`emitted ${file.name} must not reference the \`${name}\` global — APPSYNC_JS does not provide it.\n--- emitted ---\n${file.content}\n--- end ---`,
-				);
-			}
+			assertNoForbiddenGlobals(`emitted ${file.name}`, file.content);
+		}
+
+		const snapshotFiles = (
+			await readdir("test/snapshots", { recursive: true })
+		).filter((fileName) => fileName.endsWith(".js"));
+		for (const fileName of snapshotFiles) {
+			const content = await readFile(join("test/snapshots", fileName), "utf8");
+			assertNoForbiddenGlobals(`test/snapshots/${fileName}`, content);
 		}
 	});
 
@@ -4583,26 +4597,6 @@ describe("stale-document tolerance", () => {
 		]);
 	});
 
-	it("emits no Array global — APPSYNC_JS has none", async () => {
-		const monolithic = await emitGraphQLResolver(
-			tradeProjection(),
-			monolithicOptions,
-		);
-		const pipeline = await emitGraphQLResolver(
-			tradeProjection(),
-			defaultOptions,
-		);
-
-		const emitted = [
-			monolithic.content,
-			pipeline.content,
-			...pipeline.functions.map((fn) => fn.content),
-		];
-		for (const content of emitted) {
-			assert.ok(content.indexOf("Array") === -1);
-		}
-	});
-
 	it("descends through a single-object level without a runtime type test", async () => {
 		const result = await emitGraphQLResolver(
 			petProjection(),
@@ -4614,6 +4608,52 @@ describe("stale-document tolerance", () => {
 			searchResult([
 				{ petId: "P-1", owner: { ownerName: "Ada" }, tags: [{ tagName: "a" }] },
 				{ petId: "P-2", owner: {}, tags: [] },
+			]),
+		) as Connection;
+
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.petId),
+			["P-1"],
+		);
+	});
+
+	it("tolerates a list-flagged segment holding a single object", async () => {
+		const result = await emitGraphQLResolver(
+			petProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{
+					petId: "P-1",
+					owner: { ownerName: "Ada" },
+					tags: { tagName: "solo" },
+				},
+			]),
+		) as Connection;
+
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.petId),
+			["P-1"],
+		);
+	});
+
+	it("tolerates an object-flagged segment holding a one-element array", async () => {
+		const result = await emitGraphQLResolver(
+			petProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{
+					petId: "P-1",
+					owner: [{ ownerName: "Ada" }],
+					tags: [{ tagName: "a" }],
+				},
 			]),
 		) as Connection;
 

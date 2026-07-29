@@ -755,9 +755,11 @@ function isArrayType(type: ResolvedProjectionField["type"]): boolean {
  * Returns `null` for a document that cannot be made schema-valid; the caller
  * drops it rather than letting non-null propagation null the whole page.
  *
- * Each path segment carries its own list flag. APPSYNC_JS has no `Array`
- * global to test a value against, and it needs none: the projection already
- * says which steps are lists.
+ * Each path segment carries its own list flag, but a mapping can still hand
+ * back a single object where the schema declares a list (or vice versa).
+ * APPSYNC_JS has no `Array` global and no try/catch, so the flag is only
+ * intent: `value.length !== undefined` is the actual list test, safe here
+ * because a segment value is always an object or an array of objects.
  */
 function renderNormalizeNodeHelper(levels: DocumentLevelSpec[]): string {
 	if (levels.length === 0) return "";
@@ -778,7 +780,7 @@ function ${NORMALIZE_NODE_HELPER}(node) {
 			for (const container of containers) {
 				const value = container[segment[0]];
 				if (value != null) {
-					if (segment[1]) {
+					if (value.length !== undefined) {
 						for (const item of value) {
 							if (item != null) next.push(item);
 						}
