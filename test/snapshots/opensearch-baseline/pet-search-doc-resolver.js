@@ -57,7 +57,7 @@ export function response(ctx) {
 	};
 }
 
-const DOC_SPEC = [[[],["tags","aliases","approvals","bankAccountApprovals"],["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]],[["tags"],[],["name"]],[["approvals"],[],["type","grantedBy"]],[["bankAccountApprovals"],[],["accountId","approvedBy"]]];
+const DOC_SPEC = [[[],["tags","aliases","approvals","bankAccountApprovals"],["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]],[[["tags",true]],[],["name"]],[[["approvals",true]],[],["type","grantedBy"]],[[["bankAccountApprovals",true]],[],["accountId","approvedBy"]]];
 
 function normalizeNode(node) {
 	if (node == null) return null;
@@ -66,9 +66,9 @@ function normalizeNode(node) {
 		for (const segment of level[0]) {
 			const next = [];
 			for (const container of containers) {
-				const value = container[segment];
+				const value = container[segment[0]];
 				if (value != null) {
-					if (Array.isArray(value)) {
+					if (value.length !== undefined) {
 						for (const item of value) {
 							if (item != null) next.push(item);
 						}
