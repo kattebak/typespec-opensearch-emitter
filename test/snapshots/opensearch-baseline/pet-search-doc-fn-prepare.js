@@ -2,7 +2,7 @@ import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = [{i:"namePrefix",k:"prefix",f:"name"}, {i:"nameMatch",k:"match",f:"name"}, {i:"species",k:"term",f:"species"}, {i:"speciesNot",k:"term_negate",f:"species"}, {i:"birthDate",k:"range",f:"birthDate"}, {i:"createdAt",k:"range",f:"createdAt"}, {i:"tags",k:"nested",p:"tags",c:[{i:"name",k:"term",f:"tags.name"}, {i:"nameNot",k:"term_negate",f:"tags.name"}, {i:"noteExists",k:"exists",f:"tags.note.keyword"}]}, {i:"nicknameExists",k:"exists",f:"nickname.keyword"}, {i:"rank",k:"range",f:"rank"}];
 
-const AGG_SPEC = [{n:"bySpecies",a:{ terms: { field: "species" } }}, {n:"byAlias",a:{ terms: { field: "aliases.keyword" } }}, {n:"uniqueAliasCount",a:{ cardinality: { field: "aliases.keyword" } }}, {n:"missingNicknameCount",a:{ missing: { field: "nickname.keyword" } }}, {n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name" } }}, {n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}, {n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}];
+const AGG_SPEC = [{n:"bySpecies",a:{ terms: { field: "species", size: 10 } }}, {n:"byAlias",a:{ terms: { field: "aliases.keyword", size: 10 } }}, {n:"uniqueAliasCount",a:{ cardinality: { field: "aliases.keyword" } }}, {n:"missingNicknameCount",a:{ missing: { field: "nickname.keyword" } }}, {n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name", size: 10 } }}, {n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}, {n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}];
 
 export function request(ctx) {
 	const args = ctx.args;

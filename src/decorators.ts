@@ -387,7 +387,10 @@ export function supportsMinimumInterval(interval: DateHistogramInterval) {
 /**
  * `hard_bounds` for a `date_histogram`. Values are whatever OpenSearch accepts
  * as a date: an ISO 8601 instant (`"2020-01-01T00:00:00Z"`) or date math
- * (`"now-5y"`). At least one end is required; an omitted end tracks the data.
+ * (`"now-5y"`). Both ends are required: OpenSearch's `hard_bounds` only clamps
+ * the ends it is given, so a one-sided bound leaves the other end tracking the
+ * data and a far-future sentinel date still blows the bucket count. Two ends
+ * pin the range, which pins the bucket count.
  */
 export interface DateHistogramBounds {
 	min?: string;
@@ -480,8 +483,10 @@ function validateDateHistogramBounds(
 		}
 		bounds[end] = value;
 	}
-	if (bounds.min === undefined && bounds.max === undefined) {
-		return reason("bounds requires at least one of min or max");
+	if (bounds.min === undefined || bounds.max === undefined) {
+		return reason(
+			"bounds requires both min and max — a one-sided bound leaves the open end tracking the data, so a far-future sentinel date (e.g. 9999-12-31) still exceeds search.max_buckets and fails the search",
+		);
 	}
 	return bounds;
 }
@@ -520,6 +525,7 @@ function validateOptions(
 					format: { interval },
 					target,
 				});
+				return undefined;
 			}
 			return { interval };
 		}
