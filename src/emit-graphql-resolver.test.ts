@@ -1046,12 +1046,12 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(combinedContent(result).includes("const AGG_SPEC = ["));
 		assert.ok(
 			combinedContent(result).includes(
-				'{n:"byTag",a:{ terms: { field: "tags.keyword" } }}',
+				'{n:"byTag",a:{ terms: { field: "tags.keyword", size: 10 } }}',
 			),
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				'{n:"bySpecies",a:{ terms: { field: "species" } }}',
+				'{n:"bySpecies",a:{ terms: { field: "species", size: 10 } }}',
 			),
 		);
 	});
@@ -1221,7 +1221,7 @@ describe("emitGraphQLResolver", () => {
 		assert.deepEqual(body.aggs, {
 			_tags: {
 				nested: { path: "tags" },
-				aggs: { byTagName: { terms: { field: "tags.name" } } },
+				aggs: { byTagName: { terms: { field: "tags.name", size: 10 } } },
 			},
 		});
 	});
@@ -1236,7 +1236,7 @@ describe("emitGraphQLResolver", () => {
 			selectionSetList: ["aggregations", "aggregations/bySpecies"],
 		});
 		assert.deepEqual(body.aggs, {
-			bySpecies: { terms: { field: "species" } },
+			bySpecies: { terms: { field: "species", size: 10 } },
 		});
 	});
 
@@ -1257,7 +1257,7 @@ describe("emitGraphQLResolver", () => {
 			_tags: {
 				nested: { path: "tags" },
 				aggs: {
-					byTagName: { terms: { field: "tags.name" } },
+					byTagName: { terms: { field: "tags.name", size: 10 } },
 					missingTagNoteCount: { missing: { field: "tags.note.keyword" } },
 				},
 			},
@@ -1328,11 +1328,11 @@ describe("emitGraphQLResolver", () => {
 			],
 		});
 		assert.deepEqual(body.aggs, {
-			bySpecies: { terms: { field: "species" } },
+			bySpecies: { terms: { field: "species", size: 10 } },
 			_tags: {
 				nested: { path: "tags" },
 				aggs: {
-					byTagName: { terms: { field: "tags.name" } },
+					byTagName: { terms: { field: "tags.name", size: 10 } },
 					missingTagNoteCount: { missing: { field: "tags.note.keyword" } },
 				},
 			},
@@ -1458,6 +1458,197 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
+	// Regression net for #3556: every bucketing aggregation the emitter produces
+	// must carry a hard bucket ceiling, so no query can grow its bucket count
+	// past OpenSearch's search.max_buckets and time out. `date_histogram` caps
+	// its range with a two-sided `hard_bounds`; `auto_date_histogram` caps its
+	// count with `buckets`; `terms` caps its count with `size`. A plain
+	// `date_histogram` without two-sided bounds, or a `terms` without `size`, is
+	// the uncapped shape that caused the prod gateway timeout.
+	function balancedBodyAt(
+		source: string,
+		openIndex: number,
+		open: string,
+		close: string,
+	): string {
+		let depth = 0;
+		for (let i = openIndex; i < source.length; i++) {
+			if (source[i] === open) depth++;
+			else if (source[i] === close) {
+				depth--;
+				if (depth === 0) return source.slice(openIndex, i + 1);
+			}
+		}
+		throw new Error("unbalanced delimiters in emitted source");
+	}
+
+	function objectBodyAt(source: string, openBraceIndex: number): string {
+		return balancedBodyAt(source, openBraceIndex, "{", "}");
+	}
+
+	// Aggregation `terms`/`date_histogram` bodies live only inside the emitted
+	// `AGG_SPEC` literal. Filter clauses also emit `terms: { [field]: value }`,
+	// which is bounded by the caller's input array and is not an aggregation, so
+	// the scan is scoped to AGG_SPEC to avoid flagging those.
+	function aggSpecRegions(content: string): string {
+		const marker = "const AGG_SPEC = ";
+		let out = "";
+		let from = content.indexOf(marker);
+		while (from >= 0) {
+			const bracket = content.indexOf("[", from);
+			out += `${balancedBodyAt(content, bracket, "[", "]")}\n`;
+			from = content.indexOf(marker, bracket);
+		}
+		return out;
+	}
+
+	function assertNoUncappedAggregation(label: string, source: string): void {
+		const content = aggSpecRegions(source);
+		const dateHistogramKey = /\bdate_histogram\s*:\s*\{/g;
+		for (
+			let match = dateHistogramKey.exec(content);
+			match !== null;
+			match = dateHistogramKey.exec(content)
+		) {
+			const body = objectBodyAt(content, match.index + match[0].length - 1);
+			assert.ok(
+				body.includes("hard_bounds"),
+				`${label}: date_histogram without hard_bounds grows its bucket count over an open range\n${body}`,
+			);
+			assert.ok(
+				body.includes('"min"') && body.includes('"max"'),
+				`${label}: date_histogram hard_bounds must clamp both ends — a one-sided bound leaves the open end tracking the data\n${body}`,
+			);
+		}
+
+		const termsKey = /\bterms\s*:\s*\{/g;
+		for (
+			let match = termsKey.exec(content);
+			match !== null;
+			match = termsKey.exec(content)
+		) {
+			const body = objectBodyAt(content, match.index + match[0].length - 1);
+			assert.ok(
+				/\bsize\s*:/.test(body),
+				`${label}: terms aggregation without an explicit size\n${body}`,
+			);
+		}
+	}
+
+	it("this guard fails on an uncapped aggregation body (proves it can catch the #3556 shape)", () => {
+		assert.throws(
+			() =>
+				assertNoUncappedAggregation(
+					"uncapped terms",
+					'const AGG_SPEC = [{n:"byX",a:{ terms: { field: "x" } }}];',
+				),
+			/without an explicit size/,
+		);
+		assert.throws(
+			() =>
+				assertNoUncappedAggregation(
+					"uncapped date_histogram",
+					'const AGG_SPEC = [{n:"byD",a:{ date_histogram: { field: "d", calendar_interval: "month" } }}];',
+				),
+			/without hard_bounds/,
+		);
+		assert.throws(
+			() =>
+				assertNoUncappedAggregation(
+					"one-sided bounds",
+					'const AGG_SPEC = [{n:"byD",a:{ date_histogram: { field: "d", calendar_interval: "month", hard_bounds: {"min":"2020-01-01T00:00:00Z"} } }}];',
+				),
+			/clamp both ends/,
+		);
+		// A filter-clause `terms` (not an aggregation) must not be flagged.
+		assertNoUncappedAggregation(
+			"filter terms is not an aggregation",
+			'const AGG_SPEC = [{n:"byX",a:{ terms: { field: "x", size: 10 } }}];\noutFilters.push({ terms: { [node.f]: value } });',
+		);
+	});
+
+	it("every emitted bucketing aggregation carries a hard bucket ceiling (#3556)", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "species",
+					keyword: true,
+					aggregations: ["terms"],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								topHits: 3,
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+				makeField({
+					name: "notional",
+					type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					aggregations: ["sum", "avg", "min", "max"],
+				}),
+				makeField({
+					name: "validFrom",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{ kind: "date_histogram", options: { interval: "month" } },
+					],
+				}),
+				makeField({
+					name: "validTo",
+					type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
+					aggregations: [
+						{
+							kind: "date_histogram",
+							options: {
+								interval: "month",
+								bounds: { min: "2020-01-01T00:00:00Z", max: "now" },
+							},
+						},
+					],
+				}),
+				makeField({
+					name: "tags",
+					nested: true,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+					subProjection: makeSubProjection("TagDoc", [
+						makeField({ name: "name", keyword: true, aggregations: ["terms"] }),
+					]),
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		for (const file of [
+			{ name: result.fileName, content: result.content },
+			...result.functions.map((fn) => ({
+				name: fn.fileName,
+				content: fn.content,
+			})),
+		]) {
+			assertNoUncappedAggregation(`emitted ${file.name}`, file.content);
+		}
+	});
+
+	it("committed baseline snapshots carry no uncapped aggregation (#3556)", async () => {
+		const snapshotFiles = (
+			await readdir("test/snapshots", { recursive: true })
+		).filter((fileName) => fileName.endsWith(".js"));
+		for (const fileName of snapshotFiles) {
+			const content = await readFile(join("test/snapshots", fileName), "utf8");
+			assertNoUncappedAggregation(`test/snapshots/${fileName}`, content);
+		}
+	});
+
 	it("emits an auto_date_histogram floored at the declared interval when no bounds are given", async () => {
 		const projection = makeProjection({
 			fields: [
@@ -1537,7 +1728,7 @@ describe("emitGraphQLResolver", () => {
 		);
 	});
 
-	it("keeps a week/quarter histogram at its declared interval (no minimum_interval spelling exists)", async () => {
+	it("refuses to emit a bounds-less week/quarter histogram (no cap is possible)", async () => {
 		for (const interval of ["week", "quarter"] as const) {
 			const projection = makeProjection({
 				fields: [
@@ -1548,17 +1739,10 @@ describe("emitGraphQLResolver", () => {
 					}),
 				],
 			});
-			const result = await emitGraphQLResolver(projection, defaultOptions);
-			const content = combinedContent(result);
-			assert.ok(
-				content.includes(
-					`{n:"byValidFromOverTime",a:{ date_histogram: { field: "validFrom", calendar_interval: "${interval}" } }}`,
-				),
-				`${interval} must keep its declared interval rather than silently shift resolution`,
-			);
-			assert.ok(
-				!content.includes("auto_date_histogram"),
-				`auto_date_histogram cannot express a ${interval} floor`,
+			await assert.rejects(
+				() => emitGraphQLResolver(projection, defaultOptions),
+				/without bounds/,
+				`a bounds-less ${interval} histogram has no bucket ceiling and must fail at emit`,
 			);
 		}
 	});
@@ -1710,7 +1894,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
-				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId" }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }}',
+				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId", size: 10 }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }}',
 			),
 		);
 		assert.ok(
@@ -1734,7 +1918,7 @@ describe("emitGraphQLResolver", () => {
 
 		assert.ok(
 			combinedContent(result).includes(
-				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId" }, aggs: { "hits": { top_hits: { size: 5 } } } }}',
+				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId", size: 10 }, aggs: { "hits": { top_hits: { size: 5 } } } }}',
 			),
 			"terms agg request must include hits sub-agg with top_hits.size",
 		);
@@ -1865,7 +2049,7 @@ describe("emitGraphQLResolver", () => {
 		// selected ones share ONE `{ nested: ..., aggs: { ... } }` wrapper at
 		// request time instead of one wrapper each (issue #105).
 		for (const specEntry of [
-			'{n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name" } }}',
+			'{n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name", size: 10 } }}',
 			'{n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}',
 			'{n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}',
 		]) {
@@ -1910,7 +2094,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(
 			combinedContent(result).includes(
-				'{n:"byTag",a:{ terms: { field: "tags.keyword" } }}',
+				'{n:"byTag",a:{ terms: { field: "tags.keyword", size: 10 } }}',
 			),
 		);
 		// Aggs for non-@nested fields must not be wrapped in `{ nested: ... }`.

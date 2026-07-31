@@ -2,7 +2,7 @@ import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = [{i:"name",k:"term",f:"name"}, {i:"nameNot",k:"term_negate",f:"name"}, {i:"noteExists",k:"exists",f:"note.keyword"}];
 
-const AGG_SPEC = [{n:"byName",a:{ terms: { field: "name" } }}, {n:"uniqueNameCount",a:{ cardinality: { field: "name" } }}, {n:"missingNoteCount",a:{ missing: { field: "note.keyword" } }}];
+const AGG_SPEC = [{n:"byName",a:{ terms: { field: "name", size: 10 } }}, {n:"uniqueNameCount",a:{ cardinality: { field: "name" } }}, {n:"missingNoteCount",a:{ missing: { field: "note.keyword" } }}];
 
 export function request(ctx) {
 	const args = ctx.args;

@@ -106,6 +106,16 @@ export const MAX_PIPELINE_FUNCTIONS = 10;
 export const DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS = 10_000;
 
 /**
+ * Explicit `size` on every emitted `terms` aggregation. OpenSearch defaults an
+ * absent `size` to 10, so relying on that default already bounded the bucket
+ * count — but the emitter's invariant is that no bucketing aggregation ships
+ * without a hard ceiling visible in the emitted body, so the default is made
+ * explicit. Set to OpenSearch's own default so the emitted queries return the
+ * same buckets they always have.
+ */
+export const DEFAULT_TERMS_SIZE = 10;
+
+/**
  * Soft per-request bucket budget: a third of OpenSearch's default
  * `search.max_buckets` (65,535). That cap counts every bucket in the whole
  * request, not one aggregation, so the emitted `buildAggs` divides this budget
@@ -2295,11 +2305,14 @@ function renderAggInner(entry: AggregationEntry): string {
 		if (supportsMinimumInterval(interval)) {
 			return `${AUTO_DATE_HISTOGRAM_HELPER}(${fieldLit}, ${intervalLit})`;
 		}
-		// `week`/`quarter` have no `minimum_interval` spelling. Emitting a
-		// coarser floor would silently drop resolution the author asked for and
-		// a finer one would silently add detail, so keep the declared histogram
-		// as-is; the decorator warns that bounds are the only lever here.
-		return `{ ${aggType}: { field: ${fieldLit}, calendar_interval: ${intervalLit} } }`;
+		// `week`/`quarter` have no `minimum_interval` spelling and no bounds to
+		// clamp the range, so neither the count nor the range can be capped —
+		// the exact #3556 failure. The decorator already rejects this at compile
+		// (unboundable-date-histogram-interval), so this is an unreachable
+		// backstop: never emit an uncapped histogram.
+		throw new Error(
+			`cannot emit a bounded histogram for interval "${interval}" without bounds: auto_date_histogram has no "${interval}" minimum_interval and there is no range to clamp. Add bounds: { min, max } or use year/month/day/hour.`,
+		);
 	}
 	if (entry.kind === "range") {
 		const ranges =
@@ -2307,8 +2320,8 @@ function renderAggInner(entry: AggregationEntry): string {
 		const rangesLit = JSON.stringify(ranges);
 		return `{ ${aggType}: { field: ${fieldLit}, ranges: ${rangesLit} } }`;
 	}
-	if (entry.kind === "terms" && entry.options) {
-		const opts = entry.options as {
+	if (entry.kind === "terms") {
+		const opts = (entry.options ?? {}) as {
 			sub?: Record<string, { kind: string; field: string }>;
 			topHits?: number;
 		};
@@ -2316,7 +2329,7 @@ function renderAggInner(entry: AggregationEntry): string {
 		const hasSub = subEntries.length > 0;
 		const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
 		if (!hasSub && !hasTopHits) {
-			return `{ ${aggType}: { field: ${fieldLit} } }`;
+			return `{ ${aggType}: { field: ${fieldLit}, size: ${DEFAULT_TERMS_SIZE} } }`;
 		}
 		const subLines = subEntries.map(
 			([name, spec]) =>
@@ -2325,7 +2338,7 @@ function renderAggInner(entry: AggregationEntry): string {
 		if (hasTopHits) {
 			subLines.push(`"hits": { top_hits: { size: ${opts.topHits} } }`);
 		}
-		return `{ ${aggType}: { field: ${fieldLit} }, aggs: { ${subLines.join(", ")} } }`;
+		return `{ ${aggType}: { field: ${fieldLit}, size: ${DEFAULT_TERMS_SIZE} }, aggs: { ${subLines.join(", ")} } }`;
 	}
 	return `{ ${aggType}: { field: ${fieldLit} } }`;
 }

@@ -139,7 +139,9 @@ test("emits graphql aggregation types and resolver block", async () => {
 	assert.ok(prepare.includes("const AGG_SPEC = ["));
 	assert.ok(prepare.includes("body.aggs = aggs;"));
 	assert.ok(
-		prepare.includes('{n:"byAlias",a:{ terms: { field: "aliases.keyword" } }}'),
+		prepare.includes(
+			'{n:"byAlias",a:{ terms: { field: "aliases.keyword", size: 10 } }}',
+		),
 	);
 	assert.ok(
 		prepare.includes(
@@ -229,7 +231,7 @@ test("emits nested-aware aggregations on nested sub-projections", async () => {
 	// request (prepare function); the response mapping in the resolver
 	// after-mapping reads the grouped shape — issues #105, #150.
 	for (const specEntry of [
-		'{n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name" } }}',
+		'{n:"byTagName",g:"_tags",p:"tags",a:{ terms: { field: "tags.name", size: 10 } }}',
 		'{n:"uniqueTagNameCount",g:"_tags",p:"tags",a:{ cardinality: { field: "tags.name" } }}',
 		'{n:"missingTagNoteCount",g:"_tags",p:"tags",a:{ missing: { field: "tags.note.keyword" } }}',
 	]) {

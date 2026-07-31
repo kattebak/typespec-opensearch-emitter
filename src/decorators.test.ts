@@ -437,7 +437,7 @@ describe("decorators", () => {
 		]);
 	});
 
-	it("accepts date_histogram bounds with only one end", async () => {
+	it("rejects date_histogram bounds with only one end", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
       model Product {
@@ -446,18 +446,14 @@ describe("decorators", () => {
       }
     `);
 
-		assert.equal(diagnostics.length, 0);
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "invalid-aggregation-options"), true);
 		const validTo = runner.program
 			.getGlobalNamespaceType()
 			.models.get("Product")
 			?.properties.get("validTo");
 		assert.ok(validTo);
-		assert.deepEqual(getAggregatableDirectives(runner.program, validTo), [
-			{
-				kind: "date_histogram",
-				options: { interval: "month", bounds: { max: "now" } },
-			},
-		]);
+		assert.equal(getAggregatableDirectives(runner.program, validTo), undefined);
 	});
 
 	it("emits diagnostic for empty date_histogram bounds", async () => {
@@ -473,10 +469,11 @@ describe("decorators", () => {
 		assert.equal(hasDiagnosticCode(codes, "invalid-aggregation-options"), true);
 	});
 
-	// Issue #150: auto_date_histogram's minimum_interval has no week/quarter
-	// spelling, so these two intervals cannot get an automatic bucket ceiling.
-	// Warn rather than error — existing specs must keep compiling.
-	it("warns when a week/quarter date_histogram declares no bounds", async () => {
+	// auto_date_histogram's minimum_interval has no week/quarter spelling, so
+	// these two intervals cannot get an automatic bucket ceiling; with no bounds
+	// to clamp the range either, the histogram cannot be capped at all — the
+	// #3556 failure. Fail at compile rather than emit an uncappable aggregation.
+	it("errors when a week/quarter date_histogram declares no bounds", async () => {
 		for (const interval of ["week", "quarter"]) {
 			const runner = await createRunner();
 			const diagnostics = await runner.diagnose(`
@@ -486,11 +483,21 @@ describe("decorators", () => {
         }
       `);
 
-			const warning = diagnostics.find(
+			const error = diagnostics.find(
 				(x) => x.code.indexOf("unboundable-date-histogram-interval") !== -1,
 			);
-			assert.ok(warning, `${interval} without bounds should warn`);
-			assert.equal(warning.severity, "warning");
+			assert.ok(error, `${interval} without bounds should error`);
+			assert.equal(error.severity, "error");
+			const validTo = runner.program
+				.getGlobalNamespaceType()
+				.models.get("Product")
+				?.properties.get("validTo");
+			assert.ok(validTo);
+			assert.equal(
+				getAggregatableDirectives(runner.program, validTo),
+				undefined,
+				`${interval} without bounds must not store an uncappable directive`,
+			);
 		}
 	});
 

@@ -114,9 +114,9 @@ export const $lib = createTypeSpecLibrary({
 			},
 		},
 		"unboundable-date-histogram-interval": {
-			severity: "warning",
+			severity: "error",
 			messages: {
-				default: paramMessage`@aggregatable("date_histogram", { interval: "${"interval"}" }) has no bounds, and OpenSearch cannot express a "${"interval"}" floor for auto_date_histogram. This histogram spans whatever range the data holds, so a far-future sentinel date (e.g. 9999-12-31) will exceed search.max_buckets and fail the search. Add bounds: { min, max } to pin the range.`,
+				default: paramMessage`@aggregatable("date_histogram", { interval: "${"interval"}" }) has no bounds, and OpenSearch cannot express a "${"interval"}" floor for auto_date_histogram. This histogram spans whatever range the data holds, so a far-future sentinel date (e.g. 9999-12-31) will exceed search.max_buckets and fail the search. Add bounds: { min, max } to pin the range, or choose an interval auto_date_histogram can floor (year, month, day, hour).`,
 			},
 		},
 		"positive-boost-required": {
