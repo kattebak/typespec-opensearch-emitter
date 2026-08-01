@@ -459,6 +459,18 @@ Each resolver file exports `request(ctx)` and `response(ctx)` conforming to APPS
   - Deterministic sort: `[_score desc, _id asc]`
 - `response` projects hits into the Connection shape with edges, cursors, and pageInfo
 
+#### Documents the schema cannot represent
+
+An indexed document can lack a field the projection declares non-null — a mapping that predates the field, an ingest that half-wrote a sub-document. Returning it would null the field, and non-null propagation turns that into a null `edges` list: one stale document takes the whole page down.
+
+The resolver reconciles what it can (an absent required list becomes `[]`) and omits the documents it cannot, reporting each page's omissions:
+
+- an entry in the GraphQL `errors` block with `errorType: "UnrepresentableDocumentError"`, carrying `errorInfo: { droppedCount, documentIds }` — appended, so the representable rows and the aggregations still reach the caller
+- `totalCount` counts only what the API can return, so a short page never looks complete
+- a `SearchDocumentDropped` log line carrying the same counts, for a log metric filter to alarm on
+
+`pageInfo.endCursor` marks a position in the index rather than in the response, so a page whose documents were all omitted still advances the cursor.
+
 ### Manifest (`graphql-resolvers.json`)
 
 Maps each projection to its resolver file, SDL file, query field name, and index name:

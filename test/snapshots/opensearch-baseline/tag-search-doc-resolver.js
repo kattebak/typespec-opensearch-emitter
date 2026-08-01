@@ -28,18 +28,23 @@ export function response(ctx) {
 	const hasNextPage = hits.length > size;
 	const page = hits.slice(0, size);
 	const edges = [];
+	const droppedIds = [];
 	for (const hit of page) {
 		const node = normalizeNode(hit._source);
 		if (node == null) {
-			console.log("dropping unrepresentable document", hit._id);
+			droppedIds.push(hit._id);
 		} else {
 			edges.push({ node, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
 		}
 	}
+	if (droppedIds.length > 0) {
+		console.log("SearchDocumentDropped", JSON.stringify({ droppedCount: droppedIds.length, documentIds: droppedIds }));
+		util.appendError(droppedIds.length + " of " + page.length + " documents on this page could not be returned: fields the schema requires are missing from the index. Reindex the listed documents to restore the page.", "UnrepresentableDocumentError", null, { droppedCount: droppedIds.length, documentIds: droppedIds });
+	}
 	const _a = parsedBody.aggregations || {};
 	return {
 		edges,
-		totalCount: totalHits,
+		totalCount: totalHits - droppedIds.length,
 		aggregations: {
 			byName: (_a.byName?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
 			uniqueNameCount: _a.uniqueNameCount?.value ?? 0,
