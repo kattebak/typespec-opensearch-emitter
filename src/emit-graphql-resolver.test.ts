@@ -273,22 +273,38 @@ type UtilError = Error & {
 	errorInfo?: unknown;
 };
 
+interface AppendedError {
+	message: string;
+	errorType?: string;
+	data?: unknown;
+	errorInfo?: unknown;
+}
+
+interface ResponseObservation {
+	value: unknown;
+	appendedErrors: AppendedError[];
+	logs: string[][];
+}
+
 /**
  * Evaluates an emitted `response(ctx)` against a stub `util`, mirroring the
  * AppSync runtime closely enough for issue #150: `util.error` interrupts
  * evaluation, so it throws here and carries the errorType/data/errorInfo
- * through for assertions. The stub takes all four documented arguments
- * (`message`, `errorType`, `data`, `errorInfo`) so a diagnostic parked in the
- * wrong slot is visible to a test rather than silently dropped at runtime.
- * Returns the handler's value on the success path.
+ * through for assertions. `util.appendError` does not interrupt it — it
+ * records the entry AppSync would put in the response's `errors` block and
+ * lets the handler return its data. Both stubs take all four documented
+ * arguments (`message`, `errorType`, `data`, `errorInfo`) so a diagnostic
+ * parked in the wrong slot is visible to a test rather than silently dropped
+ * at runtime.
  */
-function evalResponse(source: string, ctx: unknown): unknown {
+function observeResponse(source: string, ctx: unknown): ResponseObservation {
 	const stripped = source
 		.replace(/^import \{ util \} from "@aws-appsync\/utils";?\n?/m, "")
 		.replace(/^export function /gm, "function ");
 	const factory = new Function("util", `${stripped}\nreturn response;`) as (
 		util: unknown,
 	) => (ctx: unknown) => unknown;
+	const appendedErrors: AppendedError[] = [];
 	const utilStub = {
 		base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
 		base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
@@ -304,8 +320,30 @@ function evalResponse(source: string, ctx: unknown): unknown {
 			err.errorInfo = errorInfo;
 			throw err;
 		},
+		appendError: (
+			message: string,
+			errorType?: string,
+			data?: unknown,
+			errorInfo?: unknown,
+		) => {
+			appendedErrors.push({ message, errorType, data, errorInfo });
+		},
 	};
-	return factory(utilStub)(ctx);
+	const logs: string[][] = [];
+	const realLog = console.log;
+	console.log = (...args: string[]) => {
+		logs.push(args);
+	};
+	try {
+		const value = factory(utilStub)(ctx);
+		return { value, appendedErrors, logs };
+	} finally {
+		console.log = realLog;
+	}
+}
+
+function evalResponse(source: string, ctx: unknown): unknown {
+	return observeResponse(source, ctx).value;
 }
 
 function captureResponseError(source: string, ctx: unknown): UtilError {
@@ -315,6 +353,75 @@ function captureResponseError(source: string, ctx: unknown): UtilError {
 		return err as UtilError;
 	}
 	throw new Error("response(ctx) returned without raising an error");
+}
+
+/**
+ * Runs @aws-appsync/eslint-plugin's recommended config over emitted files.
+ * Every file a resolver ships has to pass — a construct AppSync rejects
+ * (`continue`, recursion) fails at CreateFunction/CreateResolver, which is a
+ * deploy-time failure, not a runtime one, so a pipeline function is as much
+ * of a blocker as the resolver-level file.
+ */
+async function lintAppsyncFiles(
+	files: Array<{ name: string; content: string }>,
+): Promise<string[]> {
+	const { ESLint } = await import("eslint");
+	// @ts-expect-error — plugin ships no type declarations.
+	const { default: appsyncPlugin } = await import("@aws-appsync/eslint-plugin");
+
+	const dir = await mkdtemp(join(tmpdir(), "appsync-lint-"));
+	try {
+		const fileNames = files.map((file) => `${file.name}.js`);
+		for (const [index, file] of files.entries()) {
+			await writeFile(join(dir, fileNames[index]), file.content);
+		}
+		// no-recursion is type-aware and needs a real TS project on disk.
+		await writeFile(
+			join(dir, "tsconfig.json"),
+			JSON.stringify({
+				compilerOptions: {
+					target: "ES2022",
+					module: "ES2022",
+					allowJs: true,
+					checkJs: false,
+					noEmit: true,
+				},
+				include: fileNames,
+			}),
+		);
+
+		const eslint = new ESLint({
+			cwd: dir,
+			overrideConfigFile: true,
+			overrideConfig: [
+				{
+					...appsyncPlugin.configs.recommended,
+					languageOptions: {
+						...appsyncPlugin.configs.recommended.languageOptions,
+						sourceType: "module",
+						ecmaVersion: 2022,
+						parserOptions: {
+							project: "./tsconfig.json",
+							tsconfigRootDir: dir,
+							ecmaVersion: 2022,
+							sourceType: "module",
+						},
+					},
+				},
+			],
+		});
+		const lintResults = await eslint.lintFiles(
+			fileNames.map((name) => join(dir, name)),
+		);
+		return lintResults.flatMap((result) =>
+			result.messages.map(
+				(message) =>
+					`[${message.ruleId ?? "fatal"}] ${result.filePath.split("/").pop()} line ${message.line ?? "?"}: ${message.message}`,
+			),
+		);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 }
 
 type EmitResult = Awaited<ReturnType<typeof emitGraphQLResolver>>;
@@ -2689,73 +2796,19 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
-		const { ESLint } = await import("eslint");
-		// @ts-expect-error — plugin ships no type declarations.
-		const { default: appsyncPlugin } = await import(
-			"@aws-appsync/eslint-plugin"
+		const messages = await lintAppsyncFiles([
+			{ name: "resolver", content: result.content },
+			...result.functions.map((fn) => ({
+				name: fn.name,
+				content: fn.content,
+			})),
+		]);
+
+		assert.deepEqual(
+			messages,
+			[],
+			`@aws-appsync/eslint-plugin reported issues:\n${messages.join("\n")}`,
 		);
-
-		const dir = await mkdtemp(join(tmpdir(), "appsync-lint-"));
-		try {
-			const fileNames = ["resolver.js"];
-			await writeFile(join(dir, "resolver.js"), result.content);
-			for (const fn of result.functions) {
-				const fileName = `${fn.name}.js`;
-				fileNames.push(fileName);
-				await writeFile(join(dir, fileName), fn.content);
-			}
-			// no-recursion is type-aware and needs a real TS project on disk.
-			await writeFile(
-				join(dir, "tsconfig.json"),
-				JSON.stringify({
-					compilerOptions: {
-						target: "ES2022",
-						module: "ES2022",
-						allowJs: true,
-						checkJs: false,
-						noEmit: true,
-					},
-					include: fileNames,
-				}),
-			);
-
-			const eslint = new ESLint({
-				cwd: dir,
-				overrideConfigFile: true,
-				overrideConfig: [
-					{
-						...appsyncPlugin.configs.recommended,
-						languageOptions: {
-							...appsyncPlugin.configs.recommended.languageOptions,
-							sourceType: "module",
-							ecmaVersion: 2022,
-							parserOptions: {
-								project: "./tsconfig.json",
-								tsconfigRootDir: dir,
-								ecmaVersion: 2022,
-								sourceType: "module",
-							},
-						},
-					},
-				],
-			});
-			const lintResults = await eslint.lintFiles(
-				fileNames.map((n) => join(dir, n)),
-			);
-			const messages = lintResults.flatMap((r) =>
-				r.messages.map(
-					(m) =>
-						`[${m.ruleId ?? "fatal"}] ${r.filePath.split("/").pop()} line ${m.line ?? "?"}: ${m.message}`,
-				),
-			);
-			assert.deepEqual(
-				messages,
-				[],
-				`@aws-appsync/eslint-plugin reported issues:\n${messages.join("\n")}\n--- emitted resolver ---\n${result.content}\n--- prepare ---\n${result.functions.find((f) => f.name === "prepare")?.content}\n--- search ---\n${result.functions.find((f) => f.name === "search")?.content}`,
-			);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
 	});
 
 	it('emits nested_exists FILTER_SPEC entry for @filterable("exists") on a @nested array field', async () => {
@@ -4013,63 +4066,15 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		const result = await emitGraphQLResolver(projection, monolithicOptions);
 		assert.equal(result.mode, "monolithic");
 
-		const { ESLint } = await import("eslint");
-		// @ts-expect-error — plugin ships no type declarations.
-		const { default: appsyncPlugin } = await import(
-			"@aws-appsync/eslint-plugin"
-		);
+		const messages = await lintAppsyncFiles([
+			{ name: "resolver", content: result.content },
+		]);
 
-		const dir = await mkdtemp(join(tmpdir(), "appsync-lint-mono-"));
-		try {
-			await writeFile(join(dir, "resolver.js"), result.content);
-			await writeFile(
-				join(dir, "tsconfig.json"),
-				JSON.stringify({
-					compilerOptions: {
-						target: "ES2022",
-						module: "ES2022",
-						allowJs: true,
-						checkJs: false,
-						noEmit: true,
-					},
-					include: ["resolver.js"],
-				}),
-			);
-			const eslint = new ESLint({
-				cwd: dir,
-				overrideConfigFile: true,
-				overrideConfig: [
-					{
-						...appsyncPlugin.configs.recommended,
-						languageOptions: {
-							...appsyncPlugin.configs.recommended.languageOptions,
-							sourceType: "module",
-							ecmaVersion: 2022,
-							parserOptions: {
-								project: "./tsconfig.json",
-								tsconfigRootDir: dir,
-								ecmaVersion: 2022,
-								sourceType: "module",
-							},
-						},
-					},
-				],
-			});
-			const lintResults = await eslint.lintFiles([join(dir, "resolver.js")]);
-			const messages = lintResults.flatMap((r) =>
-				r.messages.map(
-					(m) =>
-						`[${m.ruleId ?? "fatal"}] ${r.filePath.split("/").pop()} line ${m.line ?? "?"}: ${m.message}`,
-				),
-			);
-			assert.deepEqual(
-				messages,
-				[],
-				`@aws-appsync/eslint-plugin reported issues on monolithic output:\n${messages.join("\n")}\n--- emitted ---\n${result.content}`,
-			);
-		} finally {
-			await rm(dir, { recursive: true, force: true });
-		}
+		assert.deepEqual(
+			messages,
+			[],
+			`@aws-appsync/eslint-plugin reported issues on monolithic output:\n${messages.join("\n")}`,
+		);
 	});
 });
 
@@ -4735,6 +4740,24 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		}
 	});
 
+	it("split resolver-level file and normalize functions pass @aws-appsync/eslint-plugin recommended config", async () => {
+		const result = await emitGraphQLResolver(
+			wideResponseProjection(48, 5),
+			forcePipeline,
+		);
+		assert.ok(result.functions.some((f) => f.name.startsWith("normalize")));
+
+		const messages = await lintAppsyncFiles(
+			allFiles(result).map((f) => ({ name: f.name, content: f.content })),
+		);
+
+		assert.deepEqual(
+			messages,
+			[],
+			`@aws-appsync/eslint-plugin reported issues on split output:\n${messages.join("\n")}`,
+		);
+	});
+
 	it("split resolver-level file and normalize functions pass AppSync's APPSYNC_JS static check", async () => {
 		const result = await emitGraphQLResolver(
 			wideResponseProjection(48, 5),
@@ -4762,6 +4785,14 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		osBody: Record<string, unknown>,
 		args: Record<string, unknown>,
 	): unknown {
+		return runNormalizeChainAndObserve(result, osBody, args).value;
+	}
+
+	function runNormalizeChainAndObserve(
+		result: EmitResult,
+		osBody: Record<string, unknown>,
+		args: Record<string, unknown>,
+	): ResponseObservation {
 		const utilStub = {
 			base64Decode: (s: string) => Buffer.from(s, "base64").toString("utf8"),
 			base64Encode: (s: string) => Buffer.from(s, "utf8").toString("base64"),
@@ -4785,7 +4816,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		for (const fn of result.functions) {
 			if (fn.name.startsWith("normalize")) loadRequest(fn.content)(ctx);
 		}
-		return evalResponse(result.content, ctx);
+		return observeResponse(result.content, ctx);
 	}
 
 	it("split-mode response matches the monolithic path: same drops, same list defaults, same page", async () => {
@@ -4840,6 +4871,65 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 			1,
 			"the hit missing the required widgetId must be dropped in both modes",
 		);
+	});
+
+	// stxcommodities/core-services#3371 for the split shape: the resolver-level
+	// file assembles the page from the `__searchDropped` marks the normalize
+	// functions left, so it has to report what it drops on its own.
+	it("split mode reports the dropped document and discounts it from totalCount", async () => {
+		const split = await emitGraphQLResolver(
+			wideResponseProjection(60, 2),
+			forcePipeline,
+		);
+		assert.ok(split.functions.some((f) => f.name.startsWith("normalize")));
+
+		const parts = Array.from({ length: 60 }, (_, i) => ({
+			field0: `v${i}`,
+			field1: `w${i}`,
+		}));
+		const source = (id: string | undefined) => ({
+			widgetId: id,
+			...Object.fromEntries(
+				Array.from({ length: 60 }, (_, i) => [`part${i}s`, parts]),
+			),
+		});
+		const osBody = {
+			hits: {
+				total: { value: 2 },
+				hits: [
+					{ _id: "w1", sort: ["w1"], _source: source("w1") },
+					{ _id: "w2", sort: ["w2"], _source: source(undefined) },
+				],
+			},
+		};
+
+		const observed = runNormalizeChainAndObserve(
+			split,
+			JSON.parse(JSON.stringify(osBody)),
+			{ first: 10 },
+		);
+		const connection = observed.value as {
+			edges: unknown[];
+			totalCount: number;
+		};
+
+		assert.equal(observed.appendedErrors.length, 1);
+		assert.equal(
+			observed.appendedErrors[0].errorType,
+			"UnrepresentableDocumentError",
+		);
+		assert.deepEqual(observed.appendedErrors[0].errorInfo, {
+			droppedCount: 1,
+			documentIds: ["w2"],
+		});
+		assert.deepEqual(observed.logs, [
+			[
+				"SearchDocumentDropped",
+				JSON.stringify({ droppedCount: 1, documentIds: ["w2"] }),
+			],
+		]);
+		assert.equal(connection.edges.length, 1);
+		assert.equal(connection.totalCount, 1);
 	});
 
 	// The tests above cover exactly one shape: a missing top-level scalar on a
@@ -5330,7 +5420,7 @@ describe("stale-document tolerance", () => {
 			connection.edges.map((edge) => edge.node.tradeId),
 			["T-2"],
 		);
-		assert.equal(connection.totalCount, 2);
+		assert.equal(connection.totalCount, 1);
 	});
 
 	it("drops a document whose sub-document is missing a required scalar", async () => {
@@ -5376,6 +5466,137 @@ describe("stale-document tolerance", () => {
 			connection.pageInfo.endCursor,
 			Buffer.from("[1]", "utf8").toString("base64"),
 		);
+	});
+
+	// stxcommodities/core-services#3371: a dropped document used to leave no
+	// trace a caller or an alarm could see — the page came back short while
+	// `totalCount` still claimed the row, so a partial page was
+	// indistinguishable from a complete one.
+	const droppedPage = () =>
+		searchResult([
+			{ legs: [], legExternallyDefinedAttributes: [] },
+			{ tradeId: "T-2", legs: [], legExternallyDefinedAttributes: [] },
+		]);
+
+	it("reports a dropped document in the GraphQL errors block", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const observed = observeResponse(result.content, droppedPage());
+
+		assert.equal(observed.appendedErrors.length, 1);
+		const [appended] = observed.appendedErrors;
+		assert.equal(appended.errorType, "UnrepresentableDocumentError");
+		assert.match(appended.message, /1 of 2 documents on this page/);
+		assert.match(appended.message, /Reindex/);
+		assert.deepEqual(appended.errorInfo, {
+			droppedCount: 1,
+			documentIds: ["doc-0"],
+		});
+	});
+
+	// The reason the report is `util.appendError` and not `util.error`: the
+	// resolver resolves the whole connection, so raising an error there nulls
+	// `edges` and every representable sibling with it — the non-null collapse
+	// that dropping the document silently was introduced to avoid.
+	it("keeps the representable rows and the page shape while reporting", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const observed = observeResponse(result.content, droppedPage());
+		const connection = observed.value as Connection & {
+			pageInfo: { endCursor: string | null };
+		};
+
+		assert.equal(observed.appendedErrors.length, 1);
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.tradeId),
+			["T-2"],
+		);
+		assert.equal(
+			connection.pageInfo.endCursor,
+			Buffer.from("[1]", "utf8").toString("base64"),
+		);
+	});
+
+	it("logs a greppable line carrying the dropped document ids", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const observed = observeResponse(result.content, droppedPage());
+
+		assert.deepEqual(observed.logs, [
+			[
+				"SearchDocumentDropped",
+				JSON.stringify({ droppedCount: 1, documentIds: ["doc-0"] }),
+			],
+		]);
+	});
+
+	it("discounts every dropped document from totalCount", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const connection = evalResponse(
+			result.content,
+			searchResult([
+				{ legs: [], legExternallyDefinedAttributes: [] },
+				{ legs: [], legExternallyDefinedAttributes: [] },
+			]),
+		) as Connection;
+
+		assert.deepEqual(connection.edges, []);
+		assert.equal(connection.totalCount, 0);
+	});
+
+	it("reports nothing for a page every document of which is representable", async () => {
+		const result = await emitGraphQLResolver(
+			tradeProjection(),
+			monolithicOptions,
+		);
+
+		const observed = observeResponse(
+			result.content,
+			searchResult([
+				{ tradeId: "T-1", legs: [], legExternallyDefinedAttributes: [] },
+				{ tradeId: "T-2", legs: [], legExternallyDefinedAttributes: [] },
+			]),
+		);
+
+		assert.deepEqual(observed.appendedErrors, []);
+		assert.deepEqual(observed.logs, []);
+		assert.equal((observed.value as Connection).totalCount, 2);
+	});
+
+	it("reports and discounts identically in the pipeline shape", async () => {
+		const result = await emitGraphQLResolver(tradeProjection(), defaultOptions);
+
+		assert.equal(result.mode, "pipeline");
+		const ctx = droppedPage() as { result: unknown; args: unknown };
+		const observed = observeResponse(result.content, {
+			args: ctx.args,
+			prev: { result: ctx.result },
+		});
+		const connection = observed.value as Connection;
+
+		assert.equal(observed.appendedErrors.length, 1);
+		assert.equal(
+			observed.appendedErrors[0].errorType,
+			"UnrepresentableDocumentError",
+		);
+		assert.deepEqual(
+			connection.edges.map((edge) => edge.node.tradeId),
+			["T-2"],
+		);
+		assert.equal(connection.totalCount, 1);
 	});
 
 	it("normalizes identically in the pipeline shape", async () => {

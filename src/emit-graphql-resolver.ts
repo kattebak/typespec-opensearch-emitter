@@ -170,11 +170,14 @@ const FILTER_WORK_SLOT_COUNT = 256;
  * Absent state for a list is an empty list, so the helper fills those in and
  * the document stays readable. An absent required scalar or object has no
  * honest stand-in, so the helper rejects the document instead of inventing
- * one; the resolver drops it from `edges` and the rest of the page still
+ * one; the resolver drops it from `edges`, reports it in the GraphQL `errors`
+ * block, discounts it from `totalCount`, and the rest of the page still
  * renders. Non-null propagation would otherwise turn one stale document into a
  * null response for every sibling on the page.
  */
 const NORMALIZE_NODE_HELPER = "normalizeNode";
+
+const UNREPRESENTABLE_DOCUMENT_ERROR_TYPE = "UnrepresentableDocumentError";
 
 export async function emitGraphQLResolver(
 	projection: TopLevelProjection,
@@ -824,6 +827,14 @@ ${traversalBlocks}
 	}`;
 }
 
+function indentBlock(text: string, tabs: number): string {
+	const pad = "\t".repeat(tabs);
+	return text
+		.split("\n")
+		.map((line) => (line.length === 0 ? line : pad + line))
+		.join("\n");
+}
+
 function renderPathSegmentBlock(name: string): string {
 	return `		{
 			const next = [];
@@ -890,7 +901,10 @@ function renderNormalizeFunction(
 	levels: DocumentLevelSpec[],
 	isFirst: boolean,
 ): string {
-	const levelBlocks = levels.map(renderDocumentLevelBlockForHitLoop).join("\n");
+	const levelBlocks = indentBlock(
+		levels.map(renderDocumentLevelBlockForHitLoop).join("\n"),
+		1,
+	);
 	const intake = isFirst
 		? `	const parsedBody = ctx.prev.result;
 	ctx.stash.parsedBody = parsedBody;
@@ -902,15 +916,14 @@ function renderNormalizeFunction(
 export function request(ctx) {
 ${intake}
 	for (const hit of hits) {
-		if (hit.__searchDropped) continue;
-		const node = hit._source;
+		const node = hit.__searchDropped ? null : hit._source;
 		if (node == null) {
 			hit.__searchDropped = true;
-			continue;
-		}
-		let invalid = false;
+		} else {
+			let invalid = false;
 ${levelBlocks}
-		if (invalid) hit.__searchDropped = true;
+			if (invalid) hit.__searchDropped = true;
+		}
 	}
 	return { payload: null };
 }
@@ -1000,17 +1013,19 @@ export function response(ctx) {
 	const hasNextPage = hits.length > size;
 	const page = hits.slice(0, size);
 	const edges = [];
+	const droppedIds = [];
 	for (const hit of page) {
 		if (hit.__searchDropped) {
-			console.log("dropping unrepresentable document", hit._id);
+			droppedIds.push(hit._id);
 		} else {
 			edges.push({ node: hit._source, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
 		}
 	}
+${DROPPED_DOCUMENT_REPORT}
 ${responseAggregationsPreamble}
 	return {
 		edges,
-		totalCount: totalHits,${responseAggregations}
+		totalCount: totalHits - droppedIds.length,${responseAggregations}
 		pageInfo: {
 			hasNextPage,
 			endCursor: page.length > 0 ? util.base64Encode(JSON.stringify(page[page.length - 1].sort)) : null,
@@ -1039,6 +1054,32 @@ function renderNormalizedSource(
 }
 
 /**
+ * Reports the documents the walker rejected (issue #3371). `util.appendError`
+ * rather than `util.error`: the resolver resolves the whole connection, so
+ * `util.error` — like the non-null propagation it was introduced to avoid
+ * (issue #3341) — nulls `edges` and takes the entire page down for one bad
+ * document. `appendError` leaves the assembled page intact and adds an entry
+ * to the GraphQL `errors` block, so the caller receives both the rows that
+ * are representable and the fact that some are not. The `console.log` carries
+ * the same facts as a fixed token a log metric filter can alarm on.
+ */
+const DROPPED_DOCUMENT_REPORT = `	if (droppedIds.length > 0) {
+		console.log("SearchDocumentDropped", JSON.stringify({ droppedCount: droppedIds.length, documentIds: droppedIds }));
+		util.appendError(droppedIds.length + " of " + page.length + " documents on this page could not be returned: fields the schema requires are missing from the index. Reindex the listed documents to restore the page.", "${UNREPRESENTABLE_DOCUMENT_ERROR_TYPE}", null, { droppedCount: droppedIds.length, documentIds: droppedIds });
+	}`;
+
+/**
+ * The `totalCount` expression. A document the walker rejected is not
+ * deliverable on any page, so it does not count towards the total either —
+ * a count that outruns what the API can ever return reads as a complete page
+ * with rows missing.
+ */
+function renderTotalCount(levels: DocumentLevelSpec[]): string {
+	if (levels.length === 0) return "totalHits";
+	return "totalHits - droppedIds.length";
+}
+
+/**
  * The `edges` assembly. With a non-null shape to reconcile it becomes a loop
  * that skips the documents the walker rejects; `.map` cannot drop an element.
  */
@@ -1052,14 +1093,16 @@ function renderEdgesAssembly(levels: DocumentLevelSpec[]): string {
 
 	return `	const page = hits.slice(0, size);
 	const edges = [];
+	const droppedIds = [];
 	for (const hit of page) {
 		const node = ${NORMALIZE_NODE_HELPER}(hit._source);
 		if (node == null) {
-			console.log("dropping unrepresentable document", hit._id);
+			droppedIds.push(hit._id);
 		} else {
 			edges.push({ node, cursor: util.base64Encode(JSON.stringify(hit.sort)) });
 		}
-	}`;
+	}
+${DROPPED_DOCUMENT_REPORT}`;
 }
 
 /**
@@ -1413,6 +1456,7 @@ function renderMonolithicResolver(
 	const normalizeNodeHelper = renderNormalizeNodeHelper(documentSpec);
 	const edgesAssembly = renderEdgesAssembly(documentSpec);
 	const endCursor = renderEndCursor(documentSpec);
+	const totalCount = renderTotalCount(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1460,7 +1504,7 @@ ${edgesAssembly}
 ${responseAggregationsPreamble}
 	return {
 		edges,
-		totalCount: totalHits,${responseAggregations}
+		totalCount: ${totalCount},${responseAggregations}
 		pageInfo: {
 			hasNextPage,
 			endCursor: ${endCursor},
@@ -1529,6 +1573,7 @@ function renderResolver(
 	const normalizeNodeHelper = renderNormalizeNodeHelper(documentSpec);
 	const edgesAssembly = renderEdgesAssembly(documentSpec);
 	const endCursor = renderEndCursor(documentSpec);
+	const totalCount = renderTotalCount(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1552,7 +1597,7 @@ ${edgesAssembly}
 ${responseAggregationsPreamble}
 	return {
 		edges,
-		totalCount: totalHits,${responseAggregations}
+		totalCount: ${totalCount},${responseAggregations}
 		pageInfo: {
 			hasNextPage,
 			endCursor: ${endCursor},
