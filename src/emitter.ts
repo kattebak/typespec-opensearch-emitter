@@ -90,6 +90,12 @@ export async function $onEmit(
 
 	reportDemotedProjections(context.program, nestedOnly);
 
+	// Issue #184 — the `exports` map is built from the file names emission
+	// actually used. Re-deriving them from the projection name produced a map
+	// that named files no consumer could resolve as soon as a projection's
+	// emitted shape stopped matching the assumed one.
+	const artifactFileNames: string[] = [];
+
 	for (const projection of topLevel) {
 		const docTypeFile = emitDocType(context.program, projection);
 		await emitFile(context.program, {
@@ -115,6 +121,7 @@ export async function $onEmit(
 			path: resolvePath(context.emitterOutputDir, mappingFile.fileName),
 			content: mappingFile.content,
 		});
+		artifactFileNames.push(mappingFile.fileName);
 	}
 
 	// Doc types for nested-only projections: still emit the TS interface so
@@ -180,6 +187,7 @@ export async function $onEmit(
 				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
 				content: sdlFile.content,
 			});
+			artifactFileNames.push(sdlFile.fileName);
 
 			const resolverFile = await emitGraphQLResolver(
 				projection,
@@ -195,11 +203,13 @@ export async function $onEmit(
 				path: resolvePath(context.emitterOutputDir, resolverFile.fileName),
 				content: resolverFile.content,
 			});
+			artifactFileNames.push(resolverFile.fileName);
 			for (const fn of resolverFile.functions) {
 				await emitFile(context.program, {
 					path: resolvePath(context.emitterOutputDir, fn.fileName),
 					content: fn.content,
 				});
+				artifactFileNames.push(fn.fileName);
 			}
 		}
 
@@ -217,6 +227,7 @@ export async function $onEmit(
 				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
 				content: sdlFile.content,
 			});
+			artifactFileNames.push(sdlFile.fileName);
 		}
 
 		// Issue #121 — Query field directives go in the manifest, not the SDL
@@ -255,6 +266,7 @@ export async function $onEmit(
 				path: resolvePath(context.emitterOutputDir, sdlFile.fileName),
 				content: sdlFile.content,
 			});
+			artifactFileNames.push(sdlFile.fileName);
 		}
 		for (const restOperation of restResolved) {
 			const restResolverFile = emitRestResolver(restOperation, {
@@ -267,6 +279,7 @@ export async function $onEmit(
 				path: resolvePath(context.emitterOutputDir, restResolverFile.fileName),
 				content: restResolverFile.content,
 			});
+			artifactFileNames.push(restResolverFile.fileName);
 		}
 
 		const manifest = generateGraphQLManifest(
@@ -285,20 +298,17 @@ export async function $onEmit(
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.json"),
 			content: manifest,
 		});
+		artifactFileNames.push("graphql-resolvers.json");
 
 		const entryPoint = generateGraphQLEntryPoint();
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "graphql-resolvers.js"),
 			content: entryPoint,
 		});
+		artifactFileNames.push("graphql-resolvers.js");
 	}
 
 	if (packageName && packageVersion) {
-		// `topLevel` for graphql artifacts (issue #123): nested-only projections
-		// have only an SDL fragment, no resolver / pipeline / mapping, so they
-		// don't merit a separate exports entry. The fragment is still needed,
-		// though — track it via `nestedOnly` so the .graphql file gets exported.
-		const graphqlArtifacts = graphqlOptions?.emit ? topLevel : undefined;
 		// Rest-only emit (issue #143): no projections means no doc types and no
 		// index.ts barrel, so the package must not point at an entrypoint or
 		// run tsc on publish — and there is nothing for a tsconfig to compile.
@@ -306,16 +316,7 @@ export async function $onEmit(
 		const packageJsonContent = generatePackageJson(
 			packageName,
 			packageVersion,
-			topLevel,
-			graphqlArtifacts,
-			graphqlOptions?.emit ? resolverFiles : undefined,
-			graphqlOptions?.emit ? nestedOnly : undefined,
-			graphqlOptions?.emit
-				? [
-						...restSdlFileNames,
-						...restResolverFiles.map((file) => file.fileName),
-					]
-				: undefined,
+			artifactFileNames,
 			restOnly,
 		);
 		await emitFile(context.program, {
@@ -662,70 +663,21 @@ export default manifest;
 `;
 }
 
+/**
+ * `artifactFileNames` is the list emission recorded as it wrote each
+ * consumer-facing artifact, so a subpath exists for exactly the files the
+ * package ships — whatever shape the resolver emit chose (issue #184).
+ */
 function generatePackageJson(
 	packageName: string,
 	packageVersion: string,
-	projections: ResolvedProjection[],
-	graphqlProjections?: ResolvedProjection[],
-	resolverFiles?: EmittedResolverFile[],
-	nestedOnlyGraphqlProjections?: ResolvedProjection[],
-	restArtifactFileNames?: string[],
+	artifactFileNames: string[],
 	restOnly = false,
 ): string {
-	const artifactExports: Record<string, string> = {};
-
-	for (const projection of projections) {
-		const baseName = `${toKebabCase(projection.projectionModel.name)}-search-mapping`;
-		artifactExports[`./${baseName}.json`] = `./${baseName}.json`;
-	}
-
-	if (graphqlProjections) {
-		artifactExports["./graphql-resolvers.json"] = "./graphql-resolvers.json";
-		artifactExports["./graphql-resolvers.js"] = "./graphql-resolvers.js";
-		const filesByName = new Map<string, EmittedResolverFile>();
-		if (resolverFiles) {
-			for (let i = 0; i < graphqlProjections.length; i++) {
-				filesByName.set(
-					graphqlProjections[i].projectionModel.name,
-					resolverFiles[i],
-				);
-			}
-		}
-		for (const projection of graphqlProjections) {
-			const kebab = toKebabCase(projection.projectionModel.name);
-			artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
-			artifactExports[`./${kebab}-resolver.js`] = `./${kebab}-resolver.js`;
-			// Pipeline functions (prepare/search) only exist on the disk for
-			// projections emitted in pipeline mode (issue #112). Monolithic
-			// projections collapse those into the resolver file. Only export
-			// what's actually present.
-			const file = filesByName.get(projection.projectionModel.name);
-			if (file && file.mode === "pipeline") {
-				artifactExports[`./${kebab}-fn-prepare.js`] =
-					`./${kebab}-fn-prepare.js`;
-				artifactExports[`./${kebab}-fn-search.js`] = `./${kebab}-fn-search.js`;
-			}
-		}
-		// Nested-only projections (issue #123): SDL fragment only — no resolver,
-		// no pipeline functions, no mapping. The fragment must still be
-		// exported so consumers' schema-assembly tooling can read it.
-		if (nestedOnlyGraphqlProjections) {
-			for (const projection of nestedOnlyGraphqlProjections) {
-				const kebab = toKebabCase(projection.projectionModel.name);
-				artifactExports[`./${kebab}.graphql`] = `./${kebab}.graphql`;
-			}
-		}
-		// REST artifacts (issue #134): SDL fragments + Query/Mutation resolver
-		// files. Only present when @restResolver operations exist.
-		if (restArtifactFileNames) {
-			for (const fileName of restArtifactFileNames) {
-				artifactExports[`./${fileName}`] = `./${fileName}`;
-			}
-		}
-	}
-
 	const sorted = Object.fromEntries(
-		Object.entries(artifactExports).sort(([a], [b]) => a.localeCompare(b)),
+		[...new Set(artifactFileNames)]
+			.sort((a, b) => a.localeCompare(b))
+			.map((fileName) => [`./${fileName}`, `./${fileName}`]),
 	);
 
 	// Rest-only package (issue #143): SDL / resolver / manifest artifacts only —

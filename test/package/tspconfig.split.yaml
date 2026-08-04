@@ -1,0 +1,14 @@
+emit:
+  - "@kattebak/typespec-opensearch-emitter"
+options:
+  "@kattebak/typespec-opensearch-emitter":
+    output-file: "opensearch-projections.json"
+    emitter-output-dir: "{cwd}/build/package-split-emit"
+    package-name: "@kattebak/package-exports-split"
+    package-version: "0.0.1"
+    graphql:
+      emit: true
+      # Small enough to drive the request-side split (issue #173) and the
+      # response-walker split (issue #179), so the emit covers the numbered
+      # prepare-query / prepare-aggs / normalize shapes.
+      monolithic-threshold-bytes: 4000
