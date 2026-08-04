@@ -1,0 +1,12 @@
+emit:
+  - "@kattebak/typespec-opensearch-emitter"
+options:
+  "@kattebak/typespec-opensearch-emitter":
+    output-file: "opensearch-projections.json"
+    emitter-output-dir: "{cwd}/build/package-emit"
+    package-name: "@kattebak/package-exports"
+    package-version: "0.0.1"
+    graphql:
+      emit: true
+      # Pipeline mode, one prepare function per projection.
+      monolithic-threshold-bytes: 0

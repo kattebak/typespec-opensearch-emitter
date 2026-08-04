@@ -202,17 +202,10 @@ describe("isCandidateModel", () => {
 
 describe("generatePackageJson", () => {
 	it("generates a minimal package.json with index and mapping exports", () => {
-		const projections = [
-			{
-				projectionModel: { name: "ProductSearchDoc" },
-				sourceModel: { name: "Product" },
-				indexName: "product_search_doc",
-				fields: [],
-			},
-		] as unknown as ResolvedProjection[];
-
 		const result = JSON.parse(
-			__test.generatePackageJson("@my/pkg", "1.0.0", projections),
+			__test.generatePackageJson("@my/pkg", "1.0.0", [
+				"product-search-doc-search-mapping.json",
+			]),
 		);
 
 		assert.equal(result.name, "@my/pkg");
@@ -230,24 +223,12 @@ describe("generatePackageJson", () => {
 		);
 	});
 
-	it("sorts mapping exports alphabetically", () => {
-		const projections = [
-			{
-				projectionModel: { name: "ZetaSearchDoc" },
-				sourceModel: { name: "Zeta" },
-				indexName: "zeta",
-				fields: [],
-			},
-			{
-				projectionModel: { name: "AlphaSearchDoc" },
-				sourceModel: { name: "Alpha" },
-				indexName: "alpha",
-				fields: [],
-			},
-		] as unknown as ResolvedProjection[];
-
+	it("sorts artifact exports alphabetically", () => {
 		const result = JSON.parse(
-			__test.generatePackageJson("@my/pkg", "2.0.0", projections),
+			__test.generatePackageJson("@my/pkg", "2.0.0", [
+				"zeta-search-doc-search-mapping.json",
+				"alpha-search-doc-search-mapping.json",
+			]),
 		);
 		const exportKeys = Object.keys(result.exports);
 
@@ -265,61 +246,50 @@ describe("generatePackageJson", () => {
 		assert.equal(exportKeys[0], ".");
 	});
 
-	it("includes graphql artifact exports when graphqlProjections provided", () => {
-		const projections = [
-			{
-				projectionModel: { name: "ProductSearchDoc" },
-				sourceModel: { name: "Product" },
-				indexName: "product_search_doc",
-				fields: [],
-			},
-		] as unknown as ResolvedProjection[];
+	it("exports one subpath per emitted artifact, whatever its name", () => {
+		const artifacts = [
+			"graphql-resolvers.json",
+			"graphql-resolvers.js",
+			"product-search-doc.graphql",
+			"product-search-doc-resolver.js",
+			"product-search-doc-fn-prepare-query.js",
+			"product-search-doc-fn-prepare-query-1.js",
+			"product-search-doc-fn-prepare-aggs.js",
+			"product-search-doc-fn-normalize.js",
+			"product-search-doc-fn-search.js",
+		];
 
 		const result = JSON.parse(
-			__test.generatePackageJson("@my/pkg", "1.0.0", projections, projections),
+			__test.generatePackageJson("@my/pkg", "1.0.0", artifacts),
 		);
 
-		assert.equal(
-			result.exports["./graphql-resolvers.json"],
-			"./graphql-resolvers.json",
-		);
-		assert.equal(
-			result.exports["./graphql-resolvers.js"],
-			"./graphql-resolvers.js",
-		);
-		assert.equal(
-			result.exports["./product-search-doc.graphql"],
-			"./product-search-doc.graphql",
-		);
-		assert.equal(
-			result.exports["./product-search-doc-resolver.js"],
-			"./product-search-doc-resolver.js",
+		assert.deepEqual(
+			Object.keys(result.exports)
+				.filter((key) => key !== ".")
+				.sort(),
+			artifacts.map((fileName) => `./${fileName}`).sort(),
 		);
 	});
 
-	it("sorts all exports including graphql artifacts", () => {
-		const projections = [
-			{
-				projectionModel: { name: "ZetaSearchDoc" },
-				sourceModel: { name: "Zeta" },
-				indexName: "zeta",
-				fields: [],
-			},
-			{
-				projectionModel: { name: "AlphaSearchDoc" },
-				sourceModel: { name: "Alpha" },
-				indexName: "alpha",
-				fields: [],
-			},
-		] as unknown as ResolvedProjection[];
-
+	it("collapses an artifact emitted for more than one projection", () => {
 		const result = JSON.parse(
-			__test.generatePackageJson("@my/pkg", "2.0.0", projections, projections),
+			__test.generatePackageJson("@my/pkg", "1.0.0", [
+				"pet.graphql",
+				"pet.graphql",
+			]),
 		);
-		const exportKeys = Object.keys(result.exports).filter((k) => k !== ".");
 
-		const sortedKeys = [...exportKeys].sort();
-		assert.deepEqual(exportKeys, sortedKeys);
+		assert.deepEqual(Object.keys(result.exports), [".", "./pet.graphql"]);
+	});
+
+	it("drops the entrypoint for a rest-only package", () => {
+		const result = JSON.parse(
+			__test.generatePackageJson("@my/pkg", "1.0.0", ["pet.graphql"], true),
+		);
+
+		assert.equal(result.main, undefined);
+		assert.equal(result.scripts, undefined);
+		assert.deepEqual(Object.keys(result.exports), ["./pet.graphql"]);
 	});
 });
 
