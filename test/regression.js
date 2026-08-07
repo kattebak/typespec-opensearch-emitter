@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import test from "node:test";
 
 // Issue #134 hard constraint: a .tsp with no @restResolver must emit
@@ -13,13 +14,24 @@ const EMIT_DIR = "build/opensearch-emit";
 
 // test/example.js writes these into EMIT_DIR for its "generated output
 // compiles" check — they are test-harness artifacts, not emitter output.
-const TEST_HARNESS_ARTIFACTS = new Set(["tsconfig.json", "dist"]);
+const TEST_HARNESS_ARTIFACTS = new Set(["tsconfig.json"]);
+
+async function readEmittedFileNames(dir) {
+	const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+	return entries
+		.filter((entry) => entry.isFile())
+		.map((entry) =>
+			relative(dir, join(entry.parentPath ?? entry.path, entry.name)),
+		)
+		.filter(
+			(fileName) =>
+				!TEST_HARNESS_ARTIFACTS.has(fileName) && !fileName.startsWith("dist/"),
+		);
+}
 
 test("OpenSearch-only emit is byte-identical to the pre-REST baseline", async () => {
-	const snapshotFiles = (await readdir(SNAPSHOT_DIR)).sort();
-	const emittedFiles = (await readdir(EMIT_DIR))
-		.filter((fileName) => !TEST_HARNESS_ARTIFACTS.has(fileName))
-		.sort();
+	const snapshotFiles = (await readEmittedFileNames(SNAPSHOT_DIR)).sort();
+	const emittedFiles = (await readEmittedFileNames(EMIT_DIR)).sort();
 
 	assert.deepEqual(
 		emittedFiles,

@@ -401,7 +401,13 @@ For each projection, the emitter produces:
 build/opensearch/
   pet-search-doc.graphql          # GraphQL SDL fragment
   pet-search-doc-resolver.js      # APPSYNC_JS resolver
-  graphql-resolvers.json           # manifest mapping projections to files
+  graphql-resolvers.json           # manifest mapping projections to files and modules
+  resolvers/
+    index.ts                       # barrel: specifier → resolver / function source
+    pet-search-doc-resolver.ts     # export const code = "<the resolver source>"
+  schema/
+    index.ts                       # barrel: specifier → SDL text
+    pet-search-doc.ts              # export const sdl = "<the SDL fragment>"
 ```
 
 ### GraphQL SDL (`.graphql`)
@@ -473,7 +479,7 @@ The resolver reconciles what it can (an absent required list becomes `[]`) and o
 
 ### Manifest (`graphql-resolvers.json`)
 
-Maps each projection to its resolver file, SDL file, query field name, and index name:
+Maps each projection to its resolver, SDL fragment, query field name, and index name. Every artifact is named twice: a `*File` path relative to the emit directory, and a `*Module` import specifier into the package.
 
 ```json
 {
@@ -482,12 +488,27 @@ Maps each projection to its resolver file, SDL file, query field name, and index
       "projection": "PetSearchDoc",
       "indexName": "pets_v1",
       "queryFieldName": "searchPet",
+      "mode": "pipeline",
       "resolverFile": "pet-search-doc-resolver.js",
-      "sdlFile": "pet-search-doc.graphql"
+      "resolverModule": "resolvers/pet-search-doc-resolver",
+      "sdlFile": "pet-search-doc.graphql",
+      "sdlModule": "schema/pet-search-doc",
+      "functions": [
+        {
+          "name": "prepare",
+          "file": "pet-search-doc-fn-prepare.js",
+          "module": "resolvers/pet-search-doc-fn-prepare",
+          "dataSource": "NONE"
+        }
+      ]
     }
   ],
   "nestedTypes": [
-    { "projection": "TagSearchDoc", "sdlFile": "tag-search-doc.graphql" }
+    {
+      "projection": "TagSearchDoc",
+      "sdlFile": "tag-search-doc.graphql",
+      "sdlModule": "schema/tag-search-doc"
+    }
   ]
 }
 ```
@@ -495,6 +516,35 @@ Maps each projection to its resolver file, SDL file, query field name, and index
 The consuming CDK construct can read this manifest to wire resolvers without hardcoded knowledge.
 
 `nestedTypes` lists the nested-only projections — those without `@searchProjection` or `@indexName`. They have no Query field, resolver, or index, so they carry no `resolvers[]` entry, but top-level fragments reference their types by name. Assemble a schema from `resolvers[].sdlFile` **plus** `nestedTypes[].sdlFile`; using `resolvers[]` alone leaves those references undefined. The key is omitted when a spec has no nested-only projections.
+
+### String modules (`resolvers/`, `schema/`)
+
+Every emitted resolver, pipeline function and SDL fragment also ships as a TypeScript module exporting its source as a string, so a consumer can hand the code to `Code.fromInline` through a type-checked import instead of a path lookup and a file read:
+
+```ts
+import { code } from "@scope/pet-search-graphql/resolvers/pet-search-doc-resolver";
+import { sdl } from "@scope/pet-search-graphql/schema/pet-search-doc";
+```
+
+The manifest's `resolverModule`, `functions[].module` and `sdlModule` are exactly these specifiers, and the generated `package.json` `exports` map declares each one extensionless. The `.js` / `.graphql` files stay in place: a local build directory has no package exports to import through, so a consumer reading artifacts off disk keeps using the `*File` fields.
+
+Reading the manifest is data-driven, though — the resolver a consumer needs is whichever one the manifest names — so a static import per resolver would mean a hand-maintained import list. Two barrels close that: one static import per package, keyed by the same specifier the manifest carries.
+
+```ts
+import { resolverCode, pipelineFunctionCode } from "@scope/pet-search-graphql/resolvers";
+import { sdl } from "@scope/pet-search-graphql/schema";
+
+for (const entry of manifest.resolvers) {
+  new Resolver(scope, entry.queryFieldName, {
+    code: Code.fromInline(resolverCode[entry.resolverModule]),
+    // ...
+  });
+}
+```
+
+Both barrels are exhaustive over what emission wrote, including every response-walker split file and every nested-type fragment. `test/string-modules.js` asserts that: the barrel keys equal the manifest's specifier set exactly, and each value matches its `.js` / `.graphql` sibling byte for byte.
+
+The generated `tsconfig.json` includes the modules, so the consumer's `prepare` step compiles them along with the doc types.
 
 ### Aggregations (`@aggregatable`)
 
@@ -736,6 +786,7 @@ npm test          # runs build + lint + unit tests + emit test + example test
 - `src/**/*.test.ts` — unit tests (decorators, projection resolution, emitters)
 - `test/main.tsp` — integration fixture compiled by `npm run test:emit`
 - `test/example.js` — validates emitted output files against expectations
+- `test/string-modules.js` — validates the `resolvers/` and `schema/` string modules, their `exports` subpaths and the barrels against the manifest
 
 ## License
 

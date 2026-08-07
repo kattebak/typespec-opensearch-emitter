@@ -33,7 +33,7 @@
 		"test:emit:rest:id": "tsp compile test/petstore-id/main.tsp --config test/petstore-id/tspconfig.yaml",
 		"test:emit:package": "tsp compile test/main.tsp --config test/package/tspconfig.yaml",
 		"test:emit:package:split": "tsp compile test/main.tsp --config test/package/tspconfig.split.yaml",
-		"test:example": "node --test test/example.js test/regression.js test/rest-example.js test/rest-id-example.js test/package-exports.js",
+		"test:example": "node --test test/example.js test/regression.js test/rest-example.js test/rest-id-example.js test/package-exports.js test/string-modules.js",
 		"test:unit": "node --test --import=tsx src/**/*.test.ts",
 		"prepublishOnly": "tsc"
 	},

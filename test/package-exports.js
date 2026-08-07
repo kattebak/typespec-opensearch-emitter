@@ -13,6 +13,12 @@ const EMIT_DIRS = [
 	"build/petstore-emit",
 ];
 
+// Issue #1068 — the string-module subpaths. A rest-only package emits none.
+const STRING_MODULE_EMIT_DIRS = [
+	"build/package-emit",
+	"build/package-split-emit",
+];
+
 async function readPackage(emitDir) {
 	const files = new Set(await readdir(emitDir));
 	const packageJson = JSON.parse(
@@ -24,7 +30,9 @@ async function readPackage(emitDir) {
 for (const emitDir of EMIT_DIRS) {
 	test(`${emitDir}: every export subpath resolves to an emitted file`, async () => {
 		const { files, exports } = await readPackage(emitDir);
-		const subpaths = Object.keys(exports).filter((key) => key !== ".");
+		const subpaths = Object.keys(exports).filter(
+			(key) => key !== "." && typeof exports[key] === "string",
+		);
 
 		assert.ok(subpaths.length > 0, "no artifact subpaths to check");
 		for (const subpath of subpaths) {
@@ -47,6 +55,27 @@ for (const emitDir of EMIT_DIRS) {
 			assert.ok(
 				Object.hasOwn(exports, `./${fileName}`),
 				`${fileName} is emitted but has no export subpath`,
+			);
+		}
+	});
+}
+
+// String-module subpaths (issue #1068) are extensionless and resolve to the
+// compiled output, so the shipped file to check is the `.ts` source.
+for (const emitDir of STRING_MODULE_EMIT_DIRS) {
+	test(`${emitDir}: every string-module subpath resolves to an emitted .ts source`, async () => {
+		const { exports } = await readPackage(emitDir);
+		const subpaths = Object.keys(exports).filter(
+			(key) => key !== "." && typeof exports[key] === "object",
+		);
+
+		assert.ok(subpaths.length > 0, "no string-module subpaths to check");
+		for (const subpath of subpaths) {
+			const target = exports[subpath].default;
+			assert.equal(exports[subpath].types, target.replace(/\.js$/, ".d.ts"));
+			await readFile(
+				`${emitDir}/${target.slice("./".length).replace(/\.js$/, ".ts")}`,
+				"utf8",
 			);
 		}
 	});

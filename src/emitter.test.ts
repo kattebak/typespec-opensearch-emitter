@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Model } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
+import {
+	emitResolverBarrel,
+	emitResolverStringModule,
+	emitSdlBarrel,
+	emitSdlStringModule,
+} from "./emit-string-module.js";
 import { __test } from "./emitter.js";
 import {
 	type ResolvedProjection,
@@ -291,6 +297,60 @@ describe("generatePackageJson", () => {
 		assert.equal(result.scripts, undefined);
 		assert.deepEqual(Object.keys(result.exports), ["./pet.graphql"]);
 	});
+
+	it("exports each string module as an extensionless conditional subpath (issue #1068)", () => {
+		const result = JSON.parse(
+			__test.generatePackageJson(
+				"@my/pkg",
+				"1.0.0",
+				["pet-search-doc-resolver.js"],
+				false,
+				[
+					emitResolverStringModule("pet-search-doc-resolver.js", "code"),
+					emitSdlStringModule("pet-search-doc.graphql", "type Pet"),
+					emitResolverBarrel([], []),
+					emitSdlBarrel([]),
+				],
+			),
+		);
+
+		assert.deepEqual(result.exports["./resolvers/pet-search-doc-resolver"], {
+			types: "./resolvers/pet-search-doc-resolver.d.ts",
+			default: "./resolvers/pet-search-doc-resolver.js",
+		});
+		assert.deepEqual(result.exports["./schema/pet-search-doc"], {
+			types: "./schema/pet-search-doc.d.ts",
+			default: "./schema/pet-search-doc.js",
+		});
+		// The barrel's subpath is the directory; it resolves to the index inside.
+		assert.deepEqual(result.exports["./resolvers"], {
+			types: "./resolvers/index.d.ts",
+			default: "./resolvers/index.js",
+		});
+		assert.deepEqual(result.exports["./schema"], {
+			types: "./schema/index.d.ts",
+			default: "./schema/index.js",
+		});
+		assert.equal(
+			result.exports["./pet-search-doc-resolver.js"],
+			"./pet-search-doc-resolver.js",
+		);
+	});
+
+	it("keeps the exports map unchanged when nothing was emitted as a string module", () => {
+		const withModules = __test.generatePackageJson(
+			"@my/pkg",
+			"1.0.0",
+			["pet.graphql"],
+			false,
+			[],
+		);
+		const withoutModules = __test.generatePackageJson("@my/pkg", "1.0.0", [
+			"pet.graphql",
+		]);
+
+		assert.equal(withModules, withoutModules);
+	});
 });
 
 describe("generateTsConfig", () => {
@@ -346,6 +406,28 @@ describe("generateTsConfig", () => {
 	it("returns tsconfig with only index.ts when no projections", () => {
 		const result = JSON.parse(__test.generateTsConfig([]));
 		assert.deepEqual(result.include, ["index.ts"]);
+	});
+
+	it("compiles the string modules the package ships (issue #1068)", () => {
+		const result = JSON.parse(
+			__test.generateTsConfig(
+				[],
+				[
+					emitResolverStringModule("pet-search-doc-resolver.js", "code"),
+					emitSdlStringModule("pet-search-doc.graphql", "type Pet"),
+					emitResolverBarrel([], []),
+					emitSdlBarrel([]),
+				],
+			),
+		);
+
+		assert.deepEqual(result.include, [
+			"index.ts",
+			"resolvers/index.ts",
+			"resolvers/pet-search-doc-resolver.ts",
+			"schema/index.ts",
+			"schema/pet-search-doc.ts",
+		]);
 	});
 });
 
@@ -412,6 +494,65 @@ describe("generateGraphQLManifest queryFieldDirectives (issue #121)", () => {
 	});
 });
 
+describe("generateGraphQLManifest string modules (issue #1068)", () => {
+	const projection = {
+		projectionModel: { name: "PetSearchDoc" },
+		sourceModel: { name: "Pet" },
+		indexName: "pets_v1",
+		fields: [],
+	} as unknown as ResolvedProjection;
+
+	it("names the string module beside every file field it already carries", () => {
+		const resolverFile = {
+			queryFieldName: "searchPet",
+			mode: "pipeline",
+			fileName: "pet-search-doc-resolver.js",
+			content: "",
+			functions: [
+				{
+					name: "prepare-query",
+					fileName: "pet-search-doc-fn-prepare-query.js",
+					content: "",
+					dataSource: "NONE" as const,
+				},
+				{
+					name: "normalize-1",
+					fileName: "pet-search-doc-fn-normalize-1.js",
+					content: "",
+					dataSource: "NONE" as const,
+				},
+			],
+		};
+
+		const manifest = JSON.parse(
+			__test.generateGraphQLManifest([projection], [resolverFile]),
+		);
+		const entry = manifest.resolvers[0];
+
+		assert.equal(entry.resolverFile, "pet-search-doc-resolver.js");
+		assert.equal(entry.resolverModule, "resolvers/pet-search-doc-resolver");
+		assert.equal(entry.sdlFile, "pet-search-doc.graphql");
+		assert.equal(entry.sdlModule, "schema/pet-search-doc");
+		assert.deepEqual(
+			entry.functions.map((fn: { file: string; module: string }) => fn),
+			[
+				{
+					name: "prepare-query",
+					file: "pet-search-doc-fn-prepare-query.js",
+					module: "resolvers/pet-search-doc-fn-prepare-query",
+					dataSource: "NONE",
+				},
+				{
+					name: "normalize-1",
+					file: "pet-search-doc-fn-normalize-1.js",
+					module: "resolvers/pet-search-doc-fn-normalize-1",
+					dataSource: "NONE",
+				},
+			],
+		);
+	});
+});
+
 describe("generateNestedTypeEntries (issue #164)", () => {
 	const petSearchDoc = {
 		projectionModel: { name: "PetSearchDoc" },
@@ -437,7 +578,11 @@ describe("generateNestedTypeEntries (issue #164)", () => {
 
 	it("names each nested-only projection and its SDL fragment", () => {
 		assert.deepEqual(__test.generateNestedTypeEntries([tagSearchDoc]), [
-			{ projection: "TagSearchDoc", sdlFile: "tag-search-doc.graphql" },
+			{
+				projection: "TagSearchDoc",
+				sdlFile: "tag-search-doc.graphql",
+				sdlModule: "schema/tag-search-doc",
+			},
 		]);
 	});
 
@@ -459,7 +604,11 @@ describe("generateNestedTypeEntries (issue #164)", () => {
 		assert.equal(manifest.resolvers.length, 1);
 		assert.equal(manifest.resolvers[0].projection, "PetSearchDoc");
 		assert.deepEqual(manifest.nestedTypes, [
-			{ projection: "TagSearchDoc", sdlFile: "tag-search-doc.graphql" },
+			{
+				projection: "TagSearchDoc",
+				sdlFile: "tag-search-doc.graphql",
+				sdlModule: "schema/tag-search-doc",
+			},
 		]);
 	});
 

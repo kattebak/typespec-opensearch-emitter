@@ -389,10 +389,12 @@ test("nested-only projections are discoverable through manifest.nestedTypes (iss
 			{
 				projection: "ApprovalSearchDoc",
 				sdlFile: "approval-search-doc.graphql",
+				sdlModule: "schema/approval-search-doc",
 			},
 			{
 				projection: "BankAccountApprovalSearchDoc",
 				sdlFile: "bank-account-approval-search-doc.graphql",
+				sdlModule: "schema/bank-account-approval-search-doc",
 			},
 		],
 		"every nested-only projection must be named with its SDL fragment",
