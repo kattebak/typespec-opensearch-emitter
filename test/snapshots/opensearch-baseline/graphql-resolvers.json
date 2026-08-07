@@ -10,16 +10,20 @@
       ],
       "mode": "pipeline",
       "resolverFile": "tag-search-doc-resolver.js",
+      "resolverModule": "resolvers/tag-search-doc-resolver",
       "sdlFile": "tag-search-doc.graphql",
+      "sdlModule": "schema/tag-search-doc",
       "functions": [
         {
           "name": "prepare",
           "file": "tag-search-doc-fn-prepare.js",
+          "module": "resolvers/tag-search-doc-fn-prepare",
           "dataSource": "NONE"
         },
         {
           "name": "search",
           "file": "tag-search-doc-fn-search.js",
+          "module": "resolvers/tag-search-doc-fn-search",
           "dataSource": "OPENSEARCH"
         }
       ]
@@ -30,16 +34,20 @@
       "queryFieldName": "searchPet",
       "mode": "pipeline",
       "resolverFile": "pet-search-doc-resolver.js",
+      "resolverModule": "resolvers/pet-search-doc-resolver",
       "sdlFile": "pet-search-doc.graphql",
+      "sdlModule": "schema/pet-search-doc",
       "functions": [
         {
           "name": "prepare",
           "file": "pet-search-doc-fn-prepare.js",
+          "module": "resolvers/pet-search-doc-fn-prepare",
           "dataSource": "NONE"
         },
         {
           "name": "search",
           "file": "pet-search-doc-fn-search.js",
+          "module": "resolvers/pet-search-doc-fn-search",
           "dataSource": "OPENSEARCH"
         }
       ]
@@ -50,16 +58,20 @@
       "queryFieldName": "searchPetPublic",
       "mode": "pipeline",
       "resolverFile": "pet-public-search-doc-resolver.js",
+      "resolverModule": "resolvers/pet-public-search-doc-resolver",
       "sdlFile": "pet-public-search-doc.graphql",
+      "sdlModule": "schema/pet-public-search-doc",
       "functions": [
         {
           "name": "prepare",
           "file": "pet-public-search-doc-fn-prepare.js",
+          "module": "resolvers/pet-public-search-doc-fn-prepare",
           "dataSource": "NONE"
         },
         {
           "name": "search",
           "file": "pet-public-search-doc-fn-search.js",
+          "module": "resolvers/pet-public-search-doc-fn-search",
           "dataSource": "OPENSEARCH"
         }
       ]
@@ -70,16 +82,20 @@
       "queryFieldName": "searchPerson",
       "mode": "pipeline",
       "resolverFile": "person-search-doc-resolver.js",
+      "resolverModule": "resolvers/person-search-doc-resolver",
       "sdlFile": "person-search-doc.graphql",
+      "sdlModule": "schema/person-search-doc",
       "functions": [
         {
           "name": "prepare",
           "file": "person-search-doc-fn-prepare.js",
+          "module": "resolvers/person-search-doc-fn-prepare",
           "dataSource": "NONE"
         },
         {
           "name": "search",
           "file": "person-search-doc-fn-search.js",
+          "module": "resolvers/person-search-doc-fn-search",
           "dataSource": "OPENSEARCH"
         }
       ]
@@ -88,11 +104,13 @@
   "nestedTypes": [
     {
       "projection": "ApprovalSearchDoc",
-      "sdlFile": "approval-search-doc.graphql"
+      "sdlFile": "approval-search-doc.graphql",
+      "sdlModule": "schema/approval-search-doc"
     },
     {
       "projection": "BankAccountApprovalSearchDoc",
-      "sdlFile": "bank-account-approval-search-doc.graphql"
+      "sdlFile": "bank-account-approval-search-doc.graphql",
+      "sdlModule": "schema/bank-account-approval-search-doc"
     }
   ]
 }

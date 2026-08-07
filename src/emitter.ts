@@ -31,6 +31,14 @@ import {
 	emitRestSdl,
 	restSdlFileName,
 } from "./emit-rest-sdl.js";
+import {
+	collectStringModules,
+	type EmittedStringModule,
+	emitResolverStringModule,
+	emitSdlStringModule,
+	resolverModuleSpecifier,
+	sdlModuleSpecifier,
+} from "./emit-string-module.js";
 import { type OpenSearchEmitterOptions, reportDiagnostic } from "./lib.js";
 import {
 	isSearchProjectionModel,
@@ -162,6 +170,15 @@ export async function $onEmit(
 	const resolverFiles: EmittedResolverFile[] = [];
 	const restResolverFiles: EmittedRestResolverFile[] = [];
 	const restSdlFileNames: string[] = [];
+	// Issue #1068 — every emitted resolver, pipeline function and SDL fragment
+	// also ships as a `.ts` module exporting its source as a string, so a
+	// consumer imports the code instead of resolving and reading the file. The
+	// `.js` / `.graphql` files stay: a local build directory has no package
+	// exports to import through.
+	const resolverModules: EmittedStringModule[] = [];
+	const pipelineFunctionModules: EmittedStringModule[] = [];
+	const sdlModules: EmittedStringModule[] = [];
+	const stringModules: EmittedStringModule[] = [];
 	if (graphqlOptions?.emit) {
 		const directiveDefaults = graphqlOptions.directives?.default;
 		const pageOptions = {
@@ -188,6 +205,7 @@ export async function $onEmit(
 				content: sdlFile.content,
 			});
 			artifactFileNames.push(sdlFile.fileName);
+			sdlModules.push(emitSdlStringModule(sdlFile.fileName, sdlFile.content));
 
 			const resolverFile = await emitGraphQLResolver(
 				projection,
@@ -204,12 +222,18 @@ export async function $onEmit(
 				content: resolverFile.content,
 			});
 			artifactFileNames.push(resolverFile.fileName);
+			resolverModules.push(
+				emitResolverStringModule(resolverFile.fileName, resolverFile.content),
+			);
 			for (const fn of resolverFile.functions) {
 				await emitFile(context.program, {
 					path: resolvePath(context.emitterOutputDir, fn.fileName),
 					content: fn.content,
 				});
 				artifactFileNames.push(fn.fileName);
+				pipelineFunctionModules.push(
+					emitResolverStringModule(fn.fileName, fn.content),
+				);
 			}
 		}
 
@@ -228,6 +252,7 @@ export async function $onEmit(
 				content: sdlFile.content,
 			});
 			artifactFileNames.push(sdlFile.fileName);
+			sdlModules.push(emitSdlStringModule(sdlFile.fileName, sdlFile.content));
 		}
 
 		// Issue #121 — Query field directives go in the manifest, not the SDL
@@ -282,6 +307,18 @@ export async function $onEmit(
 			artifactFileNames.push(restResolverFile.fileName);
 		}
 
+		for (const module of collectStringModules(
+			resolverModules,
+			pipelineFunctionModules,
+			sdlModules,
+		)) {
+			await emitFile(context.program, {
+				path: resolvePath(context.emitterOutputDir, module.fileName),
+				content: module.content,
+			});
+			stringModules.push(module);
+		}
+
 		const manifest = generateGraphQLManifest(
 			topLevel,
 			resolverFiles,
@@ -318,6 +355,7 @@ export async function $onEmit(
 			packageVersion,
 			artifactFileNames,
 			restOnly,
+			stringModules,
 		);
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, "package.json"),
@@ -325,7 +363,7 @@ export async function $onEmit(
 		});
 
 		if (!restOnly) {
-			const tsConfigContent = generateTsConfig(resolved);
+			const tsConfigContent = generateTsConfig(resolved, stringModules);
 			await emitFile(context.program, {
 				path: resolvePath(context.emitterOutputDir, "tsconfig.json"),
 				content: tsConfigContent,
@@ -468,6 +506,7 @@ interface RestManifestEntry {
 interface NestedTypeManifestEntry {
 	projection: string;
 	sdlFile: string;
+	sdlModule: string;
 }
 
 /**
@@ -480,10 +519,14 @@ interface NestedTypeManifestEntry {
 function generateNestedTypeEntries(
 	nestedOnly: ResolvedProjection[],
 ): NestedTypeManifestEntry[] {
-	return nestedOnly.map((projection) => ({
-		projection: projection.projectionModel.name,
-		sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,
-	}));
+	return nestedOnly.map((projection) => {
+		const sdlFile = `${toKebabCase(projection.projectionModel.name)}.graphql`;
+		return {
+			projection: projection.projectionModel.name,
+			sdlFile,
+			sdlModule: sdlModuleSpecifier(sdlFile),
+		};
+	});
 }
 
 function generateGraphQLManifest(
@@ -503,6 +546,10 @@ function generateGraphQLManifest(
 		// non-empty, lists GraphQL directives the consumer must attach to
 		// the Query field (e.g. AppSync auth modes); omitted entirely when
 		// no directives apply so unaffected manifests stay byte-identical.
+		// `resolverModule` / `functions[].module` / `sdlModule` (issue #1068) name
+		// the string-export module beside each file, so a consumer imports the
+		// code instead of resolving and reading the path in the `*File` field.
+		const sdlFile = `${toKebabCase(projection.projectionModel.name)}.graphql`;
 		return {
 			projection: projection.projectionModel.name,
 			indexName: projection.indexName,
@@ -512,10 +559,13 @@ function generateGraphQLManifest(
 				: {}),
 			mode: resolver.mode,
 			resolverFile: resolver.fileName,
-			sdlFile: `${toKebabCase(projection.projectionModel.name)}.graphql`,
+			resolverModule: resolverModuleSpecifier(resolver.fileName),
+			sdlFile,
+			sdlModule: sdlModuleSpecifier(sdlFile),
 			functions: resolver.functions.map((fn) => ({
 				name: fn.name,
 				file: fn.fileName,
+				module: resolverModuleSpecifier(fn.fileName),
 				dataSource: fn.dataSource,
 			})),
 		};
@@ -617,7 +667,10 @@ export const __test = {
 	validateResourcePathPrefix,
 };
 
-function generateTsConfig(projections: ResolvedProjection[]): string {
+function generateTsConfig(
+	projections: ResolvedProjection[],
+	stringModules: EmittedStringModule[] = [],
+): string {
 	const tsFiles: string[] = ["index.ts"];
 
 	for (const projection of projections) {
@@ -628,6 +681,12 @@ function generateTsConfig(projections: ResolvedProjection[]): string {
 			if (!tsFiles.includes(subFileName)) {
 				tsFiles.push(subFileName);
 			}
+		}
+	}
+
+	for (const module of stringModules) {
+		if (!tsFiles.includes(module.fileName)) {
+			tsFiles.push(module.fileName);
 		}
 	}
 
@@ -667,17 +726,36 @@ export default manifest;
  * `artifactFileNames` is the list emission recorded as it wrote each
  * consumer-facing artifact, so a subpath exists for exactly the files the
  * package ships — whatever shape the resolver emit chose (issue #184).
+ * `stringModules` is the same list for the string-export modules (issue
+ * #1068); each exports as an extensionless subpath resolving to the compiled
+ * `.js` next to the emitted `.ts`.
  */
 function generatePackageJson(
 	packageName: string,
 	packageVersion: string,
 	artifactFileNames: string[],
 	restOnly = false,
+	stringModules: EmittedStringModule[] = [],
 ): string {
 	const sorted = Object.fromEntries(
 		[...new Set(artifactFileNames)]
 			.sort((a, b) => a.localeCompare(b))
 			.map((fileName) => [`./${fileName}`, `./${fileName}`]),
+	);
+
+	const moduleExports = Object.fromEntries(
+		[...stringModules]
+			.sort((a, b) => a.moduleSpecifier.localeCompare(b.moduleSpecifier))
+			.map((module) => {
+				const compiled = module.fileName.replace(/\.ts$/, "");
+				return [
+					`./${module.moduleSpecifier}`,
+					{
+						types: `./${compiled}.d.ts`,
+						default: `./${compiled}.js`,
+					},
+				];
+			}),
 	);
 
 	// Rest-only package (issue #143): SDL / resolver / manifest artifacts only —
@@ -705,6 +783,7 @@ function generatePackageJson(
 				default: "./index.js",
 			},
 			...sorted,
+			...moduleExports,
 		},
 		scripts: {
 			prepare: "tsc",
