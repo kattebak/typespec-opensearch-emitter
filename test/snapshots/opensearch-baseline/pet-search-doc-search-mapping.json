@@ -74,6 +74,9 @@
           }
         }
       },
+      "categories": {
+        "type": "keyword"
+      },
       "nickname": {
         "type": "text",
         "fields": {

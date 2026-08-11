@@ -185,7 +185,9 @@ function renderScalar(scalar: Scalar): string {
 
 function renderModel(program: Program, model: Model, depth = 0): string {
 	if (model.name === "Array" && model.indexer?.value) {
-		return `${renderType(program, model.indexer.value, depth)}[]`;
+		const element = model.indexer.value;
+		const rendered = renderType(program, element, depth);
+		return rendersAsUnion(element) ? `(${rendered})[]` : `${rendered}[]`;
 	}
 
 	if (model.name === "Record" && model.indexer?.value) {
@@ -201,6 +203,23 @@ function renderModel(program: Program, model: Model, depth = 0): string {
 		}));
 
 	return renderBlock(program, searchableFields, depth + 1);
+}
+
+/**
+ * A union renders as `A | B`, which binds looser than the `[]` suffix, so an
+ * array of one needs parentheses to mean what was declared (issue #166).
+ */
+function rendersAsUnion(type: Type): boolean {
+	if (type.kind === "Enum") {
+		return type.members.size > 1;
+	}
+
+	if (type.kind === "Union") {
+		const variants = Array.from(type.variants.values());
+		return variants.length > 1 || variants.some((x) => rendersAsUnion(x.type));
+	}
+
+	return false;
 }
 
 function renderEnum(enumType: Enum): string {

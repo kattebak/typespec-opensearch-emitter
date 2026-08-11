@@ -68,7 +68,7 @@ function normalizeNode(node) {
 		let containers = [node];
 
 		for (const container of containers) {
-			for (const name of ["tags","aliases","approvals","bankAccountApprovals"]) {
+			for (const name of ["tags","aliases","categories","approvals","bankAccountApprovals"]) {
 				if (container[name] == null) container[name] = [];
 			}
 			for (const name of ["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]) {

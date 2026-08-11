@@ -95,6 +95,12 @@
           ]
         },
         {
+          "name": "categories",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
           "name": "nickname",
           "optional": true,
           "keyword": false,
@@ -206,6 +212,12 @@
             "terms",
             "cardinality"
           ]
+        },
+        {
+          "name": "categories",
+          "optional": false,
+          "keyword": false,
+          "nested": false
         },
         {
           "name": "nickname",
