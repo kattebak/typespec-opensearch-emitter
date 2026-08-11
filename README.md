@@ -337,7 +337,7 @@ In the example above:
 
 | TypeSpec type | TypeScript type |
 | --- | --- |
-| `string`, `plainDate`, `utcDateTime`, `offsetDateTime` | `string` |
+| `string`, `plainDate`, `utcDateTime`, `offsetDateTime`, `plainTime`, `duration` | `string` |
 | `int32`, `int64`, `float64`, etc. | `number` |
 | `boolean` | `boolean` |
 | `Model` (object) | inline `{ ... }` (searchable fields only) |
@@ -357,8 +357,24 @@ In the example above:
 | `boolean` | `boolean` |
 | `plainDate`, `utcDateTime` | `date` |
 | `offsetDateTime` | `date` with `format: strict_date_optional_time` |
+| `plainTime`, `duration` | `keyword` |
+| `bytes` | `binary` |
 | `Model` | `object` (with nested properties) |
 | `Model[]` + `@nested` | `nested` (with nested properties) |
+
+`plainTime` and `duration` are keyword rather than `date`: OpenSearch has no
+time-of-day or duration type, and `date` anchors both to an instant — it rejects
+`PT30M` at index time and pins `09:30:00` to 1970-01-01. Keyword indexes the
+ISO 8601 string as written, so `term`/`terms`/`exists` work and a zero-padded
+`plainTime` still sorts and ranges chronologically. Duration strings do not
+order lexicographically, so range and sort on a `duration` are meaningless.
+
+A type with no entry in this table fails the compile with
+`unsupported-scalar-type` or `unsupported-field-type`, naming the field. It used
+to emit as `object`, which OpenSearch rejects at index time and which silently
+drops every filter, sort and aggregation on the field. A custom scalar maps by
+what it extends (`scalar Money extends float64` → `double`), so declare a base
+rather than leaving it bare.
 
 ## Emitter options
 

@@ -110,6 +110,18 @@
           ]
         },
         {
+          "name": "feedingTime",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "walkDuration",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
           "name": "rank",
           "optional": false,
           "keyword": false,
@@ -227,6 +239,18 @@
           "aggregations": [
             "missing"
           ]
+        },
+        {
+          "name": "feedingTime",
+          "optional": false,
+          "keyword": false,
+          "nested": false
+        },
+        {
+          "name": "walkDuration",
+          "optional": false,
+          "keyword": false,
+          "nested": false
         },
         {
           "name": "rank",

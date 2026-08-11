@@ -1,4 +1,12 @@
-import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
+import {
+	type DiagnosticTarget,
+	type Model,
+	NoTarget,
+	type Program,
+	type Scalar,
+	type Type,
+	type Union,
+} from "@typespec/compiler";
 import {
 	getAnalyzer,
 	getBoost,
@@ -8,6 +16,7 @@ import {
 	isNested,
 	isSearchable,
 } from "./decorators.js";
+import { reportDiagnostic } from "./lib.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -21,6 +30,24 @@ export interface EmittedMappingFile {
 
 type MappingProperty = Record<string, unknown>;
 
+interface MappingOverride {
+	keyword?: boolean;
+	nested?: boolean;
+	analyzer?: string;
+	boost?: number;
+	ignoreAbove?: number;
+}
+
+/**
+ * Identifies the field a mapping is being built for, so an unmappable type
+ * reports a diagnostic naming the field rather than defaulting to "object".
+ */
+interface MappingContext {
+	program: Program;
+	field: string;
+	target: DiagnosticTarget | typeof NoTarget;
+}
+
 export function emitMapping(
 	program: Program,
 	projection: ResolvedProjection,
@@ -29,6 +56,7 @@ export function emitMapping(
 	const fileName = `${toKebabCase(projection.projectionModel.name)}-search-mapping.json`;
 	const properties = buildPropertiesFromFields(
 		program,
+		projection.projectionModel.name,
 		projection.fields,
 		defaultIgnoreAbove,
 	);
@@ -48,22 +76,16 @@ export function emitMapping(
 }
 
 function toMapping(
-	program: Program,
+	context: MappingContext,
 	type: Type,
-	override?: {
-		keyword?: boolean;
-		nested?: boolean;
-		analyzer?: string;
-		boost?: number;
-		ignoreAbove?: number;
-	},
+	override?: MappingOverride,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	switch (type.kind) {
 		case "Scalar":
-			return mapScalar(type, override, defaultIgnoreAbove);
+			return mapScalar(context, type, override, defaultIgnoreAbove);
 		case "Model":
-			return mapModel(program, type, override, defaultIgnoreAbove);
+			return mapModel(context, type, override, defaultIgnoreAbove);
 		case "String":
 			return mapString(override, defaultIgnoreAbove);
 		case "Number":
@@ -71,21 +93,21 @@ function toMapping(
 		case "Boolean":
 			return { type: "boolean" };
 		case "Union":
-			return mapUnion(program, type, override, defaultIgnoreAbove);
+			return mapUnion(context, type, override, defaultIgnoreAbove);
 		case "Enum":
 			return { type: "keyword" };
 		default:
+			reportDiagnostic(context.program, {
+				code: "unsupported-field-type",
+				format: { field: context.field, kind: type.kind },
+				target: context.target,
+			});
 			return { type: "object" };
 	}
 }
 
 function mapString(
-	override?: {
-		keyword?: boolean;
-		analyzer?: string;
-		boost?: number;
-		ignoreAbove?: number;
-	},
+	override?: MappingOverride,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	if (override?.keyword) {
@@ -115,13 +137,9 @@ function mapString(
 }
 
 function mapScalar(
+	context: MappingContext,
 	scalar: Scalar,
-	override?: {
-		keyword?: boolean;
-		analyzer?: string;
-		boost?: number;
-		ignoreAbove?: number;
-	},
+	override?: MappingOverride,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	let current: Scalar | undefined = scalar;
@@ -149,20 +167,38 @@ function mapScalar(
 				return { type: "double" };
 			case "boolean":
 				return { type: "boolean" };
+			// Base64 payload: stored, never indexed — which matches the empty
+			// filter/aggregation set @searchInfer gives bytes.
+			case "bytes":
+				return { type: "binary" };
 			case "utcDateTime":
 			case "plainDate":
 				return { type: "date" };
 			case "offsetDateTime":
 				return { type: "date", format: "strict_date_optional_time" };
+			// OpenSearch has no time-of-day or duration type, and `date` anchors
+			// both to an instant: it rejects "PT30M" outright and pins "09:30:00"
+			// to 1970-01-01. Keyword indexes the ISO 8601 string as written, so
+			// term/terms/exists work, and zero-padded plainTime still sorts and
+			// ranges chronologically. Issue #165.
+			case "plainTime":
+			case "duration":
+				return { type: "keyword" };
 		}
 		current = current.baseScalar;
 	}
 
+	reportDiagnostic(context.program, {
+		code: "unsupported-scalar-type",
+		format: { field: context.field, scalar: scalar.name },
+		target: context.target,
+	});
 	return { type: "object" };
 }
 
 function buildPropertiesFromFields(
 	program: Program,
+	path: string,
 	fields: ResolvedProjectionField[],
 	defaultIgnoreAbove?: number,
 ): Record<string, MappingProperty> {
@@ -170,9 +206,13 @@ function buildPropertiesFromFields(
 		fields.map((field) => [
 			field.projectedName ?? field.name,
 			field.subProjection
-				? mapSubProjectionField(program, field, defaultIgnoreAbove)
+				? mapSubProjectionField(program, path, field, defaultIgnoreAbove)
 				: toMapping(
-						program,
+						{
+							program,
+							field: `${path}.${field.name}`,
+							target: field.sourceProperty ?? NoTarget,
+						},
 						field.type,
 						{
 							// A filter-only / agg-only string field has no full-text-search
@@ -191,12 +231,14 @@ function buildPropertiesFromFields(
 
 function mapSubProjectionField(
 	program: Program,
+	path: string,
 	field: ResolvedProjectionField,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	const subProjection = field.subProjection!;
 	const properties = buildPropertiesFromFields(
 		program,
+		`${path}.${field.name}`,
 		subProjection.fields,
 		defaultIgnoreAbove,
 	);
@@ -207,15 +249,9 @@ function mapSubProjectionField(
 }
 
 function mapModel(
-	program: Program,
+	context: MappingContext,
 	model: Model,
-	override?: {
-		keyword?: boolean;
-		nested?: boolean;
-		analyzer?: string;
-		boost?: number;
-		ignoreAbove?: number;
-	},
+	override?: MappingOverride,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	if (model.name === "Array" && model.indexer?.value) {
@@ -224,7 +260,7 @@ function mapModel(
 			return {
 				type: override?.nested ? "nested" : "object",
 				properties: mapModelProperties(
-					program,
+					context,
 					elementType,
 					defaultIgnoreAbove,
 				),
@@ -233,34 +269,38 @@ function mapModel(
 		// An array maps as its element type, so the field's own directives
 		// apply to the element (filters and aggregations already address a
 		// @keyword array by its bare name). Issue #187.
-		return toMapping(program, elementType, override, defaultIgnoreAbove);
+		return toMapping(context, elementType, override, defaultIgnoreAbove);
 	}
 
 	return {
 		type: "object",
-		properties: mapModelProperties(program, model, defaultIgnoreAbove),
+		properties: mapModelProperties(context, model, defaultIgnoreAbove),
 	};
 }
 
 function mapModelProperties(
-	program: Program,
+	context: MappingContext,
 	model: Model,
 	defaultIgnoreAbove?: number,
 ): Record<string, MappingProperty> {
 	return Object.fromEntries(
 		Array.from(model.properties.values())
-			.filter((prop) => isSearchable(program, prop))
+			.filter((prop) => isSearchable(context.program, prop))
 			.map((prop) => [
-				getSearchAs(program, prop) ?? prop.name,
+				getSearchAs(context.program, prop) ?? prop.name,
 				toMapping(
-					program,
+					{
+						program: context.program,
+						field: `${context.field}.${prop.name}`,
+						target: prop,
+					},
 					prop.type,
 					{
-						keyword: isKeyword(program, prop),
-						nested: isNested(program, prop),
-						analyzer: getAnalyzer(program, prop),
-						boost: getBoost(program, prop),
-						ignoreAbove: getIgnoreAbove(program, prop),
+						keyword: isKeyword(context.program, prop),
+						nested: isNested(context.program, prop),
+						analyzer: getAnalyzer(context.program, prop),
+						boost: getBoost(context.program, prop),
+						ignoreAbove: getIgnoreAbove(context.program, prop),
 					},
 					defaultIgnoreAbove,
 				),
@@ -269,21 +309,22 @@ function mapModelProperties(
 }
 
 function mapUnion(
-	program: Program,
+	context: MappingContext,
 	union: Union,
-	override?: {
-		keyword?: boolean;
-		analyzer?: string;
-		boost?: number;
-		ignoreAbove?: number;
-	},
+	override?: MappingOverride,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	for (const variant of union.variants.values()) {
 		if (variant.type.kind === "Scalar" || variant.type.kind === "String") {
-			return toMapping(program, variant.type, override, defaultIgnoreAbove);
+			return toMapping(context, variant.type, override, defaultIgnoreAbove);
 		}
 	}
+	reportDiagnostic(context.program, {
+		code: "unsupported-field-type",
+		messageId: "union",
+		format: { field: context.field },
+		target: context.target,
+	});
 	return { type: "object" };
 }
 

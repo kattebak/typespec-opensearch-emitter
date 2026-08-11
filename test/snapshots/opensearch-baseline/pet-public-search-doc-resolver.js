@@ -67,7 +67,7 @@ function normalizeNode(node) {
 			for (const name of ["tags","aliases","categories","approvals","bankAccountApprovals"]) {
 				if (container[name] == null) container[name] = [];
 			}
-			for (const name of ["id","name","species","birthDate","createdAt","owner","rank","stock","score","active"]) {
+			for (const name of ["id","name","species","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"]) {
 				if (container[name] == null) return null;
 			}
 		}

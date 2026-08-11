@@ -42,6 +42,8 @@ model Pet {
 	// union before appending `[]`.
 	@searchable categories: PetCategory[];
 	@searchable @aggregatable("missing") @filterable("exists") nickname?: string;
+	@searchable feedingTime: plainTime;
+	@searchable walkDuration: duration;
 	@searchable @filterable("range") rank: int32;
 	@searchable stock: int64;
 	@searchable score: float64;

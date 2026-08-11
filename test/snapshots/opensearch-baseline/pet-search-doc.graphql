@@ -10,6 +10,8 @@ type PetSearchDoc {
   aliases: [String!]!
   categories: [String!]!
   nickname: String
+  feedingTime: String!
+  walkDuration: String!
   rank: Int!
   stock: Float!
   score: Float!
