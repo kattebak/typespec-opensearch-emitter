@@ -145,7 +145,7 @@ export function $keyword(
 	context: DecoratorContext,
 	target: ModelProperty,
 ): void {
-	if (!isStringType(target.type)) {
+	if (!isStringOrStringArrayType(target.type)) {
 		reportDiagnostic(context.program, {
 			code: "string-property-required",
 			target,
@@ -313,6 +313,19 @@ function isStringType(type: Type): boolean {
 	}
 
 	return current.kind === "Scalar" && current.name === "string";
+}
+
+function isStringOrStringArrayType(type: Type): boolean {
+	if (isStringType(type)) {
+		return true;
+	}
+
+	if (type.kind !== "Model" || type.name !== "Array") {
+		return false;
+	}
+
+	const elementType = type.indexer?.value;
+	return elementType !== undefined && isStringType(elementType);
 }
 
 function isArrayOfModelType(type: Type): boolean {

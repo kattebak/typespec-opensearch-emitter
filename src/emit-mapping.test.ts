@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import { __test, emitMapping } from "./emit-mapping.js";
+import { collectFilterables } from "./filters.js";
 import { resolveProjectionModel } from "./projection.js";
 import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
@@ -160,6 +161,126 @@ describe("mapping emitter", () => {
 			format: "strict_date_optional_time",
 		});
 		assert.deepEqual(parsed.mappings.properties.assignedAt, { type: "date" });
+	});
+
+	it("maps a @keyword array of strings as keyword", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Assignment {
+        @searchable @keyword @filterable("terms") assigneeIds: string[];
+      }
+
+      model AssignmentSearchDoc is SearchProjection<Assignment> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("AssignmentSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.assigneeIds, {
+			type: "keyword",
+		});
+
+		const [filterable] = collectFilterables(resolved);
+		assert.equal(
+			filterable.openSearchField,
+			"assigneeIds",
+			"the filter addresses the bare field name, so the mapping must be a real keyword",
+		);
+	});
+
+	it("maps a filter-only array of strings as keyword", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Assignment {
+        @filterable("terms") assigneeIds: string[];
+      }
+
+      model AssignmentSearchDoc is SearchProjection<Assignment> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("AssignmentSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.assigneeIds, {
+			type: "keyword",
+		});
+	});
+
+	it("applies @boost and @ignoreAbove to an array of strings", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @searchable aliases: string[];
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {
+        @boost(3) @ignoreAbove(64)
+        aliases: string[];
+      }
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.aliases, {
+			type: "text",
+			fields: { keyword: { type: "keyword", ignore_above: 64 } },
+			boost: 3,
+		});
+	});
+
+	it("maps a @keyword array on a sub-model property as keyword", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Owner {
+        @searchable @keyword handles: string[];
+      }
+
+      model Product {
+        @searchable owner: Owner;
+      }
+
+      model ProductSearchDoc is SearchProjection<Product> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ProductSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.owner.properties.handles, {
+			type: "keyword",
+		});
 	});
 
 	it("mapString without overrides returns text with keyword sub-field", () => {

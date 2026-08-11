@@ -209,7 +209,13 @@ function mapSubProjectionField(
 function mapModel(
 	program: Program,
 	model: Model,
-	override?: { nested?: boolean },
+	override?: {
+		keyword?: boolean;
+		nested?: boolean;
+		analyzer?: string;
+		boost?: number;
+		ignoreAbove?: number;
+	},
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
 	if (model.name === "Array" && model.indexer?.value) {
@@ -224,7 +230,10 @@ function mapModel(
 				),
 			};
 		}
-		return toMapping(program, elementType, undefined, defaultIgnoreAbove);
+		// An array maps as its element type, so the field's own directives
+		// apply to the element (filters and aggregations already address a
+		// @keyword array by its bare name). Issue #187.
+		return toMapping(program, elementType, override, defaultIgnoreAbove);
 	}
 
 	return {

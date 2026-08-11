@@ -259,7 +259,7 @@ In this example:
 | Decorator | Target | Effect | Example |
 | --- | --- | --- | --- |
 | `@searchable` | `ModelProperty` | Includes a property in projection resolution. | `@searchable name: string;` |
-| `@keyword` | `ModelProperty` (string) | Maps a string field as OpenSearch `keyword` instead of `text`. | `@searchable @keyword species: string;` |
+| `@keyword` | `ModelProperty` (string or string[]) | Maps a string field, or an array of strings, as OpenSearch `keyword` instead of `text`. | `@searchable @keyword species: string;` |
 | `@nested` | `ModelProperty` (Model[]) | Maps an array-of-model field as OpenSearch `nested` instead of `object`. | `@searchable @nested tags: Tag[];` |
 | `@analyzer("name")` | `ModelProperty` (string) | Sets the text analyzer in mapping output. | `@analyzer("edge_ngram") name: string;` |
 | `@boost(n)` | `ModelProperty` | Sets field boost factor in mapping output. Must be > 0. | `@boost(2.0) name: string;` |
@@ -350,6 +350,8 @@ In the example above:
 | --- | --- |
 | `string` | `text` (with `keyword` sub-field) |
 | `string` + `@keyword` | `keyword` |
+| `string[]` | `text` (with `keyword` sub-field) |
+| `string[]` + `@keyword` | `keyword` |
 | `int32`, `int64`, etc. | `long` |
 | `float32`, `float64`, etc. | `double` |
 | `boolean` | `boolean` |
