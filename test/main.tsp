@@ -22,6 +22,12 @@ model Tag {
 @graphqlDirectives("@aws_cognito_user_pools", "@aws_iam")
 model TagSearchDoc is SearchProjection<Tag> {}
 
+enum PetCategory {
+	Companion,
+	Working,
+	Exotic,
+}
+
 model Pet {
 	@searchable id: string;
 	@searchable name: string;
@@ -32,6 +38,9 @@ model Pet {
 	@searchable @nested tags: Tag[];
 	@searchable owner: Owner;
 	@searchable @aggregatable("terms", "cardinality") aliases: string[];
+	// Issue #166 — array of an enum. The doc type must parenthesize the member
+	// union before appending `[]`.
+	@searchable categories: PetCategory[];
 	@searchable @aggregatable("missing") @filterable("exists") nickname?: string;
 	@searchable @filterable("range") rank: int32;
 	@searchable stock: int64;

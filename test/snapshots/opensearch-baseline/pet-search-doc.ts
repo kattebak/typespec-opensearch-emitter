@@ -14,6 +14,7 @@ export interface PetSearchDoc {
 		name: string;
 	};
 	aliases: string[];
+	categories: ("Companion" | "Working" | "Exotic")[];
 	nickname?: string;
 	rank: number;
 	stock: number;

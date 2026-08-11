@@ -438,6 +438,81 @@ describe("doc type emitter", () => {
 		assert.ok(emitted.content.includes('priority: "low" | "medium" | "high";'));
 	});
 
+	it("parenthesizes an array of an enum so every member is an element type", async () => {
+		const emitted = await emitFor(
+			`
+			enum DataCategory { Pii, Financial, Sustainability }
+
+			model Artifact {
+				@searchable detectedCategories: DataCategory[];
+			}
+
+			model ArtifactSearchDoc is SearchProjection<Artifact> {}
+			`,
+			"ArtifactSearchDoc",
+		);
+
+		assert.ok(
+			emitted.content.includes(
+				'detectedCategories: ("Pii" | "Financial" | "Sustainability")[];',
+			),
+			emitted.content,
+		);
+	});
+
+	it("parenthesizes an array of a union", async () => {
+		const emitted = await emitFor(
+			`
+			union Mixed { string, int32 }
+
+			model Artifact {
+				@searchable values: Mixed[];
+			}
+
+			model ArtifactSearchDoc is SearchProjection<Artifact> {}
+			`,
+			"ArtifactSearchDoc",
+		);
+
+		assert.ok(
+			emitted.content.includes("values: (string | number)[];"),
+			emitted.content,
+		);
+	});
+
+	it("does not parenthesize an array of a scalar", async () => {
+		const emitted = await emitFor(
+			`
+			model Artifact {
+				@searchable aliases: string[];
+			}
+
+			model ArtifactSearchDoc is SearchProjection<Artifact> {}
+			`,
+			"ArtifactSearchDoc",
+		);
+
+		assert.ok(emitted.content.includes("aliases: string[];"), emitted.content);
+		assert.ok(!emitted.content.includes("(string)[]"));
+	});
+
+	it("does not parenthesize an array of a single-member enum", async () => {
+		const emitted = await emitFor(
+			`
+			enum Only { Single }
+
+			model Artifact {
+				@searchable kinds: Only[];
+			}
+
+			model ArtifactSearchDoc is SearchProjection<Artifact> {}
+			`,
+			"ArtifactSearchDoc",
+		);
+
+		assert.ok(emitted.content.includes('kinds: "Single"[];'), emitted.content);
+	});
+
 	it("uses @searchAs renamed property in TypeScript interface", async () => {
 		const emitted = await emitFor(
 			`

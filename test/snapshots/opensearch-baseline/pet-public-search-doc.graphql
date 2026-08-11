@@ -8,6 +8,7 @@ type PetPublicSearchDoc {
   tags: [Tag!]!
   owner: Owner!
   aliases: [String!]!
+  categories: [String!]!
   nickname: String
   rank: Int!
   stock: Float!
