@@ -765,6 +765,34 @@ describe("@searchInfer", () => {
 		assert.equal(byName("tags")?.sortable, false);
 	});
 
+	it("infers sortable and a range filter on offsetDateTime", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Assignment {
+        assignedAt: utcDateTime;
+        dueDate: offsetDateTime;
+      }
+      @searchInfer
+      model AssignmentSearchDoc is SearchProjection<Assignment> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("AssignmentSearchDoc");
+		assert.ok(projection);
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const dueDate = resolved.fields.find((f) => f.name === "dueDate");
+		assert.ok(dueDate);
+
+		assert.equal(dueDate.sortable, true);
+		assert.deepEqual(dueDate.filterables, ["range"]);
+		assert.deepEqual(dueDate.aggregations, [
+			{ kind: "date_histogram", options: { interval: "month" } },
+		]);
+	});
+
 	it("@sortable on a field is honored even without @searchInfer", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

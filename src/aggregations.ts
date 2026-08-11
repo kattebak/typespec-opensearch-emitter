@@ -4,6 +4,7 @@ import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
 } from "./projection.js";
+import { isDateScalarName } from "./utils.js";
 
 export interface AggregationEntry {
 	field: ResolvedProjectionField;
@@ -185,7 +186,7 @@ function isStringLikeType(type: ResolvedProjectionField["type"]): boolean {
 			if (current.name === "string") {
 				return true;
 			}
-			if (current.name === "plainDate" || current.name === "utcDateTime") {
+			if (isDateScalarName(current.name)) {
 				return false;
 			}
 			current = current.baseScalar;
@@ -201,7 +202,7 @@ function isStringLikeType(type: ResolvedProjectionField["type"]): boolean {
 			let current: typeof elementType | undefined = elementType;
 			while (current && current.kind === "Scalar") {
 				if (current.name === "string") return true;
-				if (current.name === "plainDate" || current.name === "utcDateTime") {
+				if (isDateScalarName(current.name)) {
 					return false;
 				}
 				current = current.baseScalar;

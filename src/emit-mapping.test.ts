@@ -128,6 +128,40 @@ describe("mapping emitter", () => {
 		});
 	});
 
+	it("maps offsetDateTime to a date field accepting an ISO 8601 offset", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Assignment {
+        @searchable assignedAt: utcDateTime;
+        @searchable dueDate: offsetDateTime;
+        @searchable reminderDates: offsetDateTime[];
+      }
+
+      model AssignmentSearchDoc is SearchProjection<Assignment> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("AssignmentSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.dueDate, {
+			type: "date",
+			format: "strict_date_optional_time",
+		});
+		assert.deepEqual(parsed.mappings.properties.reminderDates, {
+			type: "date",
+			format: "strict_date_optional_time",
+		});
+		assert.deepEqual(parsed.mappings.properties.assignedAt, { type: "date" });
+	});
+
 	it("mapString without overrides returns text with keyword sub-field", () => {
 		const result = __test.mapString();
 		assert.equal(result.type, "text");

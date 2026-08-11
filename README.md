@@ -279,7 +279,7 @@ Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical 
 
 | Field type | Default `@filterable` | Default `@aggregatable` | Default `@sortable` |
 | --- | --- | --- | --- |
-| `utcDateTime` / `plainDate` | `range` | `date_histogram(month)`, unbounded — see [Bounding a `date_histogram`](#bounding-a-date_histogram) | yes |
+| `utcDateTime` / `offsetDateTime` / `plainDate` | `range` | `date_histogram(month)`, unbounded — see [Bounding a `date_histogram`](#bounding-a-date_histogram) | yes |
 | `string` + `@keyword` | `term`, `terms`, `exists` | `terms` | yes |
 | free-text `string` (no `@keyword`) | (none) | (none) | no |
 | numeric (`int*`, `float*`, `decimal`, …) | `range` | `sum`, `avg`, `min`, `max` | yes |
@@ -337,7 +337,7 @@ In the example above:
 
 | TypeSpec type | TypeScript type |
 | --- | --- |
-| `string`, `plainDate`, `utcDateTime` | `string` |
+| `string`, `plainDate`, `utcDateTime`, `offsetDateTime` | `string` |
 | `int32`, `int64`, `float64`, etc. | `number` |
 | `boolean` | `boolean` |
 | `Model` (object) | inline `{ ... }` (searchable fields only) |
@@ -354,6 +354,7 @@ In the example above:
 | `float32`, `float64`, etc. | `double` |
 | `boolean` | `boolean` |
 | `plainDate`, `utcDateTime` | `date` |
+| `offsetDateTime` | `date` with `format: strict_date_optional_time` |
 | `Model` | `object` (with nested properties) |
 | `Model[]` + `@nested` | `nested` (with nested properties) |
 

@@ -43,6 +43,7 @@ function isReachable(
 }
 
 import { reportDiagnostic } from "./lib.js";
+import { isDateScalarName } from "./utils.js";
 
 export interface ResolvedProjectionField {
 	name: string;
@@ -332,7 +333,7 @@ interface InferredDirectives {
  * Type-driven defaults for fields on a `@searchInfer` model.
  *
  * Per issue #92's inference table:
- * - utcDateTime / plainDate → range filter, date_histogram(month) agg
+ * - utcDateTime / offsetDateTime / plainDate → range filter, date_histogram(month) agg
  * - string + @keyword → term/exists filter, terms agg
  * - free-text string (no @keyword) → none, none
  * - numeric → range filter, sum/avg/min/max aggs
@@ -368,7 +369,7 @@ function inferDirectives(
 	if (type.kind === "Scalar") {
 		const root = scalarRootName(type);
 		if (root === "boolean") return { filterables: ["term", "terms"] };
-		if (root === "utcDateTime" || root === "plainDate") {
+		if (isDateScalarName(root)) {
 			return {
 				filterables: ["range"],
 				aggregations: [
@@ -431,7 +432,7 @@ function isSortableType(
 		const root = scalarRootName(type);
 		if (!root) return false;
 		if (root === "boolean") return true;
-		if (root === "utcDateTime" || root === "plainDate") return true;
+		if (isDateScalarName(root)) return true;
 		if (isNumericRootName(root)) return true;
 		if (root === "string") return flags.keyword;
 	}
