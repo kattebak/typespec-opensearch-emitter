@@ -163,6 +163,221 @@ describe("mapping emitter", () => {
 		assert.deepEqual(parsed.mappings.properties.assignedAt, { type: "date" });
 	});
 
+	it("maps plainTime and duration as keyword, not date", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Shift {
+        @searchable startsAt: plainTime;
+        @searchable length: duration;
+        @searchable breaks: duration[];
+      }
+
+      model ShiftSearchDoc is SearchProjection<Shift> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ShiftSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.startsAt, { type: "keyword" });
+		assert.deepEqual(parsed.mappings.properties.length, { type: "keyword" });
+		assert.deepEqual(parsed.mappings.properties.breaks, { type: "keyword" });
+		assert.equal(
+			runner.program.diagnostics.length,
+			0,
+			"plainTime and duration are mapped, so nothing is reported",
+		);
+	});
+
+	it("maps bytes as binary", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Attachment {
+        @searchable payload: bytes;
+      }
+
+      model AttachmentSearchDoc is SearchProjection<Attachment> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("AttachmentSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.payload, { type: "binary" });
+	});
+
+	it("reports an unmapped scalar instead of emitting it as object", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      scalar Money;
+
+      model Order {
+        @searchable total: Money;
+      }
+
+      model OrderSearchDoc is SearchProjection<Order> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("OrderSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		emitMapping(runner.program, resolved);
+
+		const [reported] = runner.program.diagnostics;
+		assert.ok(reported, "an unmapped scalar must be reported");
+		assert.equal(
+			reported.code,
+			"@kattebak/typespec-opensearch-emitter/unsupported-scalar-type",
+		);
+		assert.equal(reported.severity, "error");
+		assert.match(reported.message, /Money/);
+		assert.match(reported.message, /OrderSearchDoc\.total/);
+	});
+
+	it("reports an unmapped scalar on a nested model property", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      scalar Money;
+
+      model Line {
+        @searchable amount: Money;
+      }
+
+      model Order {
+        @searchable line: Line;
+      }
+
+      model OrderSearchDoc is SearchProjection<Order> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("OrderSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		emitMapping(runner.program, resolved);
+
+		const [reported] = runner.program.diagnostics;
+		assert.ok(reported, "an unmapped scalar must be reported");
+		assert.match(reported.message, /OrderSearchDoc\.line\.amount/);
+	});
+
+	it("maps a custom scalar by the base scalar it extends", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      scalar Money extends float64;
+
+      model Order {
+        @searchable total: Money;
+      }
+
+      model OrderSearchDoc is SearchProjection<Order> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("OrderSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const emitted = emitMapping(runner.program, resolved);
+		const parsed = JSON.parse(emitted.content);
+
+		assert.deepEqual(parsed.mappings.properties.total, { type: "double" });
+		assert.equal(runner.program.diagnostics.length, 0);
+	});
+
+	it("reports a field whose type kind has no mapping", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Order {
+        @searchable span: [string, string];
+      }
+
+      model OrderSearchDoc is SearchProjection<Order> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("OrderSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		emitMapping(runner.program, resolved);
+
+		const [reported] = runner.program.diagnostics;
+		assert.ok(reported, "an unmappable type kind must be reported");
+		assert.equal(
+			reported.code,
+			"@kattebak/typespec-opensearch-emitter/unsupported-field-type",
+		);
+		assert.match(reported.message, /Tuple/);
+		assert.match(reported.message, /OrderSearchDoc\.span/);
+	});
+
+	it("reports a union with no scalar variant", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Cash {
+        @searchable iban: string;
+      }
+
+      model Card {
+        @searchable last4: string;
+      }
+
+      model Order {
+        @searchable method: Cash | Card;
+      }
+
+      model OrderSearchDoc is SearchProjection<Order> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("OrderSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		emitMapping(runner.program, resolved);
+
+		const [reported] = runner.program.diagnostics;
+		assert.ok(reported, "a union with no scalar variant must be reported");
+		assert.equal(
+			reported.code,
+			"@kattebak/typespec-opensearch-emitter/unsupported-field-type",
+		);
+		assert.match(reported.message, /OrderSearchDoc\.method/);
+	});
+
 	it("maps a @keyword array of strings as keyword", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

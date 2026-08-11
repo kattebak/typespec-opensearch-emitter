@@ -15,6 +15,8 @@ export interface PetPublicSearchDoc {
 	aliases: string[];
 	categories: ("Companion" | "Working" | "Exotic")[];
 	nickname?: string;
+	feedingTime: string;
+	walkDuration: string;
 	rank: number;
 	stock: number;
 	score: number;

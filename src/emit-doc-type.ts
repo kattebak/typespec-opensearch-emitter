@@ -158,6 +158,8 @@ function renderScalar(scalar: Scalar): string {
 		case "plainDate":
 		case "utcDateTime":
 		case "offsetDateTime":
+		case "plainTime":
+		case "duration":
 			return "string";
 		case "int32":
 		case "int64":

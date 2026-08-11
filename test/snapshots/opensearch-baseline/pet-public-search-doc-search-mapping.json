@@ -78,6 +78,12 @@
           }
         }
       },
+      "feedingTime": {
+        "type": "keyword"
+      },
+      "walkDuration": {
+        "type": "keyword"
+      },
       "rank": {
         "type": "long"
       },

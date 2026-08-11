@@ -187,6 +187,19 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Projection "${"name"}" needs ${"count"} pipeline functions after the resolver split, over AppSync's limit of 10 functions per pipeline resolver. Reduce the @filterable/@aggregatable surface, or split the projection into narrower documents.`,
 			},
 		},
+		"unsupported-scalar-type": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Field "${"field"}" has scalar type "${"scalar"}", which the OpenSearch mapping cannot express. Emitting it would map the field as "object", which OpenSearch rejects at index time and which silently drops every filter, sort and aggregation on the field. Use a scalar the emitter maps (string, the integer and float families, boolean, plainDate, utcDateTime, offsetDateTime, plainTime, duration), or declare the custom scalar as "scalar ${"scalar"} extends <supported>" so it inherits that mapping.`,
+			},
+		},
+		"unsupported-field-type": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Field "${"field"}" has type kind "${"kind"}", which the OpenSearch mapping cannot express. Emitting it would map the field as "object", which OpenSearch rejects at index time and which silently drops every filter, sort and aggregation on the field. Give the field a scalar, enum, model, array or union-of-scalars type.`,
+				union: paramMessage`Field "${"field"}" is a union with no scalar or string variant, so the OpenSearch mapping cannot express it. Emitting it would map the field as "object", which OpenSearch rejects at index time and which silently drops every filter, sort and aggregation on the field. Replace the union with a model whose members are optional, or with a union of scalars.`,
+			},
+		},
 		"searchfilter-name-collision": {
 			severity: "error",
 			messages: {
