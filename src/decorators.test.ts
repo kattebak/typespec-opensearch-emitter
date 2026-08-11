@@ -177,6 +177,38 @@ describe("decorators", () => {
 		assert.equal(hasDiagnosticCode(codes, "string-property-required"), true);
 	});
 
+	it("accepts keyword on an array of strings", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Assignment {
+        @searchable @keyword assigneeIds: string[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+
+		const assignment = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Assignment");
+		assert.ok(assignment);
+
+		const assigneeIds = assignment.properties.get("assigneeIds");
+		assert.ok(assigneeIds);
+		assert.equal(isKeyword(runner.program, assigneeIds), true);
+	});
+
+	it("emits diagnostic for keyword on an array of non-strings", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @keyword ranks: int32[];
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "string-property-required"), true);
+	});
+
 	it("emits diagnostic for invalid analyzer target", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`
