@@ -148,6 +148,7 @@ describe("doc type emitter", () => {
 				@searchable active: boolean;
 				@searchable created: plainDate;
 				@searchable updated: utcDateTime;
+				@searchable dueDate: offsetDateTime;
 			}
 
 			model WidgetSearchDoc is SearchProjection<Widget> {}
@@ -162,6 +163,7 @@ describe("doc type emitter", () => {
 		assert.ok(emitted.content.includes("\tactive: boolean;"));
 		assert.ok(emitted.content.includes("\tcreated: string;"));
 		assert.ok(emitted.content.includes("\tupdated: string;"));
+		assert.ok(emitted.content.includes("\tdueDate: string;"));
 	});
 
 	it("renders nested inline object with correct indentation", async () => {

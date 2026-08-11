@@ -157,6 +157,7 @@ function renderScalar(scalar: Scalar): string {
 		case "string":
 		case "plainDate":
 		case "utcDateTime":
+		case "offsetDateTime":
 			return "string";
 		case "int32":
 		case "int64":

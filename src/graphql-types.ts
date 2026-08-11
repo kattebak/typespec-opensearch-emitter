@@ -49,6 +49,7 @@ function scalarToGraphQL(scalar: Scalar, context: GraphQLEmitContext): string {
 			case "string":
 			case "plainDate":
 			case "utcDateTime":
+			case "offsetDateTime":
 				return "String";
 			case "int64":
 			case "uint64":

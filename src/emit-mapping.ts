@@ -152,6 +152,8 @@ function mapScalar(
 			case "utcDateTime":
 			case "plainDate":
 				return { type: "date" };
+			case "offsetDateTime":
+				return { type: "date", format: "strict_date_optional_time" };
 		}
 		current = current.baseScalar;
 	}
