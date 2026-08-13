@@ -144,6 +144,35 @@ describe("resolveRestOperation", () => {
 		);
 	});
 
+	it("resolves array-ness and explode for @query params", async () => {
+		const { resolved } = await resolveFixture(`
+      model Pet { petId: string; }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op listPets(
+          @query(#{ explode: true }) status?: string[],
+          @query tag?: string[],
+          @query(#{ explode: true }) name?: string,
+        ): Pet[];
+      }
+    `);
+
+		const [listPets] = resolved;
+		assert.deepEqual(
+			listPets.queryParams.map(({ name, array, explode }) => ({
+				name,
+				array,
+				explode,
+			})),
+			[
+				{ name: "status", array: true, explode: true },
+				{ name: "tag", array: true, explode: false },
+				{ name: "name", array: false, explode: true },
+			],
+		);
+	});
+
 	it("maps PUT/PATCH/DELETE to Mutation", async () => {
 		const { resolved } = await resolveFixture(`
       model Pet { petId: string; }

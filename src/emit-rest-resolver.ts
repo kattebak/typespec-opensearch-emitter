@@ -1,4 +1,4 @@
-import type { RestOperationShape } from "./rest-operations.js";
+import type { RestOperationShape, RestQueryParam } from "./rest-operations.js";
 
 /**
  * APPSYNC_JS resolver codegen for `@restResolver` operations (issue #134).
@@ -60,6 +60,7 @@ export function emitRestResolver(
 		"\treturn mapResponse(ctx);",
 		"}",
 		"",
+		...(needsQueryString(op) ? [renderQueryString(op), ""] : []),
 		renderMapResponse(options.errorMap),
 		"",
 	].join("\n");
@@ -90,15 +91,31 @@ function renderBaseHeaders(injectHeaders?: Record<string, string>): string {
 	return ["const BASE_HEADERS = (ctx) => ({", ...lines, "});"].join("\n");
 }
 
+/**
+ * `params.query` is a string→string map (AppSync HTTP data source reference),
+ * so it cannot hold a repeated key. An exploded array parameter therefore has
+ * to be serialized into the resourcePath's own query string instead.
+ */
+function needsQueryString(op: RestOperationShape): boolean {
+	return op.queryParams.some((param) => param.array && param.explode);
+}
+
+function queryValueExpression(param: RestQueryParam): string {
+	if (!param.array) return `ctx.args.${param.name}`;
+	return `ctx.args.${param.name}?.join(",")`;
+}
+
 function renderRequest(
 	op: RestOperationShape,
 	resourcePathPrefix?: string,
 ): string {
 	const paramsLines: string[] = ["\t\t\theaders: BASE_HEADERS(ctx),"];
-	if (op.queryParams.length > 0) {
+	if (op.queryParams.length > 0 && !needsQueryString(op)) {
 		paramsLines.push("\t\t\tquery: {");
 		for (const param of op.queryParams) {
-			paramsLines.push(`\t\t\t\t"${param.name}": ctx.args.${param.name},`);
+			paramsLines.push(
+				`\t\t\t\t"${param.name}": ${queryValueExpression(param)},`,
+			);
 		}
 		paramsLines.push("\t\t\t},");
 	}
@@ -135,14 +152,49 @@ function renderResourcePath(
 	resourcePathPrefix?: string,
 ): string {
 	const prefix = resourcePathPrefix ?? "";
+	const suffix = needsQueryString(op) ? "${queryString(ctx)}" : "";
 	if (op.pathParams.length === 0) {
-		return `"${prefix}${op.path}"`;
+		return suffix
+			? `\`${prefix}${op.path}${suffix}\``
+			: `"${prefix}${op.path}"`;
 	}
 	const interpolated = op.path.replace(
 		/\{([^}]+)\}/g,
 		(_match, name: string) => `\${util.urlEncode(ctx.args.${name})}`,
 	);
-	return `\`${prefix}${interpolated}\``;
+	return `\`${prefix}${interpolated}${suffix}\``;
+}
+
+/**
+ * Builds the resourcePath query string for operations carrying an exploded
+ * array parameter. Exploded arrays repeat the key, everything else contributes
+ * a single pair; absent optional args drop out. APPSYNC_JS has no
+ * `Array.isArray`, so the array/scalar split is decided here at emit time.
+ */
+function renderQueryString(op: RestOperationShape): string {
+	const appendLines = op.queryParams.map((param) =>
+		param.array && param.explode
+			? `\tappendEach(parts, "${param.name}", ctx.args.${param.name});`
+			: `\tappend(parts, "${param.name}", ${queryValueExpression(param)});`,
+	);
+
+	return [
+		"function queryString(ctx) {",
+		"\tconst parts = [];",
+		...appendLines,
+		'\treturn parts.length === 0 ? "" : `?${parts.join("&")}`;',
+		"}",
+		"",
+		"function append(parts, name, value) {",
+		"\tif (value === undefined || value === null) return;",
+		"\tparts.push(`${name}=${util.urlEncode(`${value}`)}`);",
+		"}",
+		"",
+		"function appendEach(parts, name, values) {",
+		"\tif (values === undefined || values === null) return;",
+		"\tfor (const value of values) append(parts, name, value);",
+		"}",
+	].join("\n");
 }
 
 /**
@@ -174,5 +226,6 @@ export const __test = {
 	renderBaseHeaders,
 	renderRequest,
 	renderResourcePath,
+	renderQueryString,
 	renderMapResponse,
 };

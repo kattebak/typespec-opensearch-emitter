@@ -28,4 +28,12 @@ namespace Pets {
 	@restResolver @get op getPet(@path petId: string): Pet;
 	@restResolver @post op createPet(@body input: CreatePetInput): Pet;
 	@restResolver @get op listPets(@query status?: string): Pet[];
+
+	@restResolver
+	@route("/search")
+	@get
+	op searchPets(
+		@query(#{ explode: true }) status?: PetStatus[],
+		@query(#{ explode: true }) name?: string,
+	): Pet[];
 }

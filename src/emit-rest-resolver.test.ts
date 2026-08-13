@@ -32,7 +32,24 @@ const listPets: RestOperationShape = {
 	httpMethod: "GET",
 	path: "/pets",
 	pathParams: [],
-	queryParams: [{ name: "status", optional: true }],
+	queryParams: [
+		{ name: "status", optional: true, array: false, explode: true },
+	],
+};
+
+const listPetsByStatuses: RestOperationShape = {
+	...listPets,
+	queryParams: [
+		{ name: "continuationToken", optional: true, array: false, explode: true },
+		{ name: "status", optional: true, array: true, explode: true },
+	],
+};
+
+const listPetsByCsvStatuses: RestOperationShape = {
+	...listPets,
+	queryParams: [
+		{ name: "status", optional: true, array: true, explode: false },
+	],
 };
 
 describe("restResolverFileName", () => {
@@ -83,6 +100,32 @@ describe("emitRestResolver request rendering", () => {
 		assert.ok(content.includes("query: {"));
 	});
 
+	it("keeps an exploded array param out of params.query", () => {
+		const { content } = emitRestResolver(listPetsByStatuses);
+		assert.ok(!content.includes("query: {"));
+		assert.ok(content.includes("params: { headers: BASE_HEADERS(ctx) }"));
+		assert.ok(content.includes("resourcePath: `/pets${queryString(ctx)}`"));
+	});
+
+	it("joins a non-exploded array param into a single params.query value", () => {
+		const { content } = emitRestResolver(listPetsByCsvStatuses);
+		assert.ok(content.includes('"status": ctx.args.status?.join(",")'));
+		assert.ok(!content.includes("queryString(ctx)"));
+	});
+
+	it("appends the query string after interpolated path params", () => {
+		const { content } = emitRestResolver({
+			...listPetsByStatuses,
+			path: "/owners/{ownerId}/pets",
+			pathParams: [{ name: "ownerId" }],
+		});
+		assert.ok(
+			content.includes(
+				"resourcePath: `/owners/${util.urlEncode(ctx.args.ownerId)}/pets${queryString(ctx)}`",
+			),
+		);
+	});
+
 	it("omits query and body blocks when neither is present", () => {
 		const { content } = emitRestResolver(getPet);
 		assert.ok(content.includes("params: { headers: BASE_HEADERS(ctx) }"));
@@ -111,6 +154,95 @@ describe("emitRestResolver request rendering", () => {
 	it("leaves resourcePath unchanged when no prefix given (issue #140)", () => {
 		const { content } = emitRestResolver(createPet);
 		assert.ok(content.includes('resourcePath: "/pets"'));
+	});
+});
+
+interface AppSyncUtil {
+	urlEncode(value: string): string;
+}
+
+interface HttpRequest {
+	method: string;
+	resourcePath: string;
+	params: { headers: Record<string, string>; query?: Record<string, unknown> };
+}
+
+type RequestFactory = (
+	util: AppSyncUtil,
+	ctx: { args: Record<string, unknown> },
+) => HttpRequest;
+
+function evaluateRequest(
+	op: RestOperationShape,
+	args: Record<string, unknown>,
+): HttpRequest {
+	const { content } = emitRestResolver(op);
+	const body = content
+		.replace('import { util } from "@aws-appsync/utils";', "")
+		.replaceAll("export function", "function");
+	const factory = new Function(
+		"util",
+		"ctx",
+		`${body}\nreturn request(ctx);`,
+	) as RequestFactory;
+
+	return factory(
+		{ urlEncode: (value) => encodeURIComponent(value).replaceAll("%20", "+") },
+		{ args },
+	);
+}
+
+describe("emitRestResolver array query params", () => {
+	it("repeats the key once per element of an exploded array", () => {
+		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
+			status: ["Available", "Pending"],
+		});
+		assert.equal(resourcePath, "/pets?status=Available&status=Pending");
+	});
+
+	it("url-encodes each element", () => {
+		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
+			status: ["a/b", "c d"],
+		});
+		assert.equal(resourcePath, "/pets?status=a%2Fb&status=c+d");
+	});
+
+	it("carries scalar params alongside the repeated key", () => {
+		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
+			continuationToken: "abc",
+			status: ["Sold"],
+		});
+		assert.equal(resourcePath, "/pets?continuationToken=abc&status=Sold");
+	});
+
+	it("drops absent optional params and emits no lone question mark", () => {
+		const request = evaluateRequest(listPetsByStatuses, {});
+		assert.equal(request.resourcePath, "/pets");
+		assert.equal(request.params.query, undefined);
+	});
+
+	it("emits nothing for an empty array", () => {
+		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
+			status: [],
+		});
+		assert.equal(resourcePath, "/pets");
+	});
+
+	it("comma-joins a non-exploded array into params.query", () => {
+		const { params, resourcePath } = evaluateRequest(listPetsByCsvStatuses, {
+			status: ["Available", "Pending"],
+		});
+		assert.equal(resourcePath, "/pets");
+		assert.deepEqual(params.query, { status: "Available,Pending" });
+	});
+
+	it("never puts an array into params.query", () => {
+		for (const op of [listPetsByStatuses, listPetsByCsvStatuses]) {
+			const { params } = evaluateRequest(op, { status: ["Available"] });
+			for (const value of Object.values(params.query ?? {})) {
+				assert.equal(typeof value, "string");
+			}
+		}
 	});
 });
 
@@ -203,8 +335,24 @@ describe("emitRestResolver error mapping", () => {
 });
 
 describe("emitRestResolver APPSYNC_JS validity", () => {
+	it("uses no runtime feature the APPSYNC_JS runtime lacks", () => {
+		const { content } = emitRestResolver(listPetsByStatuses);
+		for (const unsupported of ["Array.isArray", "try", "while", "throw"]) {
+			assert.ok(
+				!content.includes(unsupported),
+				`${unsupported} is not supported by APPSYNC_JS`,
+			);
+		}
+	});
+
 	it("emits no async/await and imports only @aws-appsync/utils", () => {
-		for (const op of [getPet, createPet, listPets]) {
+		for (const op of [
+			getPet,
+			createPet,
+			listPets,
+			listPetsByStatuses,
+			listPetsByCsvStatuses,
+		]) {
 			const { content } = emitRestResolver(op);
 			assert.ok(
 				content.startsWith('import { util } from "@aws-appsync/utils";'),

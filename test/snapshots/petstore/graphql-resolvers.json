@@ -29,6 +29,16 @@
       "mode": "monolithic",
       "resolverFile": "Query.listPets.js",
       "sdlFile": "pet.graphql"
+    },
+    {
+      "typeName": "Query",
+      "fieldName": "searchPets",
+      "dataSource": "HTTP",
+      "httpMethod": "GET",
+      "resourcePath": "/pets/search",
+      "mode": "monolithic",
+      "resolverFile": "Query.searchPets.js",
+      "sdlFile": "pet.graphql"
     }
   ]
 }

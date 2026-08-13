@@ -20,6 +20,7 @@ input CreatePetInput {
 type Query {
   getPet(petId: String!): Pet
   listPets(status: String): [Pet!]
+  searchPets(status: [PetStatus!], name: String): [Pet!]
 }
 
 type Mutation {
