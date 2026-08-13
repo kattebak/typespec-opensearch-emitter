@@ -28,6 +28,13 @@ export interface RestPathParam {
 export interface RestQueryParam {
 	name: string;
 	optional: boolean;
+	/** The parameter is array-typed, so it serializes to more than one value. */
+	array: boolean;
+	/**
+	 * RFC-6570 explode, as resolved by `@typespec/http`. An exploded array
+	 * repeats the key (`?s=a&s=b`); a non-exploded one joins on a comma.
+	 */
+	explode: boolean;
 	/** Source ModelProperty — used by the SDL emitter for arg typing. */
 	property?: ModelProperty;
 }
@@ -90,6 +97,14 @@ export function toRestGraphQLTypeName(verb: string): RestGraphQLTypeName {
 	return verb.toLowerCase() === "get" ? "Query" : "Mutation";
 }
 
+function isArrayType(type: Type): boolean {
+	return (
+		type.kind === "Model" &&
+		type.name === "Array" &&
+		type.indexer?.value !== undefined
+	);
+}
+
 export function resolveRestOperation(
 	program: Program,
 	operation: Operation,
@@ -105,6 +120,8 @@ export function resolveRestOperation(
 			queryParams.push({
 				name: parameter.name,
 				optional: parameter.param.optional,
+				array: isArrayType(parameter.param.type),
+				explode: parameter.explode,
 				property: parameter.param,
 			});
 		}

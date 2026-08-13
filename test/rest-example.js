@@ -62,6 +62,35 @@ test("resolver: query params land in params.query", async () => {
 	assert.ok(resolver.includes('"status": ctx.args.status'));
 });
 
+test("resolver: an exploded array param repeats its key in the resourcePath", async () => {
+	const resolver = await readFile(`${EMIT_DIR}/Query.searchPets.js`, "utf8");
+
+	assert.ok(!resolver.includes("query: {"));
+	assert.ok(
+		resolver.includes("resourcePath: `/pets/search${queryString(ctx)}`"),
+	);
+
+	const request = new Function(
+		"util",
+		"ctx",
+		`${resolver
+			.replace('import { util } from "@aws-appsync/utils";', "")
+			.replaceAll("export function", "function")}\nreturn request(ctx);`,
+	);
+	const { resourcePath } = request(
+		{ urlEncode: (value) => encodeURIComponent(value) },
+		{
+			args: { status: ["Available", "Sold"], name: "Rex" },
+			identity: { resolverContext: { userId: "u1" } },
+		},
+	);
+
+	assert.equal(
+		resourcePath,
+		"/pets/search?status=Available&status=Sold&name=Rex",
+	);
+});
+
 test("resolver: injectHeaders config expands into BASE_HEADERS", async () => {
 	const resolver = await readFile(`${EMIT_DIR}/Query.getPet.js`, "utf8");
 
@@ -76,7 +105,7 @@ test("manifest: REST entries carry typeName/httpMethod/resourcePath/dataSource, 
 		await readFile(`${EMIT_DIR}/graphql-resolvers.json`, "utf8"),
 	);
 
-	assert.equal(manifest.resolvers.length, 3);
+	assert.equal(manifest.resolvers.length, 4);
 
 	const getPet = manifest.resolvers.find((r) => r.fieldName === "getPet");
 	assert.deepEqual(getPet, {
@@ -105,6 +134,7 @@ test("generated resolvers contain no async or disallowed globals (APPSYNC_JS)", 
 		"Query.getPet.js",
 		"Query.listPets.js",
 		"Mutation.createPet.js",
+		"Query.searchPets.js",
 	]) {
 		const resolver = await readFile(`${EMIT_DIR}/${fileName}`, "utf8");
 		assert.ok(!resolver.includes("async "), `${fileName} uses async`);
