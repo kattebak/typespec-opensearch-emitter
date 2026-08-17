@@ -945,14 +945,6 @@ function renderDocumentLevelBlock(level: DocumentLevelSpec): string {
 	return `	if (!${NORMALIZE_FIELDS_HELPER}(${renderLevelFrontier(level)}, ${JSON.stringify(level.lists)}, ${JSON.stringify(level.values)})) return null;`;
 }
 
-function indentBlock(text: string, tabs: number): string {
-	const pad = "\t".repeat(tabs);
-	return text
-		.split("\n")
-		.map((line) => (line.length === 0 ? line : pad + line))
-		.join("\n");
-}
-
 /**
  * Response-side split (issue #179): a level's traversal always re-derives its
  * `containers` frontier from `node` (the hit's `_source`), never from a prior
