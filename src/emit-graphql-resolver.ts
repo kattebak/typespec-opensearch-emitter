@@ -227,6 +227,24 @@ function slotPoolLiteral(count: number): string {
  */
 const NORMALIZE_NODE_HELPER = "normalizeNode";
 
+/**
+ * Module-level helpers the emitted document walker calls per level: `ST` steps
+ * the container frontier down one path segment, `NF` fills absent lists and
+ * reports whether every required value is present.
+ *
+ * Both bodies are identical at every call site — only the segment name and the
+ * two field-name lists vary — so factoring them out replaces a ~25-line block
+ * per level with a one-line call, the same move AUTO_DATE_HISTOGRAM_HELPER and
+ * NESTED_TEXT_QUERY_HELPER make. It is deliberately *not* a spec table walked
+ * generically: APPSYNC_JS's static checker infers a single element type across
+ * a literal array's rows, and rows carrying different-shaped nested arrays (one
+ * level's path segments vs another's field lists) make it reject a later
+ * `container[key]` as an index type. Passing the varying parts as arguments to
+ * a fixed helper keeps every literal homogeneous and sidesteps that inference.
+ */
+const STEP_DOWN_HELPER = "ST";
+const NORMALIZE_FIELDS_HELPER = "NF";
+
 const UNREPRESENTABLE_DOCUMENT_ERROR_TYPE = "UnrepresentableDocumentError";
 
 export async function emitGraphQLResolver(
@@ -849,7 +867,7 @@ function renderNormalizeNodeHelper(levels: DocumentLevelSpec[]): string {
 
 	const levelBlocks = levels.map(renderDocumentLevelBlock).join("\n");
 
-	return `
+	return `${renderWalkerHelpers(levels)}
 function ${NORMALIZE_NODE_HELPER}(node) {
 	if (node == null) return null;
 ${levelBlocks}
@@ -858,23 +876,61 @@ ${levelBlocks}
 `;
 }
 
-function renderDocumentLevelBlock(level: DocumentLevelSpec): string {
-	const traversalBlocks = level.path
-		.map(([name]) => renderPathSegmentBlock(name))
-		.join("\n");
-
-	return `	{
-		let containers = [node];
-${traversalBlocks}
-		for (const container of containers) {
-			for (const name of ${JSON.stringify(level.lists)}) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of ${JSON.stringify(level.values)}) {
-				if (container[name] == null) return null;
+/**
+ * `ST`/`NF` declarations, shared by every emitted file that walks document
+ * levels. `NF` returns whether the level is representable rather than acting on
+ * it, because the two callers differ: the standalone walker returns `null` for
+ * the document, while the per-hit loop marks the hit and keeps going.
+ */
+function renderWalkerHelpers(levels: DocumentLevelSpec[]): string {
+	// A projection whose only level is the document root never steps down, so
+	// emitting ST there would be dead code in the deployed function.
+	const stepDown = levels.some((level) => level.path.length > 0)
+		? `
+function ${STEP_DOWN_HELPER}(containers, name) {
+	const next = [];
+	for (const container of containers) {
+		const value = container[name];
+		if (value != null) {
+			if (value.length !== undefined) {
+				for (const item of value) {
+					if (item != null) next.push(item);
+				}
+			} else {
+				next.push(value);
 			}
 		}
-	}`;
+	}
+	return next;
+}
+`
+		: "";
+
+	return `${stepDown}
+function ${NORMALIZE_FIELDS_HELPER}(containers, lists, values) {
+	for (const container of containers) {
+		for (const name of lists) {
+			if (container[name] == null) container[name] = [];
+		}
+		for (const name of values) {
+			if (container[name] == null) return false;
+		}
+	}
+	return true;
+}
+`;
+}
+
+function renderLevelFrontier(level: DocumentLevelSpec): string {
+	return level.path.reduce(
+		(expression, [name]) =>
+			`${STEP_DOWN_HELPER}(${expression}, ${JSON.stringify(name)})`,
+		"[node]",
+	);
+}
+
+function renderDocumentLevelBlock(level: DocumentLevelSpec): string {
+	return `	if (!${NORMALIZE_FIELDS_HELPER}(${renderLevelFrontier(level)}, ${JSON.stringify(level.lists)}, ${JSON.stringify(level.values)})) return null;`;
 }
 
 function indentBlock(text: string, tabs: number): string {
@@ -883,25 +939,6 @@ function indentBlock(text: string, tabs: number): string {
 		.split("\n")
 		.map((line) => (line.length === 0 ? line : pad + line))
 		.join("\n");
-}
-
-function renderPathSegmentBlock(name: string): string {
-	return `		{
-			const next = [];
-			for (const container of containers) {
-				const value = container[${JSON.stringify(name)}];
-				if (value != null) {
-					if (value.length !== undefined) {
-						for (const item of value) {
-							if (item != null) next.push(item);
-						}
-					} else {
-						next.push(value);
-					}
-				}
-			}
-			containers = next;
-		}`;
 }
 
 /**
@@ -921,22 +958,7 @@ function renderPathSegmentBlock(name: string): string {
  * returning out of the whole function.
  */
 function renderDocumentLevelBlockForHitLoop(level: DocumentLevelSpec): string {
-	const traversalBlocks = level.path
-		.map(([name]) => renderPathSegmentBlock(name))
-		.join("\n");
-
-	return `		{
-			let containers = [node];
-${traversalBlocks}
-			for (const container of containers) {
-				for (const name of ${JSON.stringify(level.lists)}) {
-					if (container[name] == null) container[name] = [];
-				}
-				for (const name of ${JSON.stringify(level.values)}) {
-					if (container[name] == null) invalid = true;
-				}
-			}
-		}`;
+	return `			if (!${NORMALIZE_FIELDS_HELPER}(${renderLevelFrontier(level)}, ${JSON.stringify(level.lists)}, ${JSON.stringify(level.values)})) invalid = true;`;
 }
 
 /**
@@ -951,10 +973,7 @@ function renderNormalizeFunction(
 	levels: DocumentLevelSpec[],
 	isFirst: boolean,
 ): string {
-	const levelBlocks = indentBlock(
-		levels.map(renderDocumentLevelBlockForHitLoop).join("\n"),
-		1,
-	);
+	const levelBlocks = levels.map(renderDocumentLevelBlockForHitLoop).join("\n");
 	const intake = isFirst
 		? `	const parsedBody = ctx.prev.result;
 	ctx.stash.parsedBody = parsedBody;
@@ -962,7 +981,7 @@ function renderNormalizeFunction(
 		: `	const hits = ctx.stash.parsedBody.hits.hits;`;
 
 	return `import { util } from "@aws-appsync/utils";
-
+${renderWalkerHelpers(levels)}
 export function request(ctx) {
 ${intake}
 	for (const hit of hits) {

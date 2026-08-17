@@ -4646,9 +4646,15 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 	// (one document level per nested part, all fields required/non-null)
 	// grows with `nestedCount`, isolating the response-side split from the
 	// request-side one covered by the issue #173 tests above.
+	// `keywordFields` keeps the sub-model fields out of the free-text collection,
+	// which is what lets a fixture grow the response walker without also growing
+	// the request side's TEXT_FIELDS/NESTED_TEXT_GROUPS literals. Required for
+	// the response-split tests: both sides otherwise scale with the same field
+	// count, and the request side overflows first.
 	function wideResponseProjection(
 		nestedCount: number,
 		fieldsPerSub: number,
+		keywordFields = false,
 	): ResolvedProjection {
 		const shapes = Array.from({ length: nestedCount }, (_, i) => `Part${i}`);
 		return makeProjection({
@@ -4663,7 +4669,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 						subProjection: makeSubProjection(
 							`${shape}SearchDoc`,
 							Array.from({ length: fieldsPerSub }, (_, j) =>
-								makeField({ name: `field${j}` }),
+								makeField({ name: `field${j}`, keyword: keywordFields }),
 							),
 						),
 						type: {
@@ -4686,6 +4692,26 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		].map((f) => ({ ...f, bytes: Buffer.byteLength(f.content, "utf-8") }));
 	}
 
+	// A shape wide enough that the response walker no longer fits the
+	// resolver-level file. Factoring each level's traversal into the ST/NF
+	// helpers made a level cost roughly one line instead of ~25, so the number
+	// of nested shapes barely moves the walker's size any more — the per-level
+	// required-field lists do. Hence wide sub-models rather than merely many.
+	const SPLIT_NESTED = 40;
+	const SPLIT_FIELDS = 80;
+
+	function responseSplitProjection(): ResolvedProjection {
+		return wideResponseProjection(SPLIT_NESTED, SPLIT_FIELDS, true);
+	}
+
+	// Every required field of one sub-model, so a document built from these is
+	// representable and only a deliberately-omitted field causes a drop.
+	function splitPartSource(): Record<string, unknown> {
+		return Object.fromEntries(
+			Array.from({ length: SPLIT_FIELDS }, (_, j) => [`field${j}`, `v${j}`]),
+		);
+	}
+
 	it("ships a single resolver-level file, unsplit, when the response walker fits under the threshold", async () => {
 		const result = await emitGraphQLResolver(
 			wideResponseProjection(20, 5),
@@ -4697,7 +4723,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 			result.functions.map((f) => f.name),
 			["prepare", "search"],
 		);
-		assert.ok(result.content.includes("let containers = [node];"));
+		assert.ok(result.content.includes("function NF("));
 		for (const file of allFiles(result)) {
 			assert.ok(
 				file.bytes <= 31_000,
@@ -4708,7 +4734,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 
 	it("splits the response walker across normalize functions when the resolver-level file exceeds the 31,000 B threshold", async () => {
 		const result = await emitGraphQLResolver(
-			wideResponseProjection(48, 5),
+			responseSplitProjection(),
 			forcePipeline,
 		);
 
@@ -4722,12 +4748,12 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 
 		// The resolver-level file no longer carries any walker code — that's
 		// the point of the split.
-		assert.ok(!result.content.includes("let containers = [node];"));
+		assert.ok(!result.content.includes("function NF("));
 		assert.ok(result.content.includes("ctx.stash.parsedBody"));
 		assert.ok(
 			result.functions
 				.filter((f) => f.name.startsWith("normalize"))
-				.every((f) => f.content.includes("let containers = [node];")),
+				.every((f) => f.content.includes("function NF(")),
 		);
 
 		for (const file of allFiles(result)) {
@@ -4763,7 +4789,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 
 	it("split resolver-level file and normalize functions pass @aws-appsync/eslint-plugin recommended config", async () => {
 		const result = await emitGraphQLResolver(
-			wideResponseProjection(48, 5),
+			responseSplitProjection(),
 			forcePipeline,
 		);
 		assert.ok(result.functions.some((f) => f.name.startsWith("normalize")));
@@ -4781,7 +4807,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 
 	it("split resolver-level file and normalize functions pass AppSync's APPSYNC_JS static check", async () => {
 		const result = await emitGraphQLResolver(
-			wideResponseProjection(48, 5),
+			responseSplitProjection(),
 			forcePipeline,
 		);
 		assert.ok(result.functions.some((f) => f.name.startsWith("normalize")));
@@ -4841,7 +4867,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 	}
 
 	it("split-mode response matches the monolithic path: same drops, same list defaults, same page", async () => {
-		const projection = wideResponseProjection(60, 2);
+		const projection = responseSplitProjection();
 		const split = await emitGraphQLResolver(projection, forcePipeline);
 		assert.ok(split.functions.some((f) => f.name.startsWith("normalize")));
 
@@ -4852,17 +4878,17 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		assert.equal(monolithic.mode, "monolithic");
 
 		function makeHit(id: string, opts: { dropWidget?: boolean } = {}) {
-			const parts: Record<string, unknown>[] = [];
-			for (let i = 0; i < 60; i++) {
-				parts.push({ field0: `v${i}`, field1: `w${i}` });
-			}
+			const parts = [splitPartSource()];
 			return {
 				_id: id,
 				sort: [id],
 				_source: {
 					widgetId: opts.dropWidget ? undefined : id,
 					...Object.fromEntries(
-						Array.from({ length: 60 }, (_, i) => [`part${i}s`, parts]),
+						Array.from({ length: SPLIT_NESTED }, (_, i) => [
+							`part${i}s`,
+							parts,
+						]),
 					),
 				},
 			};
@@ -4899,19 +4925,16 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 	// functions left, so it has to report what it drops on its own.
 	it("split mode reports the dropped document and discounts it from totalCount", async () => {
 		const split = await emitGraphQLResolver(
-			wideResponseProjection(60, 2),
+			responseSplitProjection(),
 			forcePipeline,
 		);
 		assert.ok(split.functions.some((f) => f.name.startsWith("normalize")));
 
-		const parts = Array.from({ length: 60 }, (_, i) => ({
-			field0: `v${i}`,
-			field1: `w${i}`,
-		}));
+		const parts = [splitPartSource()];
 		const source = (id: string | undefined) => ({
 			widgetId: id,
 			...Object.fromEntries(
-				Array.from({ length: 60 }, (_, i) => [`part${i}s`, parts]),
+				Array.from({ length: SPLIT_NESTED }, (_, i) => [`part${i}s`, parts]),
 			),
 		});
 		const osBody = {
@@ -4964,7 +4987,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 	// scenarios, then run the same document through both modes and require
 	// identical results.
 	function shapeDriftProjection(): ResolvedProjection {
-		const wide = wideResponseProjection(48, 5);
+		const wide = responseSplitProjection();
 		return {
 			...wide,
 			fields: [
@@ -5021,15 +5044,9 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 	}
 
 	function fillerSource(): Record<string, unknown> {
-		const item = {
-			field0: "v0",
-			field1: "v1",
-			field2: "v2",
-			field3: "v3",
-			field4: "v4",
-		};
+		const item = splitPartSource();
 		const source: Record<string, unknown> = {};
-		for (let i = 0; i < 48; i++) source[`part${i}s`] = [item];
+		for (let i = 0; i < SPLIT_NESTED; i++) source[`part${i}s`] = [item];
 		return source;
 	}
 

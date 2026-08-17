@@ -62,100 +62,40 @@ export function response(ctx) {
 	};
 }
 
+function ST(containers, name) {
+	const next = [];
+	for (const container of containers) {
+		const value = container[name];
+		if (value != null) {
+			if (value.length !== undefined) {
+				for (const item of value) {
+					if (item != null) next.push(item);
+				}
+			} else {
+				next.push(value);
+			}
+		}
+	}
+	return next;
+}
+
+function NF(containers, lists, values) {
+	for (const container of containers) {
+		for (const name of lists) {
+			if (container[name] == null) container[name] = [];
+		}
+		for (const name of values) {
+			if (container[name] == null) return false;
+		}
+	}
+	return true;
+}
+
 function normalizeNode(node) {
 	if (node == null) return null;
-	{
-		let containers = [node];
-
-		for (const container of containers) {
-			for (const name of ["tags","aliases","categories","approvals","bankAccountApprovals"]) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of ["id","name","species","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"]) {
-				if (container[name] == null) return null;
-			}
-		}
-	}
-	{
-		let containers = [node];
-		{
-			const next = [];
-			for (const container of containers) {
-				const value = container["tags"];
-				if (value != null) {
-					if (value.length !== undefined) {
-						for (const item of value) {
-							if (item != null) next.push(item);
-						}
-					} else {
-						next.push(value);
-					}
-				}
-			}
-			containers = next;
-		}
-		for (const container of containers) {
-			for (const name of []) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of ["name"]) {
-				if (container[name] == null) return null;
-			}
-		}
-	}
-	{
-		let containers = [node];
-		{
-			const next = [];
-			for (const container of containers) {
-				const value = container["approvals"];
-				if (value != null) {
-					if (value.length !== undefined) {
-						for (const item of value) {
-							if (item != null) next.push(item);
-						}
-					} else {
-						next.push(value);
-					}
-				}
-			}
-			containers = next;
-		}
-		for (const container of containers) {
-			for (const name of []) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of ["type","grantedBy"]) {
-				if (container[name] == null) return null;
-			}
-		}
-	}
-	{
-		let containers = [node];
-		{
-			const next = [];
-			for (const container of containers) {
-				const value = container["bankAccountApprovals"];
-				if (value != null) {
-					if (value.length !== undefined) {
-						for (const item of value) {
-							if (item != null) next.push(item);
-						}
-					} else {
-						next.push(value);
-					}
-				}
-			}
-			containers = next;
-		}
-		for (const container of containers) {
-			for (const name of []) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of ["accountId","approvedBy"]) {
-				if (container[name] == null) return null;
-			}
-		}
-	}
+	if (!NF([node], ["tags","aliases","categories","approvals","bankAccountApprovals"], ["id","name","species","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"])) return null;
+	if (!NF(ST([node], "tags"), [], ["name"])) return null;
+	if (!NF(ST([node], "approvals"), [], ["type","grantedBy"])) return null;
+	if (!NF(ST([node], "bankAccountApprovals"), [], ["accountId","approvedBy"])) return null;
 	return node;
 }

@@ -10,5 +10,8 @@ options:
       emit: true
       # Small enough to drive the request-side split (issue #173) and the
       # response-walker split (issue #179), so the emit covers the numbered
-      # prepare-query / prepare-aggs / normalize shapes.
-      monolithic-threshold-bytes: 4000
+      # prepare-query / prepare-aggs / normalize shapes. Lowered from 4000 once
+      # the walker's per-level blocks moved into the ST/NF helpers: the
+      # resolver-level file shrank past the old threshold and stopped producing
+      # a normalize function at all, leaving that shape uncovered.
+      monolithic-threshold-bytes: 3000

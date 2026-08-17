@@ -58,19 +58,20 @@ export function response(ctx) {
 	};
 }
 
-function normalizeNode(node) {
-	if (node == null) return null;
-	{
-		let containers = [node];
-
-		for (const container of containers) {
-			for (const name of ["tags","aliases","categories","approvals","bankAccountApprovals"]) {
-				if (container[name] == null) container[name] = [];
-			}
-			for (const name of ["id","name","species","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"]) {
-				if (container[name] == null) return null;
-			}
+function NF(containers, lists, values) {
+	for (const container of containers) {
+		for (const name of lists) {
+			if (container[name] == null) container[name] = [];
+		}
+		for (const name of values) {
+			if (container[name] == null) return false;
 		}
 	}
+	return true;
+}
+
+function normalizeNode(node) {
+	if (node == null) return null;
+	if (!NF([node], ["tags","aliases","categories","approvals","bankAccountApprovals"], ["id","name","species","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"])) return null;
 	return node;
 }
