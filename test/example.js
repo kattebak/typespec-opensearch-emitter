@@ -175,15 +175,17 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 
 	// FILTER_SPEC + applyFilterSpec live in the prepare function (pipeline
 	// split — issue #105). FILTER_SPEC entries use compact single-letter keys
-	// to fit under AppSync's 32 KB per-function code cap (issue #99). Range
-	// emits ONE entry per field; the four bound input lookups (Gte/Lte/Gt/Lt)
-	// are done at iteration time inside applyFilterSpec (issue #101).
+	// to fit under AppSync's 32 KB per-function code cap (issue #99). Leaf
+	// entries carry a base name plus ordered kind codes, so several kinds on one
+	// field share an entry and the walker re-derives each input name; range is
+	// the code "r", whose four bound lookups (Gte/Lte/Gt/Lt) happen at
+	// iteration time (issue #101).
 	assert.ok(prepare.includes("const FILTER_SPEC = ["));
 	assert.ok(prepare.includes("applyFilterSpec(FILTER_SPEC, searchFilter"));
 	assert.ok(prepare.includes('i:"tags"'));
 	assert.ok(prepare.includes('k:"nested"'));
 	assert.ok(prepare.includes('p:"tags"'));
-	assert.ok(prepare.includes('{i:"rank",k:"range"'));
+	assert.ok(prepare.includes('{b:"rank",f:"rank",k:"r"}'));
 	assert.ok(!prepare.includes('"rankGte"'));
 
 	// Issue #130 — analyzed-field filter kinds. The projection's `name` field
@@ -196,19 +198,15 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 
 	// (b) FILTER_SPEC targets the ANALYZED field (`name`), NOT `name.keyword` —
 	//     so the edge-ngram analyzer is exercised by the query (bypasses the
-	//     needsKeywordSuffix routing applied to term/terms/range).
-	assert.ok(prepare.includes('{i:"namePrefix",k:"prefix",f:"name"}'));
-	assert.ok(prepare.includes('{i:"nameMatch",k:"match",f:"name"}'));
+	//     needsKeywordSuffix routing applied to term/terms/range). prefix+match
+	//     share one entry because they share that path.
+	assert.ok(prepare.includes('{b:"name",f:"name",k:"pm"}'));
 	assert.ok(!prepare.includes('f:"name.keyword"'));
 
 	// (c) The resolver emits `prefix` / `match` OpenSearch queries (not a
 	//     `.keyword` term).
-	assert.ok(
-		prepare.includes("outFilters.push({ prefix: { [node.f]: value } })"),
-	);
-	assert.ok(
-		prepare.includes("outFilters.push({ match: { [node.f]: value } })"),
-	);
+	assert.ok(prepare.includes("outFilters.push({ prefix: { [node.f]: v } })"));
+	assert.ok(prepare.includes("outFilters.push({ match: { [node.f]: v } })"));
 });
 
 test("emits nested-aware aggregations on nested sub-projections", async () => {

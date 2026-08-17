@@ -800,7 +800,7 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				'{i:"counterpartyId",k:"term",f:"counterpartyId"}',
+				'{b:"counterpartyId",f:"counterpartyId",k:"t"}',
 			),
 			"FILTER_SPEC must carry the term filter for the non-searchable field (compact-key form)",
 		);
@@ -2296,13 +2296,15 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 		assert.ok(combinedContent(result).includes("const FILTER_SPEC = ["));
-		assert.ok(combinedContent(result).includes('"species"'));
-		assert.ok(combinedContent(result).includes('"speciesNot"'));
-		// Range now emits ONE FILTER_SPEC entry per field (#101); the
-		// resolver expands "rankGte"/"Lte"/"Gt"/"Lt" lookups at runtime.
+		// term + term_negate on one field share a spec entry: the base name plus
+		// the ordered kind codes, with the walker re-deriving "speciesNot".
 		assert.ok(
-			combinedContent(result).includes('{i:"rank",k:"range",f:"rank"}'),
+			combinedContent(result).includes('{b:"species",f:"species",k:"tn"}'),
 		);
+		assert.ok(!combinedContent(result).includes('"speciesNot"'));
+		// Range emits ONE entry per field (#101); the resolver expands
+		// "rankGte"/"Lte"/"Gt"/"Lt" lookups at runtime.
+		assert.ok(combinedContent(result).includes('{b:"rank",f:"rank",k:"r"}'));
 		assert.ok(!combinedContent(result).includes('"rankGte"'));
 	});
 
@@ -4192,16 +4194,21 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 		}));
 	}
 
-	// 20 rather than 18: sizing the walker's work-slot pools to the spec instead
-	// of a blanket 256 freed ~2.5 KB per function, so 18 nested shapes now fit a
-	// single prepare. The width that overflows is an artifact of what a function
-	// costs, not part of the contract — the contract is the escalation order.
+	// 40 rather than 18: spec-sized work-slot pools and grouped FILTER_SPEC
+	// leaves together more than doubled what one prepare function holds. The
+	// width that overflows is an artifact of what a function costs, not part of
+	// the contract — the contract is the escalation order these tests pin.
 	it("level 2: splits an over-cap prepare into prepare-query + prepare-aggs, both NONE, then search on OPENSEARCH", async () => {
-		const result = await emitGraphQLResolver(wideProjection(20), forcePipeline);
+		const result = await emitGraphQLResolver(wideProjection(40), forcePipeline);
 
 		assert.equal(result.mode, "pipeline");
+		// A projection this wide also overflows the response side, so a trailing
+		// normalize (issue #179) may follow `search`. What level 2 pins is the
+		// request-side shape and that `search` is the sole OPENSEARCH function.
 		assert.deepEqual(
-			result.functions.map((f) => ({ name: f.name, ds: f.dataSource })),
+			result.functions
+				.filter((f) => !f.name.startsWith("normalize"))
+				.map((f) => ({ name: f.name, ds: f.dataSource })),
 			[
 				{ name: "prepare-query", ds: "NONE" },
 				{ name: "prepare-aggs", ds: "NONE" },
@@ -4226,7 +4233,7 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 	});
 
 	it("level 3: partitions prepare-query across functions when the query workload alone overflows the cap", async () => {
-		const result = await emitGraphQLResolver(wideProjection(24), forcePipeline);
+		const result = await emitGraphQLResolver(wideProjection(52), forcePipeline);
 
 		assert.equal(result.mode, "pipeline");
 		const queryFns = result.functions.filter((f) =>
@@ -4254,19 +4261,28 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 			);
 			assert.ok(fn.content.includes("ctx.stash.filters"));
 		}
-		// Every NONE function precedes the single trailing OPENSEARCH search.
+		// Exactly one OPENSEARCH function; every prepare-* precedes it and every
+		// response-side normalize-* follows it.
+		const names = result.functions.map((f) => f.name);
 		const searchIndex = result.functions.findIndex(
 			(f) => f.dataSource === "OPENSEARCH",
 		);
-		assert.equal(searchIndex, result.functions.length - 1);
 		assert.equal(
 			result.functions.filter((f) => f.dataSource === "OPENSEARCH").length,
 			1,
 		);
+		assert.ok(
+			names.slice(0, searchIndex).every((n) => n.startsWith("prepare")),
+			`expected only prepare functions before search; got ${names.join(", ")}`,
+		);
+		assert.ok(
+			names.slice(searchIndex + 1).every((n) => n.startsWith("normalize")),
+			`expected only normalize functions after search; got ${names.join(", ")}`,
+		);
 	});
 
 	it("keeps every emitted function under the 32,768-byte AppSync cap for a wide projection", async () => {
-		for (const nestedCount of [18, 22, 26]) {
+		for (const nestedCount of [40, 52, 60]) {
 			const result = await emitGraphQLResolver(
 				wideProjection(nestedCount),
 				forcePipeline,
@@ -5872,5 +5888,155 @@ describe("applyFilterSpec work-slot sizing", () => {
 		// One `term` per level plus the root's — proof every frame got a slot.
 		const serialized = JSON.stringify(body);
 		assert.equal(serialized.split('"term"').length - 1, depth + 1);
+	});
+});
+
+describe("FILTER_SPEC leaf grouping", () => {
+	async function prepareOf(projection: ResolvedProjection): Promise<string> {
+		const result = await emitGraphQLResolver(projection, defaultOptions);
+		const prepare = result.functions.find((fn) => fn.name === "prepare");
+		assert.ok(prepare, "expected a prepare function");
+		return prepare.content;
+	}
+
+	it("collapses kinds sharing a field into one entry, ordered as declared", async () => {
+		const content = await prepareOf(
+			makeProjection({
+				name: "GroupedSearchDoc",
+				indexName: "grouped",
+				fields: [
+					makeField({
+						name: "code",
+						keyword: true,
+						filterables: ["term", "term_negate", "terms", "exists"],
+					}),
+				],
+			}),
+		);
+
+		assert.match(content, /\{b:"code",f:"code",k:"tnse"\}/);
+	});
+
+	it("splits analyzed kinds into their own entry — they target a different path", async () => {
+		const content = await prepareOf(
+			makeProjection({
+				name: "AnalyzedSearchDoc",
+				indexName: "analyzed",
+				fields: [
+					makeField({
+						name: "label",
+						filterables: ["term", "prefix", "match"],
+					}),
+				],
+			}),
+		);
+
+		// term routes to `.keyword`; prefix/match must hit the analyzed field.
+		assert.match(content, /\{b:"label",f:"label\.keyword",k:"t"\}/);
+		assert.match(content, /\{b:"label",f:"label",k:"pm"\}/);
+	});
+
+	it("translates every grouped kind to the same clause the ungrouped form did", async () => {
+		const content = await prepareOf(
+			makeProjection({
+				name: "AllKindsSearchDoc",
+				indexName: "allkinds",
+				fields: [
+					makeField({
+						name: "code",
+						keyword: true,
+						filterables: ["term", "term_negate", "terms", "exists"],
+					}),
+					makeField({
+						name: "label",
+						filterables: ["prefix", "match"],
+					}),
+					makeField({
+						name: "amount",
+						filterables: ["range"],
+						type: { kind: "Scalar", name: "float64" } as unknown as Type,
+					}),
+				],
+			}),
+		);
+
+		const body = evalRequestBody(
+			content,
+			{ selectionSetList: ["edges", "edges/node"] },
+			{
+				searchFilter: {
+					code: "a",
+					codeNot: "b",
+					codeIn: ["c", "d"],
+					codeExists: true,
+					labelPrefix: "pre",
+					labelMatch: "mat",
+					amountGte: 1,
+					amountLt: 9,
+				},
+			},
+		);
+
+		const bool = (body.query as { bool: Record<string, unknown> }).bool;
+		assert.deepEqual(bool.filter, [
+			{ term: { code: "a" } },
+			{ terms: { code: ["c", "d"] } },
+			{ exists: { field: "code" } },
+			{ prefix: { label: "pre" } },
+			{ match: { label: "mat" } },
+			{ range: { amount: { gte: 1, lt: 9 } } },
+		]);
+		assert.deepEqual(bool.must_not, [{ term: { code: "b" } }]);
+	});
+
+	it("sends exists:false to must_not, matching the ungrouped behaviour", async () => {
+		const content = await prepareOf(
+			makeProjection({
+				name: "ExistsFalseSearchDoc",
+				indexName: "existsfalse",
+				fields: [
+					makeField({ name: "code", keyword: true, filterables: ["exists"] }),
+				],
+			}),
+		);
+
+		const body = evalRequestBody(
+			content,
+			{ selectionSetList: ["edges", "edges/node"] },
+			{ searchFilter: { codeExists: false } },
+		);
+
+		const bool = (body.query as { bool: Record<string, unknown> }).bool;
+		assert.deepEqual(bool.must_not, [{ exists: { field: "code" } }]);
+	});
+
+	it("drops an empty terms list rather than emitting a match-nothing clause", async () => {
+		const content = await prepareOf(
+			makeProjection({
+				name: "EmptyTermsSearchDoc",
+				indexName: "emptyterms",
+				fields: [
+					makeField({ name: "code", keyword: true, filterables: ["terms"] }),
+				],
+			}),
+		);
+
+		const emptyList = evalRequestBody(
+			content,
+			{ selectionSetList: ["edges", "edges/node"] },
+			{ searchFilter: { codeIn: [] } },
+		);
+		assert.ok(!JSON.stringify(emptyList.query).includes("terms"));
+
+		// The positive case, so the assertion above cannot pass vacuously.
+		const populated = evalRequestBody(
+			content,
+			{ selectionSetList: ["edges", "edges/node"] },
+			{ searchFilter: { codeIn: ["a"] } },
+		);
+		assert.deepEqual(
+			(populated.query as { bool: { filter: unknown[] } }).bool.filter,
+			[{ terms: { code: ["a"] } }],
+		);
 	});
 });

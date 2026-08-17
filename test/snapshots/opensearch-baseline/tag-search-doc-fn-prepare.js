@@ -1,6 +1,6 @@
 import { util } from "@aws-appsync/utils";
 
-const FILTER_SPEC = [{i:"name",k:"term",f:"name"}, {i:"nameNot",k:"term_negate",f:"name"}, {i:"noteExists",k:"exists",f:"note.keyword"}];
+const FILTER_SPEC = [{b:"name",f:"name",k:"tn"}, {b:"note",f:"note.keyword",k:"e"}];
 
 const AGG_SPEC = [{n:"byName",a:{ terms: { field: "name", size: 10 } }}, {n:"uniqueNameCount",a:{ cardinality: { field: "name" } }}, {n:"missingNoteCount",a:{ missing: { field: "note.keyword" } }}];
 
@@ -207,26 +207,6 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 						};
 						procTail = procTail + 1;
 					}
-				} else if (node.k === "term") {
-					if (value != null) {
-						outFilters.push({ term: { [node.f]: value } });
-					}
-				} else if (node.k === "term_negate") {
-					if (value != null) {
-						outMustNots.push({ term: { [node.f]: value } });
-					}
-				} else if (node.k === "terms") {
-					if (value != null && value.length > 0) {
-						outFilters.push({ terms: { [node.f]: value } });
-					}
-				} else if (node.k === "exists") {
-					if (value != null) {
-						if (value === true) {
-							outFilters.push({ exists: { field: node.f } });
-						} else {
-							outMustNots.push({ exists: { field: node.f } });
-						}
-					}
 				} else if (node.k === "nested_exists") {
 					if (value != null) {
 						const nestedClause = {
@@ -238,36 +218,69 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 							outMustNots.push(nestedClause);
 						}
 					}
-				} else if (node.k === "range") {
-					const base = node.i;
-					const bounds = {};
-					let any = false;
-					if (input[base + "Gte"] != null) {
-						bounds.gte = input[base + "Gte"];
-						any = true;
-					}
-					if (input[base + "Lte"] != null) {
-						bounds.lte = input[base + "Lte"];
-						any = true;
-					}
-					if (input[base + "Gt"] != null) {
-						bounds.gt = input[base + "Gt"];
-						any = true;
-					}
-					if (input[base + "Lt"] != null) {
-						bounds.lt = input[base + "Lt"];
-						any = true;
-					}
-					if (any) {
-						outFilters.push({ range: { [node.f]: bounds } });
-					}
-				} else if (node.k === "prefix") {
-					if (value != null && value !== "") {
-						outFilters.push({ prefix: { [node.f]: value } });
-					}
-				} else if (node.k === "match") {
-					if (value != null && value !== "") {
-						outFilters.push({ match: { [node.f]: value } });
+				} else if (node.b !== undefined) {
+					// Grouped leaf: one entry per (base name, OpenSearch path), with
+					// node.k an ordered string of kind codes. Codes are expanded in
+					// declaration order so the clause order matches the schema.
+					const base = node.b;
+					for (const code of node.k.split("")) {
+						if (code === "t") {
+							const v = input[base];
+							if (v != null) {
+								outFilters.push({ term: { [node.f]: v } });
+							}
+						} else if (code === "n") {
+							const v = input[base + "Not"];
+							if (v != null) {
+								outMustNots.push({ term: { [node.f]: v } });
+							}
+						} else if (code === "s") {
+							const v = input[base + "In"];
+							if (v != null && v.length > 0) {
+								outFilters.push({ terms: { [node.f]: v } });
+							}
+						} else if (code === "e") {
+							const v = input[base + "Exists"];
+							if (v != null) {
+								if (v === true) {
+									outFilters.push({ exists: { field: node.f } });
+								} else {
+									outMustNots.push({ exists: { field: node.f } });
+								}
+							}
+						} else if (code === "p") {
+							const v = input[base + "Prefix"];
+							if (v != null && v !== "") {
+								outFilters.push({ prefix: { [node.f]: v } });
+							}
+						} else if (code === "m") {
+							const v = input[base + "Match"];
+							if (v != null && v !== "") {
+								outFilters.push({ match: { [node.f]: v } });
+							}
+						} else if (code === "r") {
+							const bounds = {};
+							let any = false;
+							if (input[base + "Gte"] != null) {
+								bounds.gte = input[base + "Gte"];
+								any = true;
+							}
+							if (input[base + "Lte"] != null) {
+								bounds.lte = input[base + "Lte"];
+								any = true;
+							}
+							if (input[base + "Gt"] != null) {
+								bounds.gt = input[base + "Gt"];
+								any = true;
+							}
+							if (input[base + "Lt"] != null) {
+								bounds.lt = input[base + "Lt"];
+								any = true;
+							}
+							if (any) {
+								outFilters.push({ range: { [node.f]: bounds } });
+							}
+						}
 					}
 				}
 			}

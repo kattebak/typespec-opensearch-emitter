@@ -31,6 +31,51 @@ export interface FilterableEntry {
 export const RANGE_BOUNDS = ["gte", "lte", "gt", "lt"] as const;
 export type RangeBound = (typeof RANGE_BOUNDS)[number];
 
+/**
+ * Suffix `filterInputFieldName` appends per kind. Kept beside it so the two
+ * cannot drift: the emitted FILTER_SPEC carries only the base name and lets the
+ * walker re-append these, which is what lets several kinds on one field share a
+ * single spec entry.
+ */
+const FILTER_KIND_SUFFIX: Record<FilterableKind, string> = {
+	term: "",
+	term_negate: "Not",
+	terms: "In",
+	exists: "Exists",
+	prefix: "Prefix",
+	match: "Match",
+	range: "",
+};
+
+/**
+ * Single-character kind codes used in the emitted FILTER_SPEC. Spelling the
+ * kinds out cost more than the field path itself on wide projections.
+ */
+export const FILTER_KIND_CODE: Record<FilterableKind, string> = {
+	term: "t",
+	term_negate: "n",
+	terms: "s",
+	exists: "e",
+	prefix: "p",
+	match: "m",
+	range: "r",
+};
+
+/**
+ * Reverses `filterInputFieldName`. Returns undefined when the name does not
+ * carry the kind's expected suffix, so the caller can fall back to emitting the
+ * name verbatim rather than emit a base the walker would rebuild incorrectly.
+ */
+export function filterInputBaseName(
+	inputName: string,
+	kind: FilterableKind,
+): string | undefined {
+	const suffix = FILTER_KIND_SUFFIX[kind];
+	if (suffix.length === 0) return inputName;
+	if (!inputName.endsWith(suffix)) return undefined;
+	return inputName.slice(0, inputName.length - suffix.length);
+}
+
 const RANGE_BOUND_SUFFIX: Record<RangeBound, string> = {
 	gte: "Gte",
 	lte: "Lte",

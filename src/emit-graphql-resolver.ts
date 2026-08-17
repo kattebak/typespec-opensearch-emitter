@@ -1,12 +1,15 @@
 import { type AggregationEntry, collectAggregations } from "./aggregations.js";
 import {
 	type DateHistogramOptions,
+	type FilterableKind,
 	supportsMinimumInterval,
 } from "./decorators.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
 import {
 	buildSearchFilterShape,
+	FILTER_KIND_CODE,
 	type FilterSpecNode,
+	filterInputBaseName,
 	type SearchFilterShape,
 } from "./filters.js";
 import type {
@@ -1382,26 +1385,6 @@ function renderApplyFilterSpecFunction(pools: {
 						};
 						procTail = procTail + 1;
 					}
-				} else if (node.k === "term") {
-					if (value != null) {
-						outFilters.push({ term: { [node.f]: value } });
-					}
-				} else if (node.k === "term_negate") {
-					if (value != null) {
-						outMustNots.push({ term: { [node.f]: value } });
-					}
-				} else if (node.k === "terms") {
-					if (value != null && value.length > 0) {
-						outFilters.push({ terms: { [node.f]: value } });
-					}
-				} else if (node.k === "exists") {
-					if (value != null) {
-						if (value === true) {
-							outFilters.push({ exists: { field: node.f } });
-						} else {
-							outMustNots.push({ exists: { field: node.f } });
-						}
-					}
 				} else if (node.k === "nested_exists") {
 					if (value != null) {
 						const nestedClause = {
@@ -1413,36 +1396,69 @@ function renderApplyFilterSpecFunction(pools: {
 							outMustNots.push(nestedClause);
 						}
 					}
-				} else if (node.k === "range") {
-					const base = node.i;
-					const bounds = {};
-					let any = false;
-					if (input[base + "Gte"] != null) {
-						bounds.gte = input[base + "Gte"];
-						any = true;
-					}
-					if (input[base + "Lte"] != null) {
-						bounds.lte = input[base + "Lte"];
-						any = true;
-					}
-					if (input[base + "Gt"] != null) {
-						bounds.gt = input[base + "Gt"];
-						any = true;
-					}
-					if (input[base + "Lt"] != null) {
-						bounds.lt = input[base + "Lt"];
-						any = true;
-					}
-					if (any) {
-						outFilters.push({ range: { [node.f]: bounds } });
-					}
-				} else if (node.k === "prefix") {
-					if (value != null && value !== "") {
-						outFilters.push({ prefix: { [node.f]: value } });
-					}
-				} else if (node.k === "match") {
-					if (value != null && value !== "") {
-						outFilters.push({ match: { [node.f]: value } });
+				} else if (node.b !== undefined) {
+					// Grouped leaf: one entry per (base name, OpenSearch path), with
+					// node.k an ordered string of kind codes. Codes are expanded in
+					// declaration order so the clause order matches the schema.
+					const base = node.b;
+					for (const code of node.k.split("")) {
+						if (code === "t") {
+							const v = input[base];
+							if (v != null) {
+								outFilters.push({ term: { [node.f]: v } });
+							}
+						} else if (code === "n") {
+							const v = input[base + "Not"];
+							if (v != null) {
+								outMustNots.push({ term: { [node.f]: v } });
+							}
+						} else if (code === "s") {
+							const v = input[base + "In"];
+							if (v != null && v.length > 0) {
+								outFilters.push({ terms: { [node.f]: v } });
+							}
+						} else if (code === "e") {
+							const v = input[base + "Exists"];
+							if (v != null) {
+								if (v === true) {
+									outFilters.push({ exists: { field: node.f } });
+								} else {
+									outMustNots.push({ exists: { field: node.f } });
+								}
+							}
+						} else if (code === "p") {
+							const v = input[base + "Prefix"];
+							if (v != null && v !== "") {
+								outFilters.push({ prefix: { [node.f]: v } });
+							}
+						} else if (code === "m") {
+							const v = input[base + "Match"];
+							if (v != null && v !== "") {
+								outFilters.push({ match: { [node.f]: v } });
+							}
+						} else if (code === "r") {
+							const bounds = {};
+							let any = false;
+							if (input[base + "Gte"] != null) {
+								bounds.gte = input[base + "Gte"];
+								any = true;
+							}
+							if (input[base + "Lte"] != null) {
+								bounds.lte = input[base + "Lte"];
+								any = true;
+							}
+							if (input[base + "Gt"] != null) {
+								bounds.gt = input[base + "Gt"];
+								any = true;
+							}
+							if (input[base + "Lt"] != null) {
+								bounds.lt = input[base + "Lt"];
+								any = true;
+							}
+							if (any) {
+								outFilters.push({ range: { [node.f]: bounds } });
+							}
+						}
 					}
 				}
 			}
@@ -2115,8 +2131,74 @@ function renderFilterSpecLiteral(shape: SearchFilterShape | undefined): string {
 	return stringifySpec(shape.nodes);
 }
 
+/**
+ * Leaf kinds whose input name is `base` + a fixed per-kind suffix, so several of
+ * them on one field collapse into a single spec entry carrying the base name,
+ * the OpenSearch path, and an ordered string of kind codes.
+ *
+ * Only a run of *consecutive* leaves sharing the same path collapses. Two
+ * things make that matter: `prefix`/`match` target the analyzed field while
+ * term/terms/exists target `.keyword`, so one field can produce two paths; and
+ * expanding codes in declaration order keeps the emitted clause order identical
+ * to the per-entry encoding, which keeps this change a pure size win rather than
+ * a query-shape change to re-verify.
+ */
+const COLLAPSIBLE_LEAF_KINDS = new Set<FilterSpecNode["kind"]>([
+	"term",
+	"term_negate",
+	"terms",
+	"exists",
+	"prefix",
+	"match",
+	"range",
+]);
+
+interface LeafGroup {
+	base: string;
+	field: string;
+	codes: string;
+}
+
+function collapsibleLeaf(node: FilterSpecNode): LeafGroup | undefined {
+	if (!COLLAPSIBLE_LEAF_KINDS.has(node.kind)) return undefined;
+	const kind = node.kind as FilterableKind;
+	const base = filterInputBaseName(node.inputName, kind);
+	if (base === undefined) return undefined;
+	return {
+		base,
+		field: node.field ?? "",
+		codes: FILTER_KIND_CODE[kind],
+	};
+}
+
 function stringifySpec(nodes: FilterSpecNode[]): string {
-	const items = nodes.map((node) => stringifyNode(node));
+	const items: string[] = [];
+	let group: LeafGroup | undefined;
+
+	const flush = () => {
+		if (!group) return;
+		items.push(
+			`{b:${JSON.stringify(group.base)},f:${JSON.stringify(group.field)},k:${JSON.stringify(group.codes)}}`,
+		);
+		group = undefined;
+	};
+
+	for (const node of nodes) {
+		const leaf = collapsibleLeaf(node);
+		if (!leaf) {
+			flush();
+			items.push(stringifyNode(node));
+			continue;
+		}
+		if (group && group.base === leaf.base && group.field === leaf.field) {
+			group.codes += leaf.codes;
+			continue;
+		}
+		flush();
+		group = leaf;
+	}
+	flush();
+
 	return `[${items.join(", ")}]`;
 }
 
@@ -2124,7 +2206,8 @@ function stringifyNode(node: FilterSpecNode): string {
 	// FILTER_SPEC entries use single-letter keys to keep wide projections
 	// under AppSync's 32 KB per-function code cap (issue #99). The reader is
 	// applyFilterSpec inside the emitted prepare function; keys must match there:
-	//   i = inputName, k = kind, f = field, p = path, c = children, b = bound.
+	//   i = inputName, k = kind, f = field, p = path, c = children,
+	//   b = leaf base name (grouped leaves only).
 	const i = JSON.stringify(node.inputName);
 	if (node.kind === "nested") {
 		const children = stringifySpec(node.children ?? []);
