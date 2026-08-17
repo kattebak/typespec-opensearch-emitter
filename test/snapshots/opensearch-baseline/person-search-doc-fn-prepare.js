@@ -1,5 +1,4 @@
 import { util } from "@aws-appsync/utils";
-
 const FILTER_SPEC = [{b:"id",f:"id",k:"tse"}, {i:"address",k:"object",c:[{b:"country",f:"address.country",k:"tse"}, {b:"city",f:"address.city",k:"tse"}]}];
 
 const AGG_SPEC = [{n:"byId",a:{ terms: { field: "id", size: 10 } }}, {n:"byCountry",a:{ terms: { field: "country", size: 10 } }}, {n:"byCity",a:{ terms: { field: "city", size: 10 } }}];

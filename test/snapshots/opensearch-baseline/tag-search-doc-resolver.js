@@ -1,5 +1,7 @@
 import { util } from "@aws-appsync/utils";
 
+const TB = (a) => (a?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count }));
+
 export function request(ctx) {
 	return {};
 }
@@ -46,7 +48,7 @@ export function response(ctx) {
 		edges,
 		totalCount: totalHits - droppedIds.length,
 		aggregations: {
-			byName: (_a.byName?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			byName: TB(_a.byName),
 			uniqueNameCount: _a.uniqueNameCount?.value ?? 0,
 			missingNoteCount: _a.missingNoteCount?.doc_count ?? 0,
 		},

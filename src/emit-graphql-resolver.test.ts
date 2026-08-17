@@ -1798,7 +1798,7 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				"byValidFromOverTime: (_a.byValidFromOverTime?.buckets ?? []).map((b) => ({ key: `${b.key_as_string ?? b.key}`, keyAsString: b.key_as_string ?? null, count: b.doc_count }))",
+				"byValidFromOverTime: DB(_a.byValidFromOverTime)",
 			),
 			"date_histogram response must use template-literal coercion (APPSYNC_JS forbids String()) and surface keyAsString",
 		);
@@ -1977,7 +1977,7 @@ describe("emitGraphQLResolver", () => {
 		);
 		assert.ok(
 			combinedContent(result).includes(
-				"byNotionalRange: (_a.byNotionalRange?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count }))",
+				"byNotionalRange: RB(_a.byNotionalRange)",
 			),
 		);
 	});
@@ -2168,9 +2168,7 @@ describe("emitGraphQLResolver", () => {
 		}
 
 		assert.ok(
-			combinedContent(result).includes(
-				"byTagName: (_a_tags.byTagName?.buckets ?? []).map",
-			),
+			combinedContent(result).includes("byTagName: TB(_a_tags.byTagName)"),
 		);
 		assert.ok(
 			combinedContent(result).includes(
@@ -2242,9 +2240,7 @@ describe("emitGraphQLResolver", () => {
 		const result = await emitGraphQLResolver(projection, defaultOptions);
 
 		assert.ok(combinedContent(result).includes("aggregations: {"));
-		assert.ok(
-			combinedContent(result).includes("byTag: (_a.byTag?.buckets ?? []).map"),
-		);
+		assert.ok(combinedContent(result).includes("byTag: TB(_a.byTag)"));
 		assert.ok(
 			combinedContent(result).includes(
 				"uniqueLocationCount: _a.uniqueLocationCount?.value ?? 0",

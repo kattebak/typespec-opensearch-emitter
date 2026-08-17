@@ -245,6 +245,18 @@ const NORMALIZE_NODE_HELPER = "normalizeNode";
 const STEP_DOWN_HELPER = "ST";
 const NORMALIZE_FIELDS_HELPER = "NF";
 
+/**
+ * Module-level helpers for the three bucket shapes whose response mapping is
+ * long and identical bar the aggregation it reads: plain terms, date_histogram
+ * and range. A wide `@searchInfer` projection declares dozens of these, and
+ * each inline `.map` costs ~60 bytes more than a call. The metric shapes
+ * (`?.value ?? null`) are already shorter than a call would be, so they stay
+ * inline. Same motivation as AUTO_DATE_HISTOGRAM_HELPER (issues #99, #105).
+ */
+const TERMS_BUCKETS_HELPER = "TB";
+const DATE_BUCKETS_HELPER = "DB";
+const RANGE_BUCKETS_HELPER = "RB";
+
 const UNREPRESENTABLE_DOCUMENT_ERROR_TYPE = "UnrepresentableDocumentError";
 
 export async function emitGraphQLResolver(
@@ -1063,7 +1075,7 @@ function renderSplitNormalizeResolver(
 	);
 
 	return `import { util } from "@aws-appsync/utils";
-
+${renderBucketHelpers(aggregations)}
 export function request(ctx) {
 	return {};
 }
@@ -1545,7 +1557,7 @@ function renderMonolithicResolver(
 	const totalCount = renderTotalCount(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
-
+${renderBucketHelpers(aggregations)}
 const FILTER_SPEC = ${filterSpecLiteral};
 ${aggSpecDeclaration}
 export function request(ctx) {
@@ -1662,7 +1674,7 @@ function renderResolver(
 	const totalCount = renderTotalCount(documentSpec);
 
 	return `import { util } from "@aws-appsync/utils";
-
+${renderBucketHelpers(aggregations)}
 export function request(ctx) {
 	return {};
 }
@@ -1723,7 +1735,6 @@ function renderPrepareFunction(
 	);
 
 	return `import { util } from "@aws-appsync/utils";
-
 const FILTER_SPEC = ${filterSpecLiteral};
 ${aggSpecDeclaration}
 export function request(ctx) {
@@ -2561,6 +2572,45 @@ function renderResponseAggregationsPreamble(
 	return lines.join("\n");
 }
 
+/**
+ * `TB`/`DB`/`RB` declarations for whichever bucket shapes the projection's
+ * aggregations actually use. A plain-terms agg is the common case by far; a
+ * projection with none of the three emits nothing here.
+ */
+function renderBucketHelpers(aggregations: AggregationEntry[]): string {
+	const usesPlainTerms = aggregations.some((entry) => {
+		if (entry.kind !== "terms") return false;
+		const opts = (entry.options ?? {}) as {
+			sub?: Record<string, unknown>;
+			topHits?: number;
+		};
+		const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
+		return Object.keys(opts.sub ?? {}).length === 0 && !hasTopHits;
+	});
+
+	const declarations: string[] = [];
+	if (usesPlainTerms) {
+		declarations.push(
+			`const ${TERMS_BUCKETS_HELPER} = (a) => (a?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count }));`,
+		);
+	}
+	if (aggregations.some((entry) => entry.kind === "date_histogram")) {
+		// Template-literal coercion only — APPSYNC_JS rejects String() at deploy
+		// time. Both forms are surfaced so callers can read the formatted date
+		// OpenSearch provides for calendar_interval.
+		declarations.push(
+			`const ${DATE_BUCKETS_HELPER} = (a) => (a?.buckets ?? []).map((b) => ({ key: \`\${b.key_as_string ?? b.key}\`, keyAsString: b.key_as_string ?? null, count: b.doc_count }));`,
+		);
+	}
+	if (aggregations.some((entry) => entry.kind === "range")) {
+		declarations.push(
+			`const ${RANGE_BUCKETS_HELPER} = (a) => (a?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count }));`,
+		);
+	}
+
+	return declarations.length === 0 ? "" : `\n${declarations.join("\n")}\n`;
+}
+
 function renderResponseAggregations(
 	aggregations: AggregationEntry[],
 	documentSpec: DocumentLevelSpec[],
@@ -2597,7 +2647,7 @@ function renderResponseAggregationLine(
 			const subEntries = Object.entries(opts.sub ?? {});
 			const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
 			if (subEntries.length === 0 && !hasTopHits) {
-				return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),`;
+				return `\t\t\t${entry.aggName}: ${TERMS_BUCKETS_HELPER}(${path}),`;
 			}
 			const subFields = subEntries
 				.map(([name]) => `, ${name}: b.${name}?.value ?? null`)
@@ -2621,9 +2671,9 @@ function renderResponseAggregationLine(
 			// deploy time, and the eslint-plugin doesn't flag global function
 			// calls. Both `key` and `keyAsString` are surfaced so callers can
 			// access the formatted-date form OS provides for calendar_interval.
-			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: \`\${b.key_as_string ?? b.key}\`, keyAsString: b.key_as_string ?? null, count: b.doc_count })),`;
+			return `\t\t\t${entry.aggName}: ${DATE_BUCKETS_HELPER}(${path}),`;
 		case "range":
-			return `\t\t\t${entry.aggName}: (${path}?.buckets ?? []).map((b) => ({ key: b.key, from: b.from ?? null, to: b.to ?? null, count: b.doc_count })),`;
+			return `\t\t\t${entry.aggName}: ${RANGE_BUCKETS_HELPER}(${path}),`;
 	}
 }
 

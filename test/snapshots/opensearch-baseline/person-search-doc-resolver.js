@@ -1,5 +1,7 @@
 import { util } from "@aws-appsync/utils";
 
+const TB = (a) => (a?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count }));
+
 export function request(ctx) {
 	return {};
 }
@@ -35,9 +37,9 @@ export function response(ctx) {
 		edges,
 		totalCount: totalHits,
 		aggregations: {
-			byId: (_a.byId?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
-			byCountry: (_a.byCountry?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
-			byCity: (_a.byCity?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			byId: TB(_a.byId),
+			byCountry: TB(_a.byCountry),
+			byCity: TB(_a.byCity),
 		},
 		pageInfo: {
 			hasNextPage,

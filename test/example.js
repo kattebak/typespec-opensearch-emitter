@@ -149,7 +149,7 @@ test("emits graphql aggregation types and resolver block", async () => {
 		),
 	);
 	assert.ok(resolver.includes("aggregations: {"));
-	assert.ok(resolver.includes("_a.byAlias?.buckets"));
+	assert.ok(resolver.includes("TB(_a.byAlias)"));
 });
 
 test("emits SearchFilter input with filterable kinds and nested sub-filter", async () => {
@@ -238,9 +238,7 @@ test("emits nested-aware aggregations on nested sub-projections", async () => {
 			`AGG_SPEC must include ${specEntry}`,
 		);
 	}
-	assert.ok(
-		resolver.includes("byTagName: (_a_tags.byTagName?.buckets ?? []).map"),
-	);
+	assert.ok(resolver.includes("byTagName: TB(_a_tags.byTagName)"));
 	assert.ok(
 		resolver.includes(
 			"uniqueTagNameCount: _a_tags.uniqueTagNameCount?.value ?? 0",

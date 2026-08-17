@@ -1,5 +1,4 @@
 import { util } from "@aws-appsync/utils";
-
 const FILTER_SPEC = [{b:"name",f:"name",k:"tn"}, {b:"note",f:"note.keyword",k:"e"}];
 
 const AGG_SPEC = [{n:"byName",a:{ terms: { field: "name", size: 10 } }}, {n:"uniqueNameCount",a:{ cardinality: { field: "name" } }}, {n:"missingNoteCount",a:{ missing: { field: "note.keyword" } }}];
