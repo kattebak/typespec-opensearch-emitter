@@ -154,11 +154,58 @@ const AUTO_DATE_HISTOGRAM_HELPER = "ADH";
  */
 const NESTED_TEXT_QUERY_HELPER = "NQ";
 
-// Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
+// Floor for the runtime applyFilterSpec walker's fixed-size work slot pools.
 // APPSYNC_JS does not honor self-extending Array iteration, so the emitted
-// function pre-allocates this many slots as a literal. Set well above any
-// realistic SearchFilter shape; runtime util.error fires if exceeded.
-const FILTER_WORK_SLOT_COUNT = 256;
+// function pre-allocates its slots as a literal. The exact requirement is
+// derivable from the spec being emitted (see countFilterWorkSlots), so the
+// pools are sized to it rather than to a blanket upper bound: a blanket 256
+// cost ~2.6 KB of literal `null,` in every emitted function against AppSync's
+// 32 KB cap, while the widest real shape needs 18. This floor only guards the
+// degenerate empty-spec case.
+const MIN_FILTER_WORK_SLOTS = 1;
+
+/**
+ * Exact work-slot requirement for a spec, matching what `applyFilterSpec`
+ * writes: every `nested`/`object` node takes one `procSlots` entry (plus the
+ * root's), and every `nested` node additionally takes one `finSlots` entry to
+ * carry its child clauses back up. Recursing the whole tree gives the worst
+ * case — an input selecting every filter at once.
+ */
+export function countFilterWorkSlots(nodes: FilterSpecNode[]): {
+	proc: number;
+	fin: number;
+} {
+	let proc = 0;
+	let fin = 0;
+	for (const node of nodes) {
+		if (node.kind !== "nested" && node.kind !== "object") continue;
+		proc += 1;
+		if (node.kind === "nested") fin += 1;
+		const child = countFilterWorkSlots(node.children ?? []);
+		proc += child.proc;
+		fin += child.fin;
+	}
+	return { proc, fin };
+}
+
+function renderSlotPools(nodes: FilterSpecNode[]): {
+	procLiteral: string;
+	finLiteral: string;
+} {
+	const { proc, fin } = countFilterWorkSlots(nodes);
+	return {
+		// +1 for the root frame the walker seeds into procSlots[0].
+		procLiteral: slotPoolLiteral(Math.max(proc + 1, MIN_FILTER_WORK_SLOTS)),
+		finLiteral: slotPoolLiteral(Math.max(fin, MIN_FILTER_WORK_SLOTS)),
+	};
+}
+
+// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small.
+// The walker never reads these init values; it gates work on the head < tail
+// FIFO indexes (real items are written into slots[tail] before tail advances).
+function slotPoolLiteral(count: number): string {
+	return `[${"null,".repeat(count).slice(0, -1)}]`;
+}
 
 /**
  * Module-level helper that reconciles a hit's `_source` with the SDL before it
@@ -1260,12 +1307,15 @@ function renderBuildSortFunction(): string {
  * and issues #99, #101, #105, #110 for why the walk uses fixed-size slot
  * pools instead of recursion or growable arrays (APPSYNC_JS constraints).
  */
-function renderApplyFilterSpecFunction(slotsLiteral: string): string {
+function renderApplyFilterSpecFunction(pools: {
+	procLiteral: string;
+	finLiteral: string;
+}): string {
 	return `function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
-	const procSlots = ${slotsLiteral};
-	const finSlots = ${slotsLiteral};
+	const procSlots = ${pools.procLiteral};
+	const finSlots = ${pools.finLiteral};
 	procSlots[0] = {
 		spec: rootSpec,
 		input: rootInput,
@@ -1444,9 +1494,10 @@ function renderMonolithicResolver(
 	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
 	const buildAggsFunction = renderBuildAggsFunction(aggregations, options);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
-	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 	const buildSortFunction = renderBuildSortFunction();
-	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
+	const applyFilterSpecFunction = renderApplyFilterSpecFunction(
+		renderSlotPools(searchFilterShape?.nodes ?? []),
+	);
 	const responseAggregationsPreamble =
 		renderResponseAggregationsPreamble(aggregations);
 	const responseAggregations = renderResponseAggregations(
@@ -1631,13 +1682,10 @@ function renderPrepareFunction(
 	const aggSpecDeclaration = renderAggSpecDeclaration(aggregations);
 	const buildAggsFunction = renderBuildAggsFunction(aggregations, options);
 	const filterSpecLiteral = renderFilterSpecLiteral(searchFilterShape);
-	// `null` (4 chars) instead of `undefined` (9 chars) keeps the literal small
-	// — saves ~5 bytes per slot. The walker never reads these init values; it
-	// gates work on the head < tail FIFO indexes (real items are written into
-	// slots[tail] before tail advances).
-	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
 	const buildSortFunction = renderBuildSortFunction();
-	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
+	const applyFilterSpecFunction = renderApplyFilterSpecFunction(
+		renderSlotPools(searchFilterShape?.nodes ?? []),
+	);
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -1764,8 +1812,9 @@ function renderQueryFunction(
 	options: ResolverOptions,
 ): string {
 	const filterSpecLiteral = stringifySpec(nodes);
-	const slotsLiteral = `[${"null,".repeat(FILTER_WORK_SLOT_COUNT).slice(0, -1)}]`;
-	const applyFilterSpecFunction = renderApplyFilterSpecFunction(slotsLiteral);
+	const applyFilterSpecFunction = renderApplyFilterSpecFunction(
+		renderSlotPools(nodes),
+	);
 
 	if (!isRoot) {
 		return `import { util } from "@aws-appsync/utils";

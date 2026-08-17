@@ -8,6 +8,7 @@ import ts from "typescript";
 import {
 	__test,
 	APPSYNC_FUNCTION_BYTE_LIMIT,
+	countFilterWorkSlots,
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
 	emitGraphQLResolver,
 	MIN_AUTO_DATE_HISTOGRAM_BUCKETS,
@@ -4191,8 +4192,12 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 		}));
 	}
 
+	// 20 rather than 18: sizing the walker's work-slot pools to the spec instead
+	// of a blanket 256 freed ~2.5 KB per function, so 18 nested shapes now fit a
+	// single prepare. The width that overflows is an artifact of what a function
+	// costs, not part of the contract — the contract is the escalation order.
 	it("level 2: splits an over-cap prepare into prepare-query + prepare-aggs, both NONE, then search on OPENSEARCH", async () => {
-		const result = await emitGraphQLResolver(wideProjection(18), forcePipeline);
+		const result = await emitGraphQLResolver(wideProjection(20), forcePipeline);
 
 		assert.equal(result.mode, "pipeline");
 		assert.deepEqual(
@@ -5728,5 +5733,144 @@ describe("stale-document tolerance", () => {
 
 		assert.ok(!result.content.includes("DOC_SPEC"));
 		assert.ok(result.content.includes("node: hit._source"));
+	});
+});
+
+describe("applyFilterSpec work-slot sizing", () => {
+	it("counts one proc slot per nested/object node and one fin slot per nested", () => {
+		assert.deepEqual(countFilterWorkSlots([]), { proc: 0, fin: 0 });
+
+		assert.deepEqual(
+			countFilterWorkSlots([
+				{ inputName: "a", kind: "term", field: "a" },
+				{ inputName: "aExists", kind: "exists", field: "a" },
+			]),
+			{ proc: 0, fin: 0 },
+		);
+
+		assert.deepEqual(
+			countFilterWorkSlots([
+				{
+					inputName: "tags",
+					kind: "nested",
+					path: "tags",
+					children: [
+						{ inputName: "name", kind: "term", field: "tags.name" },
+						{
+							inputName: "owner",
+							kind: "object",
+							children: [
+								{ inputName: "city", kind: "term", field: "tags.owner.city" },
+							],
+						},
+					],
+				},
+				{ inputName: "site", kind: "object", children: [] },
+			]),
+			{ proc: 3, fin: 1 },
+		);
+	});
+
+	it("sizes the emitted pools to the spec rather than a blanket bound", async () => {
+		const result = await emitGraphQLResolver(
+			makeProjection({
+				name: "SlimSearchDoc",
+				indexName: "slim",
+				fields: [
+					makeField({
+						name: "slimId",
+						keyword: true,
+						filterables: ["term", "terms", "exists"],
+					}),
+				],
+			}),
+			defaultOptions,
+		);
+
+		const prepare = result.functions.find((fn) => fn.name === "prepare");
+		assert.ok(prepare, "expected a prepare function");
+		// No nested/object node, so the root frame is the only work slot.
+		assert.match(prepare.content, /const procSlots = \[null\];/);
+		assert.match(prepare.content, /const finSlots = \[null\];/);
+	});
+
+	it("gives a deeply nested filter enough slots to translate every clause at once", async () => {
+		const depth = 6;
+		let sub = {
+			projectionModel: { name: "Level6SearchDoc" },
+			sourceModel: { name: "Level6" },
+			indexName: "level6",
+			fields: [
+				makeField({ name: "code", keyword: true, filterables: ["term"] }),
+			],
+		} as unknown as ResolvedProjection;
+
+		for (let level = depth - 1; level >= 1; level -= 1) {
+			sub = {
+				projectionModel: { name: `Level${level}SearchDoc` },
+				sourceModel: { name: `Level${level}` },
+				indexName: `level${level}`,
+				fields: [
+					makeField({ name: "code", keyword: true, filterables: ["term"] }),
+					makeField({
+						name: "children",
+						nested: true,
+						subProjection: sub,
+						filterables: ["exists"],
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				],
+			} as unknown as ResolvedProjection;
+		}
+
+		const result = await emitGraphQLResolver(
+			makeProjection({
+				name: "DeepSearchDoc",
+				indexName: "deep",
+				fields: [
+					makeField({ name: "code", keyword: true, filterables: ["term"] }),
+					makeField({
+						name: "children",
+						nested: true,
+						subProjection: sub,
+						filterables: ["exists"],
+						type: {
+							kind: "Model",
+							name: "Array",
+							indexer: { value: { kind: "Model" } },
+						} as unknown as Type,
+					}),
+				],
+			}),
+			defaultOptions,
+		);
+
+		// Every level supplies its own clause, so the walker needs a slot per
+		// level simultaneously — the case a too-tight pool would util.error on.
+		let searchFilter: Record<string, unknown> = { code: "leaf" };
+		for (let level = 0; level < depth; level += 1) {
+			searchFilter = {
+				code: `l${level}`,
+				childrenExists: true,
+				children: searchFilter,
+			};
+		}
+
+		const prepare = result.functions.find((fn) => fn.name === "prepare");
+		assert.ok(prepare, "expected a prepare function");
+
+		const body = evalRequestBody(
+			prepare.content,
+			{ selectionSetList: ["edges", "edges/node"] },
+			{ searchFilter },
+		);
+
+		// One `term` per level plus the root's — proof every frame got a slot.
+		const serialized = JSON.stringify(body);
+		assert.equal(serialized.split('"term"').length - 1, depth + 1);
 	});
 });
