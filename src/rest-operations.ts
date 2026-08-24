@@ -8,6 +8,10 @@ import type {
 } from "@typespec/compiler";
 import { getHttpOperation } from "@typespec/http";
 import { isRestResolver } from "./decorators.js";
+import {
+	type ResolvableByManifestEntry,
+	toResolvableByManifestEntry,
+} from "./joins.js";
 
 /**
  * Discovery + resolution for `@restResolver` operations (issue #134). This is
@@ -64,6 +68,11 @@ export interface ResolvedRestOperation extends RestOperationShape {
 	bodyModel?: Model;
 	/** The operation's declared return type. */
 	returnType: Type;
+	/**
+	 * Set when the operation reads a model carrying `@resolvableBy` — the read
+	 * a cross-domain join runs against (issue #194).
+	 */
+	resolvableBy?: ResolvableByManifestEntry;
 }
 
 export function collectRestOperations(
@@ -136,9 +145,16 @@ export function resolveRestOperation(
 		? (body?.property?.name ?? "input")
 		: undefined;
 
+	const typeName = toRestGraphQLTypeName(httpOperation.verb);
+	const readModel =
+		typeName === "Query" ? unwrapReadModel(operation.returnType) : undefined;
+	const resolvableBy = readModel
+		? toResolvableByManifestEntry(program, readModel)
+		: undefined;
+
 	return {
 		fieldName: operation.name,
-		typeName: toRestGraphQLTypeName(httpOperation.verb),
+		typeName,
 		httpMethod: httpOperation.verb.toUpperCase(),
 		path: httpOperation.path,
 		pathParams,
@@ -146,6 +162,22 @@ export function resolveRestOperation(
 		bodyParamName,
 		bodyModel,
 		returnType: operation.returnType,
+		...(resolvableBy ? { resolvableBy } : {}),
 		operation,
 	};
+}
+
+/**
+ * The model a read operation returns, single or as an array — the entity whose
+ * `@resolvableBy` declaration, if any, the operation serves.
+ */
+function unwrapReadModel(returnType: Type): Model | undefined {
+	if (returnType.kind !== "Model") {
+		return undefined;
+	}
+	if (returnType.name === "Array") {
+		const element = returnType.indexer?.value;
+		return element?.kind === "Model" ? element : undefined;
+	}
+	return returnType;
 }

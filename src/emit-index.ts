@@ -1,4 +1,8 @@
 import { collectSubProjections, toDocTypeFileName } from "./emit-doc-type.js";
+import {
+	toJoinResolverFileName,
+	toJoinResolverInterfaceName,
+} from "./emit-join-resolver.js";
 import type { ResolvedProjection, TopLevelProjection } from "./projection.js";
 
 export interface EmittedIndexFile {
@@ -51,6 +55,14 @@ export function emitIndex(projections: TopLevelProjection[]): EmittedIndexFile {
 		lines.push(
 			`export const ${toIndexConstantName(projection.projectionModel.name)} = "${projection.indexName}";`,
 		);
+		if (projection.joins && projection.joins.length > 0) {
+			const joinResolverFile = toJoinResolverFileName(
+				projection.projectionModel.name,
+			).replace(/\.ts$/, ".js");
+			lines.push(
+				`export type { ${toJoinResolverInterfaceName(projection.projectionModel.name)} } from "./${joinResolverFile}";`,
+			);
+		}
 	}
 
 	return {

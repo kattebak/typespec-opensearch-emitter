@@ -9,6 +9,7 @@ import {
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
+	getJoinDependencies,
 	getSearchAs,
 	hasAggregatable,
 	hasFilterable,
@@ -42,6 +43,7 @@ function isReachable(
 	return !!typeModel && isSearchInfer(program, typeModel);
 }
 
+import type { ResolvedJoinDependency } from "./joins.js";
 import { reportDiagnostic } from "./lib.js";
 import { isDateScalarName } from "./utils.js";
 
@@ -64,6 +66,41 @@ export interface ResolvedProjectionField {
 	subProjection?: ResolvedProjection;
 }
 
+/**
+ * True when the projection field is filled by a declared join rather than by
+ * the source model — its type is a joined entity, or a projection of one
+ * (issue #194). Composition of the joined value into the document lands with
+ * the join emitter.
+ */
+function isJoinProvidedField(
+	program: Program,
+	projectionModel: Model,
+	fieldType: Type,
+): boolean {
+	const declarations = getJoinDependencies(program, projectionModel);
+	if (declarations.length === 0) {
+		return false;
+	}
+
+	const joined = unwrapJoinedType(fieldType);
+	if (joined?.kind !== "Model") {
+		return false;
+	}
+
+	const joinedSource = getProjectionSourceModel(program, joined);
+	return declarations.some(
+		(declaration) =>
+			declaration.entity === joined || declaration.entity === joinedSource,
+	);
+}
+
+function unwrapJoinedType(type: Type): Type | undefined {
+	if (type.kind === "Model" && type.name === "Array") {
+		return type.indexer?.value;
+	}
+	return type;
+}
+
 export interface ResolvedProjection {
 	projectionModel: Model;
 	sourceModel: Model;
@@ -74,6 +111,12 @@ export interface ResolvedProjection {
 	indexName?: string;
 	indexSettings?: Record<string, unknown>;
 	fields: ResolvedProjectionField[];
+	/**
+	 * Cross-domain joins declared with `@dependsOn` (issue #194). Filled by
+	 * `resolveJoinDependencies` after the projection resolves, so a projection
+	 * carries the joins that survived validation.
+	 */
+	joins?: ResolvedJoinDependency[];
 }
 
 /**
@@ -226,7 +269,10 @@ export function resolveProjectionModel(
 		if (!sourceProp || !isReachable(program, sourceProp, inferOnModel)) {
 			// Allow sub-projection fields that reference a valid source field
 			const subProj = resolveSubProjectionFromType(program, projProp.type);
-			if (!subProj || !sourceProp) {
+			if (
+				(!subProj || !sourceProp) &&
+				!isJoinProvidedField(program, projectionModel, projProp.type)
+			) {
 				reportDiagnostic(program, {
 					code: "projection-field-not-on-source",
 					format: { name: projProp.name, sourceModel: sourceModel.name },

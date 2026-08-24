@@ -20,6 +20,10 @@ import {
 } from "./emit-graphql-resolver.js";
 import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
+import {
+	emitJoinResolver,
+	toJoinResolverFileName,
+} from "./emit-join-resolver.js";
 import { emitMapping } from "./emit-mapping.js";
 import {
 	type EmittedRestResolverFile,
@@ -39,6 +43,11 @@ import {
 	resolverModuleSpecifier,
 	sdlModuleSpecifier,
 } from "./emit-string-module.js";
+import {
+	type ResolvableByManifestEntry,
+	resolveJoinDependencies,
+	toJoinDependencyManifestEntry,
+} from "./joins.js";
 import { type OpenSearchEmitterOptions, reportDiagnostic } from "./lib.js";
 import {
 	isSearchProjectionModel,
@@ -73,9 +82,16 @@ export async function $onEmit(
 		return;
 	}
 
-	const resolved = projectionModels
+	const resolved: ResolvedProjection[] = projectionModels
 		.map((model) => resolveProjectionModel(context.program, model))
-		.filter((x): x is ResolvedProjection => x !== undefined);
+		.filter((x): x is ResolvedProjection => x !== undefined)
+		.map((projection) => ({
+			...projection,
+			joins: resolveJoinDependencies(
+				context.program,
+				projection.projectionModel,
+			),
+		}));
 
 	// Issue #123 — `is SearchProjection<T>` declares a projection-shaped type;
 	// `@searchProjection` is the additional gate for *top-level* emission
@@ -103,6 +119,21 @@ export async function $onEmit(
 	// that named files no consumer could resolve as soon as a projection's
 	// emitted shape stopped matching the assumed one.
 	const artifactFileNames: string[] = [];
+
+	// Issue #194 — a projection declaring `@dependsOn` ships the join-resolver
+	// interface its declarations imply, top-level or nested-only alike.
+	for (const projection of resolved) {
+		const joinResolverFile = emitJoinResolver(
+			context.program,
+			projection,
+			resolved,
+		);
+		if (!joinResolverFile) continue;
+		await emitFile(context.program, {
+			path: resolvePath(context.emitterOutputDir, joinResolverFile.fileName),
+			content: joinResolverFile.content,
+		});
+	}
 
 	for (const projection of topLevel) {
 		const docTypeFile = emitDocType(context.program, projection);
@@ -432,6 +463,13 @@ function serializeProjections(resolved: TopLevelProjection[]) {
 			...(projection.indexSettings
 				? { indexSettings: projection.indexSettings }
 				: {}),
+			// `dependencies` (issue #194) is omitted when a projection declares
+			// no `@dependsOn`, so an unjoined spec emits an unchanged manifest.
+			...(projection.joins && projection.joins.length > 0
+				? {
+						dependencies: projection.joins.map(toJoinDependencyManifestEntry),
+					}
+				: {}),
 			fields: projection.fields.map((field) => ({
 				name: field.name,
 				...(field.projectedName ? { projectedName: field.projectedName } : {}),
@@ -471,6 +509,9 @@ function generateRestManifestEntries(
 		mode: "monolithic",
 		resolverFile: restResolverFileName(op),
 		sdlFile: sdlFileName ?? restSdlFileName(op),
+		// `resolvableBy` (issue #194) names the entity this read serves a join
+		// for; omitted when the returned model declares none.
+		...(op.resolvableBy ? { resolvableBy: op.resolvableBy } : {}),
 	}));
 }
 
@@ -501,6 +542,7 @@ interface RestManifestEntry {
 	mode: "monolithic";
 	resolverFile: string;
 	sdlFile: string;
+	resolvableBy?: ResolvableByManifestEntry;
 }
 
 interface NestedTypeManifestEntry {
@@ -675,6 +717,10 @@ function generateTsConfig(
 
 	for (const projection of projections) {
 		tsFiles.push(toDocTypeFileName(projection.projectionModel.name));
+
+		if (projection.joins && projection.joins.length > 0) {
+			tsFiles.push(toJoinResolverFileName(projection.projectionModel.name));
+		}
 
 		for (const subProj of collectSubProjections(projection)) {
 			const subFileName = toDocTypeFileName(subProj.projectionModel.name);
