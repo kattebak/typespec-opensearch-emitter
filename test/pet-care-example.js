@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { promisify } from "node:util";
 import Ajv2020 from "ajv/dist/2020.js";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 // Issue #194 — the pet care view. Waffles the beagle has a passport, Nugget
 // the stray does not, so his document carries no passport and no ownership
@@ -42,11 +44,17 @@ test("projection manifest carries dependencies[], one entry per declaration", as
 
 	assert.ok(petCare);
 	assert.deepEqual(petCare.dependencies, [
-		{ entity: "PetPassport", direction: "lookup", joinKey: "passportId" },
+		{
+			entity: "PetPassport",
+			direction: "lookup",
+			joinKey: "passportId",
+			field: "passport",
+		},
 		{
 			entity: "OwnershipRecord",
 			direction: "inbound",
 			joinKey: "petId",
+			field: "ownershipHistory",
 			index: "byPetId",
 		},
 	]);
@@ -61,19 +69,38 @@ test("dependencies[] validates against the published schema", async () => {
 	}
 });
 
-test("the dependencies schema rejects a discovery join with no index", () => {
-	assert.equal(
-		validateDependencies([
-			{ entity: "OwnershipRecord", direction: "inbound", joinKey: "petId" },
-		]),
-		false,
-	);
-	assert.equal(
-		validateDependencies([
-			{ entity: "PetPassport", direction: "sideways", joinKey: "passportId" },
-		]),
-		false,
-	);
+test("the dependencies schema holds the rules the diagnostics enforce", () => {
+	const inboundNoIndex = {
+		entity: "OwnershipRecord",
+		direction: "inbound",
+		joinKey: "petId",
+		field: "ownershipHistory",
+	};
+	assert.equal(validateDependencies([inboundNoIndex]), false);
+
+	const lookupWithIndex = {
+		entity: "PetPassport",
+		direction: "lookup",
+		joinKey: "passportId",
+		field: "passport",
+		index: "byPassportId",
+	};
+	assert.equal(validateDependencies([lookupWithIndex]), false);
+
+	const unboundField = {
+		entity: "PetPassport",
+		direction: "lookup",
+		joinKey: "passportId",
+	};
+	assert.equal(validateDependencies([unboundField]), false);
+
+	const strayDirection = {
+		entity: "PetPassport",
+		direction: "sideways",
+		joinKey: "passportId",
+		field: "passport",
+	};
+	assert.equal(validateDependencies([strayDirection]), false);
 });
 
 test("each read operation's manifest entry carries its resolvableBy block", async () => {
@@ -130,12 +157,12 @@ test("a projection with dependencies gets a typed join-resolver interface", asyn
 
 	assert.ok(
 		source.includes(
-			"lookupPetPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;",
+			"lookupPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;",
 		),
 	);
 	assert.ok(
 		source.includes(
-			"discoverOwnershipRecord(petId: string): Promise<OwnershipRecordSearchDoc[]>;",
+			"discoverOwnershipHistory(petId: string): Promise<OwnershipRecordSearchDoc[]>;",
 		),
 	);
 
@@ -167,4 +194,30 @@ test("the emitted join-resolver interface compiles", async () => {
 	);
 
 	await execFileAsync("npx", ["tsc", "-p", `${EMIT_DIR}/tsconfig.json`]);
+});
+
+test("the schemas resolve through the package exports map", async () => {
+	for (const fileName of [
+		"resolvable-by.schema.json",
+		"dependencies.schema.json",
+	]) {
+		const specifier = `@kattebak/typespec-opensearch-emitter/schema/${fileName}`;
+		const resolved = require.resolve(specifier);
+
+		assert.equal(
+			await readFile(resolved, "utf8"),
+			await readFile(`schema/${fileName}`, "utf8"),
+			`${specifier} resolves to a different file than schema/${fileName}`,
+		);
+	}
+});
+
+test("a sibling read over the same entity carries no resolvableBy block", async () => {
+	const manifest = await readJson("graphql-resolvers.json");
+
+	const listPassports = manifest.resolvers.find(
+		(x) => x.fieldName === "listPetPassports",
+	);
+	assert.ok(listPassports);
+	assert.equal(listPassports.resolvableBy, undefined);
 });

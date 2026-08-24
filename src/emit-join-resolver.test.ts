@@ -1,30 +1,36 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import type { Program } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
+import { HttpTestLibrary } from "@typespec/http/testing";
 import { emitJoinResolver } from "./emit-join-resolver.js";
 import { resolveJoinDependencies } from "./joins.js";
 import {
-	isSearchProjectionModel,
 	type ResolvedProjection,
 	resolveProjectionModel,
 } from "./projection.js";
+import { isSearchProjectionModel } from "./projection-source.js";
 import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
 async function createRunner() {
 	const host = await createTestHost({
-		libraries: [OpenSearchEmitterTestLibrary],
+		libraries: [HttpTestLibrary, OpenSearchEmitterTestLibrary],
 	});
 
 	return createTestWrapper(host, {
-		autoImports: ["@kattebak/typespec-opensearch-emitter"],
-		autoUsings: ["Kattebak.OpenSearch"],
+		autoImports: ["@typespec/http", "@kattebak/typespec-opensearch-emitter"],
+		autoUsings: ["TypeSpec.Http", "Kattebak.OpenSearch"],
 	});
 }
 
 async function resolveAll(code: string) {
 	const runner = await createRunner();
-	await runner.diagnose(code);
+	const diagnostics = await runner.diagnose(code);
+	assert.deepEqual(
+		diagnostics.filter((x) => x.severity === "error"),
+		[],
+	);
 
 	const program = runner.program;
 	const projections: ResolvedProjection[] = [];
@@ -39,6 +45,16 @@ async function resolveAll(code: string) {
 	}
 
 	return { program, projections };
+}
+
+function emitFor(
+	program: Program,
+	projections: ResolvedProjection[],
+	name: string,
+) {
+	const projection = projections.find((x) => x.projectionModel.name === name);
+	assert.ok(projection);
+	return emitJoinResolver(program, projection);
 }
 
 const PET_CARE = `
@@ -71,22 +87,20 @@ const PET_CARE = `
 		passport?: PetPassportSearchDoc;
 		@nested ownershipHistory: OwnershipRecordSearchDoc[];
 	}
+
+	@route("/pet-passports")
+	namespace PetPassports {
+		@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+	}
+
+	@route("/ownership-records")
+	namespace OwnershipRecords {
+		@restResolver @get op listOwnershipRecords(@query petId: string): OwnershipRecord[];
+	}
 `;
 
-function emitFor(
-	program: Parameters<typeof emitJoinResolver>[0],
-	projections: ResolvedProjection[],
-	name: string,
-) {
-	const projection = projections.find(
-		(x) => x.projectionModel.name === name,
-	) as ResolvedProjection;
-	assert.ok(projection);
-	return emitJoinResolver(program, projection, projections);
-}
-
 describe("emitJoinResolver", () => {
-	it("emits one method per declaration, typed from the joined document", async () => {
+	it("names each method for the field it fills and types it from that field", async () => {
 		const { program, projections } = await resolveAll(PET_CARE);
 
 		const file = emitFor(program, projections, "PetCareSearchDoc");
@@ -99,8 +113,8 @@ describe("emitJoinResolver", () => {
 import type { PetPassportSearchDoc } from "./pet-passport-search-doc.js";
 
 export interface PetCareSearchDocJoinResolver {
-	lookupPetPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;
-	discoverOwnershipRecord(petId: string): Promise<OwnershipRecordSearchDoc[]>;
+	lookupPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;
+	discoverOwnershipHistory(petId: string): Promise<OwnershipRecordSearchDoc[]>;
 }
 `,
 		);
@@ -120,7 +134,7 @@ export interface PetCareSearchDocJoinResolver {
 		assert.equal(emitFor(program, projections, "PetSearchDoc"), undefined);
 	});
 
-	it("declares the entity inline when the spec projects no document for it", async () => {
+	it("declares the entity inline when the field names the model itself", async () => {
 		const { program, projections } = await resolveAll(`
 			model Pet {
 				@searchable @keyword petId: string;
@@ -137,7 +151,14 @@ export interface PetCareSearchDocJoinResolver {
 			@searchProjection
 			@indexName("pet_care_v1")
 			@dependsOn(PetPassport, "lookup", Pet.passportId)
-			model PetCareSearchDoc is SearchProjection<Pet> {}
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassport;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
 		`);
 
 		const file = emitFor(program, projections, "PetCareSearchDoc");
@@ -152,12 +173,12 @@ export interface PetCareSearchDocJoinResolver {
 		);
 		assert.ok(
 			file.content.includes(
-				"lookupPetPassport(passportId: string): Promise<PetPassport | undefined>;",
+				"lookupPassport(passportId: string): Promise<PetPassport | undefined>;",
 			),
 		);
 	});
 
-	it("disambiguates two joins that would otherwise share a method name", async () => {
+	it("keeps two joins over the same entity apart by the field each fills", async () => {
 		const { program, projections } = await resolveAll(`
 			model Pet {
 				@searchable @keyword petId: string;
@@ -171,19 +192,45 @@ export interface PetCareSearchDocJoinResolver {
 				@searchable @keyword microchipId: string;
 			}
 
+			@resolvableBy(LitterPassport.passportId)
+			model LitterPassport {
+				passportId: string;
+				@searchable @keyword breederId: string;
+			}
+
+			model PetPassportSearchDoc is SearchProjection<PetPassport> {}
+			model LitterPassportSearchDoc is SearchProjection<LitterPassport> {}
+
 			@searchProjection
 			@indexName("pet_care_v1")
 			@dependsOn(PetPassport, "lookup", Pet.passportId)
-			@dependsOn(PetPassport, "lookup", Pet.litterPassportId)
-			model PetCareSearchDoc is SearchProjection<Pet> {}
+			@dependsOn(LitterPassport, "lookup", Pet.litterPassportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassportSearchDoc;
+				litterPassport?: LitterPassportSearchDoc;
+			}
+
+			@route("/passports")
+			namespace Passports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+
+			@route("/litter-passports")
+			namespace LitterPassports {
+				@restResolver @get op getLitterPassport(@path passportId: string): LitterPassport;
+			}
 		`);
 
 		const file = emitFor(program, projections, "PetCareSearchDoc");
 		assert.ok(file);
-		assert.ok(file.content.includes("lookupPetPassport(passportId: string)"));
 		assert.ok(
 			file.content.includes(
-				"lookupPetPassportByLitterPassportId(litterPassportId: string)",
+				"lookupPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;",
+			),
+		);
+		assert.ok(
+			file.content.includes(
+				"lookupLitterPassport(litterPassportId: string): Promise<LitterPassportSearchDoc | undefined>;",
 			),
 		);
 	});

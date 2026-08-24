@@ -224,6 +224,42 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Decorator @dependsOn received unsupported direction "${"direction"}". Allowed directions: lookup, inbound.`,
 			},
 		},
+		"join-requires-projection": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Model "${"model"}" carries @dependsOn but is not a SearchProjection<T>, so there is no document for a join to compose into and no source model to resolve a lookup key against.`,
+			},
+		},
+		"join-field-missing": {
+			severity: "error",
+			messages: {
+				default: paramMessage`@dependsOn(${"entity"}, "${"direction"}", ...) has no field to fill. Declare one property on "${"projection"}" typed ${"expectedType"} — a join states where the joined value lands in the document, not just that it exists.`,
+			},
+		},
+		"join-field-ambiguous": {
+			severity: "error",
+			messages: {
+				default: paramMessage`@dependsOn(${"entity"}, "${"direction"}", ...) matches more than one field on "${"projection"}": ${"fields"}. A declaration fills exactly one field, so nothing decides which of these the join composes into. Drop the surplus fields, or give each its own entity.`,
+			},
+		},
+		"join-field-arity": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Field "${"field"}" is typed ${"actual"}, but a "${"direction"}" join resolves ${"expected"}. A lookup fetches the one row the key names; an inbound discovers every row referencing the driving entity.`,
+			},
+		},
+		"join-field-not-composed": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`Field "${"field"}" is filled by the @dependsOn(${"entity"}, "${"direction"}", ...) join, which the emitter declares but does not yet compose. The field is absent from the emitted document type, mapping and SDL; the join-resolver interface and the manifest's dependencies[] carry the contract in the meantime.`,
+			},
+		},
+		"join-read-operation-missing": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`@resolvableBy(${"entity"}.${"key"}) names no read to run against: no @restResolver GET operation returns "${"entity"}" and takes a "${"key"}" parameter, so the manifest carries no resolvableBy block for it and a consumer has nothing to call.`,
+			},
+		},
 		"searchfilter-name-collision": {
 			severity: "error",
 			messages: {

@@ -46,6 +46,10 @@ model PetCareSearchDoc is SearchProjection<Pet> {
 @route("/pet-passports")
 namespace PetPassports {
 	@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+
+	// Returns the same entity, but nothing hands it the join key, so it is not
+	// the read the join runs against and carries no resolvableBy block.
+	@restResolver @get op listPetPassports(@query issuedCountry?: string): PetPassport[];
 }
 
 @route("/ownership-records")

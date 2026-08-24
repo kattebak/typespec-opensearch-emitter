@@ -7,10 +7,12 @@ import type {
 	Type,
 } from "@typespec/compiler";
 import { getHttpOperation } from "@typespec/http";
-import { isRestResolver } from "./decorators.js";
+import { getResolvableBy, isRestResolver } from "./decorators.js";
 import {
 	type ResolvableByManifestEntry,
+	servesResolvableByRead,
 	toResolvableByManifestEntry,
+	unwrapReadModel,
 } from "./joins.js";
 
 /**
@@ -146,11 +148,7 @@ export function resolveRestOperation(
 		: undefined;
 
 	const typeName = toRestGraphQLTypeName(httpOperation.verb);
-	const readModel =
-		typeName === "Query" ? unwrapReadModel(operation.returnType) : undefined;
-	const resolvableBy = readModel
-		? toResolvableByManifestEntry(program, readModel)
-		: undefined;
+	const resolvableBy = resolveJoinRead(program, operation);
 
 	return {
 		fieldName: operation.name,
@@ -168,16 +166,27 @@ export function resolveRestOperation(
 }
 
 /**
- * The model a read operation returns, single or as an array — the entity whose
- * `@resolvableBy` declaration, if any, the operation serves.
+ * The `resolvableBy` block for the one read a join runs against (issue #194):
+ * the GET returning a `@resolvableBy` model and taking its declared key. A
+ * sibling `listX()` over the same model is not that read — nothing hands it
+ * the key — so it carries no block.
  */
-function unwrapReadModel(returnType: Type): Model | undefined {
-	if (returnType.kind !== "Model") {
+function resolveJoinRead(
+	program: Program,
+	operation: Operation,
+): ResolvableByManifestEntry | undefined {
+	const entity = unwrapReadModel(operation.returnType);
+	if (!entity) {
 		return undefined;
 	}
-	if (returnType.name === "Array") {
-		const element = returnType.indexer?.value;
-		return element?.kind === "Model" ? element : undefined;
+	const resolvable = getResolvableBy(program, entity);
+	if (!resolvable) {
+		return undefined;
 	}
-	return returnType;
+	if (
+		!servesResolvableByRead(program, operation, entity, resolvable.key.name)
+	) {
+		return undefined;
+	}
+	return toResolvableByManifestEntry(program, entity);
 }

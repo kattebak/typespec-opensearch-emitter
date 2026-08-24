@@ -123,11 +123,7 @@ export async function $onEmit(
 	// Issue #194 — a projection declaring `@dependsOn` ships the join-resolver
 	// interface its declarations imply, top-level or nested-only alike.
 	for (const projection of resolved) {
-		const joinResolverFile = emitJoinResolver(
-			context.program,
-			projection,
-			resolved,
-		);
+		const joinResolverFile = emitJoinResolver(context.program, projection);
 		if (!joinResolverFile) continue;
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, joinResolverFile.fileName),

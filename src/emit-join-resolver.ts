@@ -4,8 +4,9 @@ import {
 	renderPropertyType,
 	toDocTypeFileName,
 } from "./emit-doc-type.js";
-import type { ResolvedJoinDependency } from "./joins.js";
+import { unwrapArrayElement } from "./joins.js";
 import type { ResolvedProjection } from "./projection.js";
+import { isSearchProjectionModel } from "./projection-source.js";
 import { toKebabCase } from "./utils.js";
 
 export interface EmittedJoinResolverFile {
@@ -25,60 +26,56 @@ export function toJoinResolverInterfaceName(
 
 /**
  * The join-resolver interface a projection's `@dependsOn` declarations imply
- * (issue #194): one method per declaration, named for its direction, taking
- * the join key and returning the joined shape. Both joins are left joins, so a
- * `lookup` may resolve to nothing and a discovery may resolve to no rows.
- * `undefined` when the projection declares no joins.
+ * (issue #194): one method per declaration, named for the document field it
+ * fills, taking the join key and returning that field's declared type. Both
+ * joins are left joins, so a `lookup` may resolve to nothing and a discovery
+ * to no rows. `undefined` when the projection declares no joins.
  */
 export function emitJoinResolver(
 	program: Program,
 	projection: ResolvedProjection,
-	allProjections: ResolvedProjection[],
 ): EmittedJoinResolverFile | undefined {
 	const joins = projection.joins ?? [];
 	if (joins.length === 0) {
 		return undefined;
 	}
 
-	const documentTypeByEntity = new Map<Model, string>();
-	for (const candidate of allProjections) {
-		if (!documentTypeByEntity.has(candidate.sourceModel)) {
-			documentTypeByEntity.set(
-				candidate.sourceModel,
-				candidate.projectionModel.name,
-			);
-		}
-	}
-
 	const imports = new Map<string, string>();
 	const localInterfaces = new Map<string, string>();
-	const usedMethodNames = new Set<string>();
+	const methodNames = new Set<string>();
 	const methods: string[] = [];
 
 	for (const join of joins) {
-		const documentType = documentTypeByEntity.get(join.entity);
-		if (documentType) {
-			const file = toDocTypeFileName(documentType).replace(/\.ts$/, ".js");
-			imports.set(
-				documentType,
-				`import type { ${documentType} } from "./${file}";`,
-			);
-		} else if (!localInterfaces.has(join.entity.name)) {
-			localInterfaces.set(
-				join.entity.name,
-				renderEntityInterface(program, join.entity),
+		const joined = unwrapArrayElement(join.field.type) ?? join.field.type;
+		if (joined.kind !== "Model") {
+			throw new Error(
+				`Join field "${join.field.name}" on ${projection.projectionModel.name} does not resolve to a model.`,
 			);
 		}
 
-		const joinedType = documentType ?? join.entity.name;
-		const methodName = uniqueMethodName(join, usedMethodNames);
-		usedMethodNames.add(methodName);
+		if (isSearchProjectionModel(program, joined)) {
+			const file = toDocTypeFileName(joined.name).replace(/\.ts$/, ".js");
+			imports.set(
+				joined.name,
+				`import type { ${joined.name} } from "./${file}";`,
+			);
+		} else if (!localInterfaces.has(joined.name)) {
+			localInterfaces.set(joined.name, renderEntityInterface(program, joined));
+		}
+
+		const methodName = toMethodName(join.direction, join.field.name);
+		if (methodNames.has(methodName)) {
+			throw new Error(
+				`Join-resolver method "${methodName}" is declared twice on ${projection.projectionModel.name}.`,
+			);
+		}
+		methodNames.add(methodName);
 
 		const argument = `${join.joinKey.name}: ${renderPropertyType(program, join.joinKey)}`;
 		const returnType =
 			join.direction === "lookup"
-				? `Promise<${joinedType} | undefined>`
-				: `Promise<${joinedType}[]>`;
+				? `Promise<${joined.name} | undefined>`
+				: `Promise<${joined.name}[]>`;
 
 		methods.push(`\t${methodName}(${argument}): ${returnType};`);
 	}
@@ -105,24 +102,17 @@ export function emitJoinResolver(
 	};
 }
 
-function uniqueMethodName(
-	join: ResolvedJoinDependency,
-	used: ReadonlySet<string>,
-): string {
-	const verb = join.direction === "lookup" ? "lookup" : "discover";
-	const base = `${verb}${join.entity.name}`;
-	if (!used.has(base)) {
-		return base;
-	}
-	return `${base}By${capitalize(join.joinKey.name)}`;
-}
-
-function capitalize(value: string): string {
-	return value.charAt(0).toUpperCase() + value.slice(1);
+/**
+ * Named for the field it fills, so two joins over the same entity stay apart
+ * without a disambiguation rule — a model cannot declare a property twice.
+ */
+function toMethodName(direction: string, fieldName: string): string {
+	const verb = direction === "lookup" ? "lookup" : "discover";
+	return `${verb}${fieldName.charAt(0).toUpperCase()}${fieldName.slice(1)}`;
 }
 
 export const __test = {
 	toJoinResolverFileName,
 	toJoinResolverInterfaceName,
-	uniqueMethodName,
+	toMethodName,
 };

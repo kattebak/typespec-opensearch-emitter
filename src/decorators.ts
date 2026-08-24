@@ -178,10 +178,15 @@ export function $dependsOn(
 	joinKey: ModelProperty,
 ): void {
 	// Decorators are applied bottom-up, so the argument node position is what
-	// restores the order the declarations were written in.
+	// restores the order the declarations were written in. Falling back to a
+	// constant would silently reverse `dependencies[]`, so demand the position.
 	const argumentTarget = context.getArgumentTarget(0);
-	const pos =
-		argumentTarget && "pos" in argumentTarget ? argumentTarget.pos : 0;
+	if (!argumentTarget || !("pos" in argumentTarget)) {
+		throw new Error(
+			`@dependsOn on ${target.name} cannot resolve its argument position, so declaration order cannot be preserved.`,
+		);
+	}
+	const pos = argumentTarget.pos;
 	const stored: StoredJoinDependency[] =
 		context.program.stateMap(StateKeys.dependsOn).get(target) ?? [];
 	context.program

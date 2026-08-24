@@ -6,7 +6,7 @@
 	"type": "array",
 	"items": {
 		"type": "object",
-		"required": ["entity", "direction", "joinKey"],
+		"required": ["entity", "direction", "joinKey", "field"],
 		"additionalProperties": false,
 		"properties": {
 			"entity": {
@@ -23,19 +23,35 @@
 				"type": "string",
 				"minLength": 1
 			},
+			"field": {
+				"description": "Property of the projection the joined value lands in. A lookup fills a single-valued field, an inbound an array.",
+				"type": "string",
+				"minLength": 1
+			},
 			"index": {
-				"description": "Index the joined rows are discovered by, carried from the entity's resolvableBy declaration.",
+				"description": "Index the joined rows are discovered by, carried from the entity's resolvableBy declaration. An inbound join only.",
 				"type": "string",
 				"minLength": 1
 			}
 		},
-		"if": {
-			"properties": { "direction": { "const": "inbound" } },
-			"required": ["direction"]
-		},
-		"then": {
-			"properties": { "index": { "type": "string", "minLength": 1 } },
-			"required": ["index"]
-		}
+		"allOf": [
+			{
+				"if": {
+					"properties": { "direction": { "const": "inbound" } },
+					"required": ["direction"]
+				},
+				"then": {
+					"properties": { "index": { "type": "string", "minLength": 1 } },
+					"required": ["index"]
+				}
+			},
+			{
+				"if": {
+					"properties": { "direction": { "const": "lookup" } },
+					"required": ["direction"]
+				},
+				"then": { "properties": { "index": false } }
+			}
+		]
 	}
 }
