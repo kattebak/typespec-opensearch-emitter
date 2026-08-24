@@ -1,0 +1,57 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://kattebak.github.io/typespec-opensearch-emitter/schema/dependencies.schema.json",
+	"title": "dependencies",
+	"description": "Cross-domain joins a projection composes its document from. Emitted on the opensearch-projections.json entry of the projection, one object per @dependsOn declaration.",
+	"type": "array",
+	"items": {
+		"type": "object",
+		"required": ["entity", "direction", "joinKey", "field"],
+		"additionalProperties": false,
+		"properties": {
+			"entity": {
+				"description": "Joined model.",
+				"type": "string",
+				"minLength": 1
+			},
+			"direction": {
+				"description": "lookup fetches the row while the document is composed; inbound marks a write on the joined model as a re-index trigger for the driving document.",
+				"enum": ["lookup", "inbound"]
+			},
+			"joinKey": {
+				"description": "Property the join runs over — on the projection's source model for a lookup, on the joined model for an inbound.",
+				"type": "string",
+				"minLength": 1
+			},
+			"field": {
+				"description": "Property of the projection the joined value lands in. A lookup fills a single-valued field, an inbound an array.",
+				"type": "string",
+				"minLength": 1
+			},
+			"index": {
+				"description": "Index the joined rows are discovered by, carried from the entity's resolvableBy declaration. An inbound join only.",
+				"type": "string",
+				"minLength": 1
+			}
+		},
+		"allOf": [
+			{
+				"if": {
+					"properties": { "direction": { "const": "inbound" } },
+					"required": ["direction"]
+				},
+				"then": {
+					"properties": { "index": { "type": "string", "minLength": 1 } },
+					"required": ["index"]
+				}
+			},
+			{
+				"if": {
+					"properties": { "direction": { "const": "lookup" } },
+					"required": ["direction"]
+				},
+				"then": { "properties": { "index": false } }
+			}
+		]
+	}
+}

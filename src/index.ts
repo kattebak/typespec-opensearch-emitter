@@ -1,7 +1,11 @@
+import type { Program } from "@typespec/compiler";
+import { validateJoinDeclarations } from "./joins.js";
+
 export {
 	$aggregatable,
 	$analyzer,
 	$boost,
+	$dependsOn,
 	$filterable,
 	$graphqlDirectives,
 	$graphqlId,
@@ -10,6 +14,7 @@ export {
 	$indexSettings,
 	$keyword,
 	$nested,
+	$resolvableBy,
 	$restResolver,
 	$searchAs,
 	$searchable,
@@ -25,6 +30,8 @@ export {
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
+	getJoinDependencies,
+	getResolvableBy,
 	getSearchAs,
 	isGraphqlId,
 	isKeyword,
@@ -38,4 +45,17 @@ export {
 	namespace,
 } from "./decorators.js";
 export { $onEmit } from "./emitter.js";
+export {
+	JOIN_DIRECTIONS,
+	type JoinDependencyDeclaration,
+	type JoinDependencyManifestEntry,
+	type JoinDirection,
+	type ResolvableByDeclaration,
+	type ResolvableByManifestEntry,
+	type ResolvedJoinDependency,
+} from "./joins.js";
 export { $lib } from "./lib.js";
+
+export function $onValidate(program: Program): void {
+	validateJoinDeclarations(program);
+}

@@ -1,0 +1,26 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://kattebak.github.io/typespec-opensearch-emitter/schema/resolvable-by.schema.json",
+	"title": "resolvableBy",
+	"description": "How a joined entity is fetched. Emitted on the graphql-resolvers.json entry of the read operation that serves the entity.",
+	"type": "object",
+	"required": ["entity", "key"],
+	"additionalProperties": false,
+	"properties": {
+		"entity": {
+			"description": "Model the read operation returns.",
+			"type": "string",
+			"minLength": 1
+		},
+		"key": {
+			"description": "Property of that model a row is read by.",
+			"type": "string",
+			"minLength": 1
+		},
+		"index": {
+			"description": "Index that discovers every row carrying the key. Absent when the entity can only be fetched a single row at a time.",
+			"type": "string",
+			"minLength": 1
+		}
+	}
+}

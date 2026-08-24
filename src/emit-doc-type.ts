@@ -1,6 +1,7 @@
 import type {
 	Enum,
 	Model,
+	ModelProperty,
 	Program,
 	Scalar,
 	Type,
@@ -84,6 +85,28 @@ export function emitDocType(
 		fileName,
 		content: parts.join("\n"),
 	};
+}
+
+export function renderPropertyType(
+	program: Program,
+	property: ModelProperty,
+): string {
+	return renderType(program, property.type);
+}
+
+/**
+ * The whole model as a TypeScript interface — every property, not the
+ * `@searchable` subset a projection resolves. Used for a joined entity the
+ * spec declares no `SearchProjection<T>` for (issue #194).
+ */
+export function renderEntityInterface(program: Program, model: Model): string {
+	const fields = Array.from(model.properties.values()).map((property) => ({
+		name: getSearchAs(program, property) ?? property.name,
+		type: property.type,
+		optional: property.optional,
+	}));
+
+	return `export interface ${model.name} ${renderBlock(program, fields, 1)}`;
 }
 
 /**

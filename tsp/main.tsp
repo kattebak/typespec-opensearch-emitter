@@ -22,5 +22,12 @@ extern dec graphqlDirectives(target: Model, ...directives: valueof string[]);
 extern dec searchProjection(target: Model);
 extern dec restResolver(target: Operation);
 extern dec graphqlId(target: ModelProperty);
+extern dec resolvableBy(target: Model, key: ModelProperty, index?: valueof string);
+extern dec dependsOn(
+  target: Model,
+  entity: Model,
+  direction: valueof string,
+  joinKey: ModelProperty
+);
 
 model SearchProjection<T> {}

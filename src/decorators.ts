@@ -6,6 +6,10 @@ import type {
 	Program,
 	Type,
 } from "@typespec/compiler";
+import type {
+	JoinDependencyDeclaration,
+	ResolvableByDeclaration,
+} from "./joins.js";
 import { reportDiagnostic, StateKeys } from "./lib.js";
 
 export const namespace = "Kattebak.OpenSearch";
@@ -139,6 +143,79 @@ export function getGraphqlDirectives(
 	target: Model,
 ): string[] | undefined {
 	return program.stateMap(StateKeys.graphqlDirectives).get(target);
+}
+
+export function $resolvableBy(
+	context: DecoratorContext,
+	target: Model,
+	key: ModelProperty,
+	index?: string,
+): void {
+	context.program.stateMap(StateKeys.resolvableBy).set(target, {
+		key,
+		...(index !== undefined ? { index } : {}),
+	});
+}
+
+/**
+ * How a row of the model is fetched for a cross-domain view join (issue #194):
+ * the key it is read by, and — when declared — the index that discovers every
+ * row carrying that key. `undefined` means the model states no way to fetch it,
+ * so no projection may declare a `@dependsOn` on it.
+ */
+export function getResolvableBy(
+	program: Program,
+	target: Model,
+): ResolvableByDeclaration | undefined {
+	return program.stateMap(StateKeys.resolvableBy).get(target);
+}
+
+export function $dependsOn(
+	context: DecoratorContext,
+	target: Model,
+	entity: Model,
+	direction: string,
+	joinKey: ModelProperty,
+): void {
+	// Decorators are applied bottom-up, so the argument node position is what
+	// restores the order the declarations were written in. Falling back to a
+	// constant would silently reverse `dependencies[]`, so demand the position.
+	const argumentTarget = context.getArgumentTarget(0);
+	if (!argumentTarget || !("pos" in argumentTarget)) {
+		throw new Error(
+			`@dependsOn on ${target.name} cannot resolve its argument position, so declaration order cannot be preserved.`,
+		);
+	}
+	const pos = argumentTarget.pos;
+	const stored: StoredJoinDependency[] =
+		context.program.stateMap(StateKeys.dependsOn).get(target) ?? [];
+	context.program
+		.stateMap(StateKeys.dependsOn)
+		.set(target, [...stored, { entity, direction, joinKey, pos }]);
+}
+
+interface StoredJoinDependency extends JoinDependencyDeclaration {
+	pos: number;
+}
+
+/**
+ * The joins declared on a projection via `@dependsOn`, in source order. The
+ * declarations are returned unvalidated — `validateJoinDeclarations` reports
+ * an unknown direction, an unresolvable entity and a stray join key.
+ */
+export function getJoinDependencies(
+	program: Program,
+	target: Model,
+): JoinDependencyDeclaration[] {
+	const stored: StoredJoinDependency[] =
+		program.stateMap(StateKeys.dependsOn).get(target) ?? [];
+	return [...stored]
+		.sort((a, b) => a.pos - b.pos)
+		.map(({ entity, direction, joinKey }) => ({
+			entity,
+			direction,
+			joinKey,
+		}));
 }
 
 export function $keyword(

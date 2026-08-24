@@ -200,6 +200,66 @@ export const $lib = createTypeSpecLibrary({
 				union: paramMessage`Field "${"field"}" is a union with no scalar or string variant, so the OpenSearch mapping cannot express it. Emitting it would map the field as "object", which OpenSearch rejects at index time and which silently drops every filter, sort and aggregation on the field. Replace the union with a model whose members are optional, or with a union of scalars.`,
 			},
 		},
+		"unknown-join-key": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Join key "${"key"}" is not a property of model "${"model"}". A join key names a property on the model that owns it: @resolvableBy takes a key on its own model, a "lookup" dependency takes a key on the projection's source model, and an "inbound" dependency takes a key on the joined entity.`,
+			},
+		},
+		"join-index-required": {
+			severity: "error",
+			messages: {
+				default: paramMessage`@dependsOn(${"entity"}, "inbound", ...) discovers every row referencing the driving entity, and that read needs an index to run against. Model "${"entity"}" declares @resolvableBy without one, so it can only be fetched a single row at a time by its own key. Add the index name to that declaration — @resolvableBy(${"entity"}.${"key"}, "${"suggestedIndex"}").`,
+			},
+		},
+		"undeclared-join-resolution": {
+			severity: "error",
+			messages: {
+				default: paramMessage`@dependsOn names model "${"entity"}", which carries no @resolvableBy, so nothing states how a row of it is fetched. Declare @resolvableBy(${"entity"}.<key>) on that model, adding an index name when the join discovers many rows.`,
+			},
+		},
+		"invalid-join-direction": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Decorator @dependsOn received unsupported direction "${"direction"}". Allowed directions: lookup, inbound.`,
+			},
+		},
+		"join-requires-projection": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Model "${"model"}" carries @dependsOn but is not a SearchProjection<T>, so there is no document for a join to compose into and no source model to resolve a lookup key against.`,
+			},
+		},
+		"join-field-missing": {
+			severity: "error",
+			messages: {
+				default: paramMessage`@dependsOn(${"entity"}, "${"direction"}", ...) has no field to fill. Declare one property on "${"projection"}" typed ${"expectedType"} — a join states where the joined value lands in the document, not just that it exists.`,
+			},
+		},
+		"join-field-ambiguous": {
+			severity: "error",
+			messages: {
+				default: paramMessage`@dependsOn(${"entity"}, "${"direction"}", ...) matches more than one field on "${"projection"}": ${"fields"}. A declaration fills exactly one field, so nothing decides which of these the join composes into. Drop the surplus fields, or give each its own entity.`,
+			},
+		},
+		"join-field-arity": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Field "${"field"}" is typed ${"actual"}, but a "${"direction"}" join resolves ${"expected"}. A lookup fetches the one row the key names; an inbound discovers every row referencing the driving entity.`,
+			},
+		},
+		"join-field-not-composed": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`Field "${"field"}" is filled by the @dependsOn(${"entity"}, "${"direction"}", ...) join, which the emitter declares but does not yet compose. The field is absent from the emitted document type, mapping and SDL; the join-resolver interface and the manifest's dependencies[] carry the contract in the meantime.`,
+			},
+		},
+		"join-read-operation-missing": {
+			severity: "warning",
+			messages: {
+				default: paramMessage`@resolvableBy(${"entity"}.${"key"}) names no read to run against: no @restResolver GET operation returns "${"entity"}" and takes a "${"key"}" parameter, so the manifest carries no resolvableBy block for it and a consumer has nothing to call.`,
+			},
+		},
 		"searchfilter-name-collision": {
 			severity: "error",
 			messages: {
@@ -255,6 +315,14 @@ export const $lib = createTypeSpecLibrary({
 		graphqlId: {
 			description:
 				"Opt-in marker — the string property surfaces as GraphQL ID instead of String in REST SDL output (issue #136)",
+		},
+		resolvableBy: {
+			description:
+				"How a joined entity is fetched — the key a row is read by, and the index that discovers many rows by that key (issue #194)",
+		},
+		dependsOn: {
+			description:
+				"Cross-domain view joins declared on a projection — one entry per joined entity, with its direction and join key (issue #194)",
 		},
 	},
 	emitter: {

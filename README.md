@@ -271,6 +271,8 @@ In this example:
 | `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"terms"`, `"exists"`, `"range"`, `"prefix"`, `"match"`. `"terms"` produces a `<field>In: [Type!]` multi-value input (chip-style filters). On a `@nested` array field, `"exists"` becomes a path-level nested-existence check. `"prefix"` (`<field>Prefix: String`, OpenSearch `prefix`) and `"match"` (`<field>Match: String`, OpenSearch `match`) query the **analyzed** field rather than the `.keyword` sub-field, so an `@analyzer` (e.g. edge-ngram) registered on the field is exercised by the query — this is how partial / begins-with / contains matching is expressed. | `@filterable("term", "terms") status: string;` / `@analyzer("edge_ngram") @filterable("prefix", "match") name: string;` |
 | `@searchInfer` | `Model` (projection) | Walks the source model's fields and applies type-driven default `@filterable` / `@aggregatable` / `@sortable` capabilities (see [Inference](#searchinfer-type-driven-defaults)). Explicit decorators on a field always win on their axis. | `@searchInfer model TradeSearchDoc is SearchProjection<Trade> {}` |
 | `@searchSkip` | `ModelProperty` | Opts a field out of `@searchInfer` inference. The field is still included in response shape if `@searchable` / `@nested` apply; without those, the field is excluded entirely. | `@searchable @searchSkip auditTrail: string;` |
+| `@resolvableBy(Model.key)` / `@resolvableBy(Model.key, "index")` | `Model` | Declares how a row of the model is fetched for a cross-domain join: the key it is read by, and the index that discovers many rows by that key. See [Cross-domain view joins](#cross-domain-view-joins). | `@resolvableBy(OwnershipRecord.petId, "byPetId")` |
+| `@dependsOn(Entity, direction, joinKey)` | `Model` (projection) | Declares one joined entity on a projection. `"lookup"` fetches the row while the document is composed; `"inbound"` marks a write on the joined model as a re-index trigger for the driving document. See [Cross-domain view joins](#cross-domain-view-joins). | `@dependsOn(PetPassport, "lookup", Pet.passportId)` |
 | `@sortable` | `ModelProperty` | Exposes the field on the projection's `<Type>SortField` enum + `<Type>SortInput` so callers can pass `sortBy: [<Type>SortInput!]`. Inferred for keyword strings, numerics, dates, booleans, enums, and unions when the projection model has `@searchInfer`. Resolver falls back to `_score, _id` when `sortBy` is omitted. | `@sortable @keyword name: string;` |
 
 ## `@searchInfer` (type-driven defaults)
@@ -728,6 +730,129 @@ The message names the file and its size. Work in this order:
 
 Do not raise the constant in the assertion. 32,768 is an AWS limit, not a project policy — a green test with a raised cap fails at deploy instead.
 
+## Cross-domain view joins
+
+`SearchProjection<T>` resolves fields from one source model, so a field owned by another spec cannot enter the document and no manifest key says a write over there should re-index anything here. `@resolvableBy` and `@dependsOn` declare that join.
+
+A pet care view wants three things in one index: the pet, its passport (a separate spec, joined by `passportId`), and its ownership history (records that reference the pet as `petId`).
+
+```typespec
+@resolvableBy(PetPassport.passportId)
+model PetPassport {
+  passportId: string;
+  @searchable @keyword microchipId: string;
+  @searchable @keyword issuedCountry: string;
+  @searchable @keyword vaccinations: string[];
+}
+
+@resolvableBy(OwnershipRecord.petId, "byPetId")
+model OwnershipRecord {
+  ownershipRecordId: string;
+  petId: string;
+  @searchable @keyword ownerName: string;
+  @searchable @filterable("range") transferredAt: utcDateTime;
+}
+
+@searchProjection
+@indexName("pet_care_v1")
+@dependsOn(PetPassport, "lookup", Pet.passportId)
+@dependsOn(OwnershipRecord, "inbound", OwnershipRecord.petId)
+model PetCareSearchDoc is SearchProjection<Pet> {
+  passport?: PetPassportSearchDoc;
+  @nested ownershipHistory: OwnershipRecordSearchDoc[];
+}
+```
+
+`@resolvableBy` states how a row of the model is fetched: the key it is read by, and — second argument — the index that discovers every row carrying that key.
+
+`@dependsOn` states one joined entity on a projection. `lookup` fetches the row while the document is composed. `inbound` marks the joined model as an invalidation trigger: a write there re-indexes the driving entity's document.
+
+Both joins are left joins. Waffles the beagle has a passport; Nugget, a stray, does not, so `passport` is absent on his document and `ownershipHistory` is `[]`. Rehoming Waffles writes an `OwnershipRecord` and re-indexes his document.
+
+### Field binding
+
+A declaration says where the joined value lands, not only that it exists. Each `@dependsOn` binds to **exactly one** projection field — the one typed as the entity or as its search document. A `lookup` fills a single-valued field, an `inbound` fills an array. That binding is what names the resolver method and what `dependencies[].field` carries.
+
+Until the emitter composes the joined values, a bound field is absent from the emitted document type, mapping and SDL, and `join-field-not-composed` says so on every compile.
+
+### The read a join runs against
+
+`@resolvableBy` binds to the `@restResolver` GET operation that returns the model **and takes its declared key as a path or query parameter**. A sibling `listX()` over the same model is not that read — nothing hands it the key — so only the designated one carries a `resolvableBy` block.
+
+### Manifest blocks
+
+The read operation's `graphql-resolvers.json` entry carries a `resolvableBy` block:
+
+```json
+{
+  "typeName": "Query",
+  "fieldName": "listOwnershipRecords",
+  "resourcePath": "/ownership-records",
+  "resolvableBy": {
+    "entity": "OwnershipRecord",
+    "key": "petId",
+    "index": "byPetId"
+  }
+}
+```
+
+The projection's `opensearch-projections.json` entry carries `dependencies[]`, one object per declaration:
+
+```json
+{
+  "name": "PetCareSearchDoc",
+  "indexName": "pet_care_v1",
+  "dependencies": [
+    {
+      "entity": "PetPassport",
+      "direction": "lookup",
+      "joinKey": "passportId",
+      "field": "passport"
+    },
+    {
+      "entity": "OwnershipRecord",
+      "direction": "inbound",
+      "joinKey": "petId",
+      "field": "ownershipHistory",
+      "index": "byPetId"
+    }
+  ]
+}
+```
+
+`index` appears on an `inbound` entry only: a lookup fetches the row its key names, so the discovery index has nothing to say about it.
+
+Both blocks ship a JSON schema, exported from the package as `./schema/resolvable-by.schema.json` and `./schema/dependencies.schema.json`. Each key is omitted when nothing declares it, so a spec with no joins emits an unchanged manifest.
+
+### Join resolver (`*-join-resolver.ts`)
+
+A projection with dependencies gets a TypeScript interface for the reads its declarations imply — one method per declaration, named for the field it fills, taking the join key and returning that field's declared type:
+
+```ts
+export interface PetCareSearchDocJoinResolver {
+	lookupPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;
+	discoverOwnershipHistory(petId: string): Promise<OwnershipRecordSearchDoc[]>;
+}
+```
+
+A `lookup` returns one row or nothing; a discovery returns however many rows the index holds. Naming the method after the field keeps two joins over the same entity apart, since a model cannot declare a property twice.
+
+### Diagnostics
+
+| Code | Severity | Fires when |
+| --- | --- | --- |
+| `unknown-join-key` | error | A key path names a property the model does not own, inheritance included — `@resolvableBy` takes a key on its own model, a `lookup` takes a key on the projection's source model, an `inbound` takes a key on the joined entity. |
+| `join-index-required` | error | An `inbound` join names an entity whose `@resolvableBy` declares no index, so nothing can discover the rows. |
+| `undeclared-join-resolution` | error | A `@dependsOn` names a model carrying no `@resolvableBy`, so nothing states how a row of it is fetched. |
+| `invalid-join-direction` | error | A direction other than `lookup` or `inbound`. |
+| `join-requires-projection` | error | `@dependsOn` sits on a model that is not a `SearchProjection<T>`. |
+| `join-field-missing` | error | No projection field is typed to receive the declared entity. |
+| `join-field-ambiguous` | error | More than one field could receive it, so nothing decides which. |
+| `join-field-arity` | error | A `lookup` bound to an array field, or an `inbound` bound to a single-valued one. |
+| `join-field-not-composed` | warning | The binding holds, but the joined value is not yet composed into the document. |
+| `join-read-operation-missing` | warning | No `@restResolver` GET returns the entity and takes its declared key, so the join has nothing to call. |
+
+
 ## Index settings (analyzers, tokenizers, filters)
 
 Use `@indexSettings` to embed analysis configuration in the mapping output. The value is a JSON string that will be emitted as the `settings` block:
@@ -805,6 +930,7 @@ npm test          # runs build + lint + unit tests + emit test + example test
 - `src/**/*.test.ts` — unit tests (decorators, projection resolution, emitters)
 - `test/main.tsp` — integration fixture compiled by `npm run test:emit`
 - `test/example.js` — validates emitted output files against expectations
+- `test/pet-care/main.tsp` — cross-domain join fixture compiled by `npm run test:emit:joins`; `test/pet-care-example.js` validates the emitted blocks against the published JSON schemas
 - `test/string-modules.js` — validates the `resolvers/` and `schema/` string modules, their `exports` subpaths and the barrels against the manifest
 
 ## License

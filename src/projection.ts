@@ -9,6 +9,7 @@ import {
 	getIgnoreAbove,
 	getIndexName,
 	getIndexSettings,
+	getJoinDependencies,
 	getSearchAs,
 	hasAggregatable,
 	hasFilterable,
@@ -42,8 +43,15 @@ function isReachable(
 	return !!typeModel && isSearchInfer(program, typeModel);
 }
 
+import { candidateJoinFields, type ResolvedJoinDependency } from "./joins.js";
 import { reportDiagnostic } from "./lib.js";
+import {
+	getProjectionSourceModel,
+	isSearchProjectionModel,
+} from "./projection-source.js";
 import { isDateScalarName } from "./utils.js";
+
+export { getProjectionSourceModel, isSearchProjectionModel };
 
 export interface ResolvedProjectionField {
 	name: string;
@@ -64,6 +72,23 @@ export interface ResolvedProjectionField {
 	subProjection?: ResolvedProjection;
 }
 
+/**
+ * True when the property is the field a declared join fills (issue #194).
+ * `join-field-not-composed` states the same thing to the author; the emitter
+ * only needs to know the field is accounted for, not missing from the source.
+ */
+function isJoinProvidedField(
+	program: Program,
+	projectionModel: Model,
+	property: ModelProperty,
+): boolean {
+	return getJoinDependencies(program, projectionModel).some((declaration) =>
+		candidateJoinFields(program, projectionModel, declaration.entity).includes(
+			property,
+		),
+	);
+}
+
 export interface ResolvedProjection {
 	projectionModel: Model;
 	sourceModel: Model;
@@ -74,6 +99,12 @@ export interface ResolvedProjection {
 	indexName?: string;
 	indexSettings?: Record<string, unknown>;
 	fields: ResolvedProjectionField[];
+	/**
+	 * Cross-domain joins declared with `@dependsOn` (issue #194). Filled by
+	 * `resolveJoinDependencies` after the projection resolves, so a projection
+	 * carries the joins that survived validation.
+	 */
+	joins?: ResolvedJoinDependency[];
 }
 
 /**
@@ -81,37 +112,6 @@ export interface ResolvedProjection {
  * top-level emission: Query field, resolver, mapping, manifest entry.
  */
 export type TopLevelProjection = ResolvedProjection & { indexName: string };
-
-export function isSearchProjectionModel(
-	program: Program,
-	model: Model,
-): boolean {
-	return !!getProjectionSourceModel(program, model);
-}
-
-export function getProjectionSourceModel(
-	_program: Program,
-	projectionModel: Model,
-): Model | undefined {
-	if (projectionModel.name === "SearchProjection") {
-		return undefined;
-	}
-
-	const isSource = projectionModel.sourceModels.find(
-		(x) => x.usage === "is" && x.model.name === "SearchProjection",
-	);
-	if (!isSource) {
-		return undefined;
-	}
-
-	// The instantiated SearchProjection<T> model carries a templateMapper
-	// whose first arg is the resolved source model T.
-	const sourceModel = isSource.model as Model & {
-		templateMapper?: { args?: readonly Type[] };
-	};
-	const sourceType = sourceModel.templateMapper?.args?.[0];
-	return sourceType?.kind === "Model" ? sourceType : undefined;
-}
 
 export function resolveProjectionModel(
 	program: Program,
@@ -226,7 +226,10 @@ export function resolveProjectionModel(
 		if (!sourceProp || !isReachable(program, sourceProp, inferOnModel)) {
 			// Allow sub-projection fields that reference a valid source field
 			const subProj = resolveSubProjectionFromType(program, projProp.type);
-			if (!subProj || !sourceProp) {
+			if (
+				(!subProj || !sourceProp) &&
+				!isJoinProvidedField(program, projectionModel, projProp)
+			) {
 				reportDiagnostic(program, {
 					code: "projection-field-not-on-source",
 					format: { name: projProp.name, sourceModel: sourceModel.name },
