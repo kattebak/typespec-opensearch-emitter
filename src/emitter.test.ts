@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { Model } from "@typespec/compiler";
+import type { Model, Program } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
 	emitResolverBarrel,
@@ -124,7 +124,10 @@ describe("emitter model collection", () => {
 				],
 			},
 		] as unknown as ResolvedProjection[];
-		const serialized = __test.serializeProjections(projections);
+		const serialized = __test.serializeProjections(
+			{} as unknown as Program,
+			projections,
+		);
 
 		assert.deepEqual(serialized, {
 			projections: [

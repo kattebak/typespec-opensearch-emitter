@@ -251,7 +251,25 @@ export const $lib = createTypeSpecLibrary({
 		"join-field-not-composed": {
 			severity: "error",
 			messages: {
-				default: paramMessage`Field "${"field"}" is bound to a join over "${"entity"}", but nothing states which of that model enters the document: it is neither a SearchProjection<${"entity"}> nor a @searchInfer model, and carries no @searchable property. Composing it would emit an empty object, which the mapping and the SDL cannot express. Type the field as a SearchProjection<${"entity"}> document, or declare on "${"entity"}" what the document carries.`,
+				default: paramMessage`Field "${"field"}" is bound to a join over "${"entity"}", but nothing states which of that model enters the document: it is neither a @searchInfer model nor a SearchProjection<${"entity"}> resolving at least one field, and carries no @searchable, @filterable or @aggregatable property. Composing it would emit an empty object, which the mapping and the SDL cannot express. Type the field as a SearchProjection<${"entity"}> document, or declare on "${"entity"}" what the document carries.`,
+			},
+		},
+		"join-cycle": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Field "${"field"}" composes "${"entity"}" into "${"projection"}", which is already being composed — a document cannot contain itself, and each hop would re-index the one before it without ever settling. Break the cycle by pointing one side at a document that carries no join back.`,
+			},
+		},
+		"join-field-collision": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Join field "${"name"}" collides with a field already resolved from source model "${"sourceModel"}". A join fills a field of its own; rename either the joined field or the source property so each one names a distinct document key.`,
+			},
+		},
+		"aggregation-name-collision": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Two different aggregations both resolve to the name "${"aggName"}": "${"first"}" and "${"second"}". The generated aggregations type carries one field per name, so the second would silently never run. Rename one of the fields, or give one of them a distinct @searchAs name.`,
 			},
 		},
 		"join-read-operation-missing": {

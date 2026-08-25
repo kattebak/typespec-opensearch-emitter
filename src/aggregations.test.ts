@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Type } from "@typespec/compiler";
+import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
 	__test,
 	aggregationsTypeName,
 	collectAggregations,
 	hasAggregations,
+	reportAggregationNameCollisions,
 } from "./aggregations.js";
-import type { ResolvedProjection } from "./projection.js";
+import {
+	type ResolvedProjection,
+	resolveProjectionModel,
+} from "./projection.js";
+import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
 const {
 	aggregationFieldName,
@@ -582,5 +588,85 @@ describe("isTextField", () => {
 			),
 			false,
 		);
+	});
+});
+
+describe("reportAggregationNameCollisions", () => {
+	async function createRunner() {
+		const host = await createTestHost({
+			libraries: [OpenSearchEmitterTestLibrary],
+		});
+
+		return createTestWrapper(host, {
+			autoImports: ["@kattebak/typespec-opensearch-emitter"],
+			autoUsings: ["Kattebak.OpenSearch"],
+		});
+	}
+
+	async function resolve(runner: Awaited<ReturnType<typeof createRunner>>) {
+		const projectionModel = runner.program
+			.getGlobalNamespaceType()
+			.models.get("CounterpartySearchDoc");
+		assert.ok(projectionModel);
+		const resolved = resolveProjectionModel(runner.program, projectionModel);
+		assert.ok(resolved);
+		return resolved;
+	}
+
+	it("reports two fields deriving the same aggregation name", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			@searchInfer
+			model Address {
+				@searchable @keyword country: string;
+			}
+
+			model Counterparty {
+				@searchable @keyword @aggregatable("terms") addressCountry: string;
+				@searchable address: Address;
+			}
+
+			@indexName("counterparties_v1")
+			model CounterpartySearchDoc is SearchProjection<Counterparty> {}
+		`);
+
+		const resolved = await resolve(runner);
+		const aggregations = collectAggregations(resolved);
+		assert.deepEqual(
+			aggregations.map((x) => x.aggName),
+			["byAddressCountry", "byAddressCountry"],
+		);
+
+		const before = runner.program.diagnostics.length;
+		reportAggregationNameCollisions(runner.program, aggregations);
+
+		const reported = runner.program.diagnostics
+			.slice(before)
+			.filter((x) => x.code.endsWith("aggregation-name-collision"));
+		assert.equal(reported.length, 1);
+		assert.match(reported[0].message, /byAddressCountry/);
+	});
+
+	it("stays quiet when the same aggregation is reached twice", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			model Counterparty {
+				@searchable @keyword @aggregatable("terms") country: string;
+			}
+
+			@indexName("counterparties_v1")
+			model CounterpartySearchDoc is SearchProjection<Counterparty> {}
+		`);
+
+		const resolved = await resolve(runner);
+		const aggregations = collectAggregations(resolved);
+
+		const before = runner.program.diagnostics.length;
+		reportAggregationNameCollisions(runner.program, [
+			...aggregations,
+			...aggregations,
+		]);
+
+		assert.deepEqual(runner.program.diagnostics.slice(before), []);
 	});
 });

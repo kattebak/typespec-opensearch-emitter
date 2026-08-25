@@ -45,21 +45,33 @@ export function collectSubProjections(
 	return result;
 }
 
+function directSubProjectionNames(projection: ResolvedProjection): string[] {
+	const names: string[] = [];
+	for (const field of projection.fields) {
+		const name = field.subProjection?.projectionModel.name;
+		if (!name || name === projection.projectionModel.name) {
+			continue;
+		}
+		if (!names.includes(name)) {
+			names.push(name);
+		}
+	}
+	return names;
+}
+
 export function emitDocType(
 	program: Program,
 	projection: ResolvedProjection,
 ): EmittedDocTypeFile {
 	const fileName = toDocTypeFileName(projection.projectionModel.name);
 
-	// Collect sub-projection imports needed
-	const subProjections = collectSubProjections(projection);
-	const imports = subProjections
-		.map((sp) => {
-			const subFile = toDocTypeFileName(sp.projectionModel.name).replace(
-				/\.ts$/,
-				".js",
-			);
-			return `import type { ${sp.projectionModel.name} } from "./${subFile}";`;
+	// Only the sub-projections this interface names: a deeper one is named by
+	// its own parent's file, and importing it here leaves an unused import
+	// behind (issue #197).
+	const imports = directSubProjectionNames(projection)
+		.map((name) => {
+			const subFile = toDocTypeFileName(name).replace(/\.ts$/, ".js");
+			return `import type { ${name} } from "./${subFile}";`;
 		})
 		.join("\n");
 

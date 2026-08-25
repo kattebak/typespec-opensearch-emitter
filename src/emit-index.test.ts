@@ -49,6 +49,40 @@ describe("index emitter", () => {
 		);
 	});
 
+	it("exports the join-resolver interface of a joined document too", () => {
+		const projections = [
+			{
+				projectionModel: { name: "PetCareSearchDoc" },
+				sourceModel: { name: "Pet" },
+				indexName: "pet_care_v1",
+				fields: [
+					{
+						name: "passport",
+						subProjection: {
+							projectionModel: { name: "PetPassportSearchDoc" },
+							sourceModel: { name: "PetPassport" },
+							fields: [],
+							joins: [{ entity: { name: "Vet" } }],
+						},
+					},
+				],
+				joins: [{ entity: { name: "PetPassport" } }],
+			},
+		] as unknown as ResolvedProjection[];
+
+		const emitted = emitIndex(projections);
+		assert.ok(
+			emitted.content.includes(
+				'export type { PetPassportSearchDocJoinResolver } from "./pet-passport-search-doc-join-resolver.js";',
+			),
+		);
+		assert.ok(
+			emitted.content.includes(
+				'export type { PetCareSearchDocJoinResolver } from "./pet-care-search-doc-join-resolver.js";',
+			),
+		);
+	});
+
 	it("derives constant names from projection model names", () => {
 		assert.equal(
 			toIndexConstantName("CounterpartySearchDoc"),

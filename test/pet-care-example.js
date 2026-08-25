@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import Ajv2020 from "ajv/dist/2020.js";
 
@@ -219,6 +220,28 @@ test("a joined field filters and facets like any other field of its type", async
 	assert.ok(resolver.includes('field: "passport.issuedCountry"'));
 });
 
+// Faceting the inbound side means aggregating inside the `nested` wrapper the
+// mapping opens for it, which no other case in the suite exercises.
+test("an aggregation on the @nested inbound side runs inside its nested path", async () => {
+	const sdl = await readFile(`${EMIT_DIR}/pet-care-search-doc.graphql`, "utf8");
+	assert.match(sdl, /^ {2}byOwnershipHistoryOwnerName: \[TermBucket!\]!$/m);
+
+	const resolver = await readFile(
+		`${EMIT_DIR}/pet-care-search-doc-resolver.js`,
+		"utf8",
+	);
+	assert.ok(
+		resolver.includes(
+			'{n:"byOwnershipHistoryOwnerName",g:"_ownershipHistory",p:"ownershipHistory"',
+		),
+	);
+	assert.ok(
+		resolver.includes(
+			"byOwnershipHistoryOwnerName: (_a_ownershipHistory.byOwnershipHistoryOwnerName?.buckets ?? [])",
+		),
+	);
+});
+
 test("the manifest's fields[] carries the joined fields alongside the source ones", async () => {
 	const manifest = await readJson("opensearch-projections.json");
 	const petCare = manifest.projections.find(
@@ -308,6 +331,94 @@ export const nugget: PetCareSearchDoc = {
 	);
 
 	await execFileAsync("npx", ["tsc", "-p", `${EMIT_DIR}/tsconfig.json`]);
+});
+
+// The type says the key may be absent; this runs the compose and checks it
+// actually is. A left join that wrote `passport: undefined` would satisfy the
+// type and still put an unmapped null in the index.
+test("an unresolved lookup leaves the key off the composed document", async () => {
+	await writeFile(
+		`${EMIT_DIR}/left-join-compose.ts`,
+		`import type { PetCareSearchDoc } from "./pet-care-search-doc.js";
+import type { PetCareSearchDocJoinResolver } from "./pet-care-search-doc-join-resolver.js";
+
+interface Pet {
+	petId: string;
+	name: string;
+	species: string;
+	passportId: string;
+}
+
+export async function compose(
+	pet: Pet,
+	resolver: PetCareSearchDocJoinResolver,
+): Promise<PetCareSearchDoc> {
+	const passport = await resolver.lookupPassport(pet.passportId);
+	const ownershipHistory = await resolver.discoverOwnershipHistory(pet.petId);
+
+	return {
+		...pet,
+		...(passport ? { passport } : {}),
+		ownershipHistory,
+	};
+}
+`,
+	);
+
+	await writeFile(
+		`${EMIT_DIR}/tsconfig.compose.json`,
+		JSON.stringify(
+			{
+				compilerOptions: {
+					module: "NodeNext",
+					moduleResolution: "NodeNext",
+					target: "ES2020",
+					strict: true,
+					outDir: "./dist",
+				},
+				include: ["*.ts"],
+			},
+			null,
+			2,
+		),
+	);
+
+	await execFileAsync("npx", [
+		"tsc",
+		"-p",
+		`${EMIT_DIR}/tsconfig.compose.json`,
+	]);
+
+	const { compose } = await import(
+		pathToFileURL(`${EMIT_DIR}/dist/left-join-compose.js`).href
+	);
+
+	const nugget = await compose(
+		{ petId: "nugget", name: "Nugget", species: "cat", passportId: "" },
+		{
+			lookupPassport: async () => undefined,
+			discoverOwnershipHistory: async () => [],
+		},
+	);
+
+	assert.equal("passport" in nugget, false);
+	assert.deepEqual(nugget.ownershipHistory, []);
+
+	const waffles = await compose(
+		{ petId: "waffles", name: "Waffles", species: "dog", passportId: "NL-01" },
+		{
+			lookupPassport: async () => ({
+				microchipId: "982000123456789",
+				issuedCountry: "NL",
+				vaccinations: ["rabies"],
+			}),
+			discoverOwnershipHistory: async () => [
+				{ ownerName: "Iris", transferredAt: "2026-03-01T00:00:00Z" },
+			],
+		},
+	);
+
+	assert.equal(waffles.passport.issuedCountry, "NL");
 });
 
 test("the schemas resolve through the package exports map", async () => {

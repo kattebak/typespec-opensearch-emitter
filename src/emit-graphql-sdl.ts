@@ -10,6 +10,7 @@ import {
 	aggregationsTypeName,
 	collectAggregations,
 	hasAggregations,
+	reportAggregationNameCollisions,
 } from "./aggregations.js";
 import {
 	getGraphqlDirectives,
@@ -137,6 +138,7 @@ export function emitGraphQLSdl(
 	}
 
 	const aggEntries = collectAggregations(projection);
+	reportAggregationNameCollisions(program, aggEntries);
 	if (aggEntries.length > 0) {
 		lines.push(
 			renderAggregationTypes(typeName, aggEntries, projectionDirectives),

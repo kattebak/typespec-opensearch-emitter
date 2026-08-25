@@ -41,12 +41,19 @@ const RANGE_BOUND_SUFFIX: Record<RangeBound, string> = {
 export function collectFilterables(
 	projection: ResolvedProjection,
 ): FilterableEntry[] {
-	return collectFilterablesRecursive(projection, undefined);
+	return collectFilterablesRecursive(projection, undefined, undefined);
 }
 
+/**
+ * `documentPath` is where the field sits in the document; `nestedPath` is the
+ * `nested` wrapper the filter runs inside, which only a `@nested` field opens.
+ * A plain object sub-projection deepens the first and leaves the second alone,
+ * matching what the emitted filter spec already threads (issue #98).
+ */
 function collectFilterablesRecursive(
 	projection: ResolvedProjection,
 	nestedPath: string | undefined,
+	documentPath: string | undefined,
 ): FilterableEntry[] {
 	const entries: FilterableEntry[] = [];
 
@@ -56,15 +63,22 @@ function collectFilterablesRecursive(
 
 	for (const field of projection.fields) {
 		if (field.filterables && field.filterables.length > 0) {
-			entries.push(...filterableEntriesForField(field, nestedPath));
+			entries.push(
+				...filterableEntriesForField(field, nestedPath, documentPath),
+			);
 		}
 
 		if (field.subProjection) {
-			const childPath = field.nested
-				? joinNestedPath(nestedPath, field.projectedName ?? field.name)
-				: nestedPath;
+			const childPath = joinNestedPath(
+				documentPath,
+				field.projectedName ?? field.name,
+			);
 			entries.push(
-				...collectFilterablesRecursive(field.subProjection, childPath),
+				...collectFilterablesRecursive(
+					field.subProjection,
+					field.nested ? childPath : nestedPath,
+					childPath,
+				),
 			);
 		}
 	}
@@ -75,6 +89,7 @@ function collectFilterablesRecursive(
 function filterableEntriesForField(
 	field: ResolvedProjectionField,
 	nestedPath: string | undefined,
+	documentPath: string | undefined = nestedPath,
 ): FilterableEntry[] {
 	const entries: FilterableEntry[] = [];
 	const projectedName = field.projectedName ?? field.name;
@@ -88,8 +103,8 @@ function filterableEntriesForField(
 			!isAnalyzedKind(kind) && needsKeywordSuffix(field)
 				? `${projectedName}.keyword`
 				: projectedName;
-		const openSearchField = nestedPath
-			? `${nestedPath}.${fieldPart}`
+		const openSearchField = documentPath
+			? `${documentPath}.${fieldPart}`
 			: fieldPart;
 
 		if (kind === "range") {

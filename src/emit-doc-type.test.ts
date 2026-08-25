@@ -402,6 +402,45 @@ describe("doc type emitter", () => {
 		);
 	});
 
+	it("imports only the sub-projections its own interface names", async () => {
+		const emitted = await emitFor(
+			`
+			model Vet {
+				@searchable @keyword clinic: string;
+			}
+
+			model VetSearchDoc is SearchProjection<Vet> {}
+
+			model Tag {
+				@searchable @keyword name: string;
+				@searchable vet: Vet;
+			}
+
+			model TagSearchDoc is SearchProjection<Tag> {
+				vet: VetSearchDoc;
+			}
+
+			model Pet {
+				@searchable name: string;
+				@searchable @nested tags: Tag[];
+			}
+
+			@indexName("pets_v1")
+			model PetSearchDoc is SearchProjection<Pet> {
+				tags: TagSearchDoc[];
+			}
+			`,
+			"PetSearchDoc",
+		);
+
+		assert.ok(
+			emitted.content.includes(
+				'import type { TagSearchDoc } from "./tag-search-doc.js";',
+			),
+		);
+		assert.ok(!emitted.content.includes("VetSearchDoc"));
+	});
+
 	it("renders enum field as string literal union", async () => {
 		const emitted = await emitFor(
 			`

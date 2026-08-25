@@ -10,6 +10,9 @@ import { getHttpOperation } from "@typespec/http";
 import {
 	getJoinDependencies,
 	getResolvableBy,
+	getSearchAs,
+	hasAggregatable,
+	hasFilterable,
 	isRestResolver,
 	isSearchable,
 	isSearchInfer,
@@ -17,7 +20,7 @@ import {
 import { reportDiagnostic } from "./lib.js";
 import {
 	getProjectionSourceModel,
-	isSearchProjectionModel,
+	type ResolvedProjection,
 } from "./projection.js";
 
 export const JOIN_DIRECTIONS = ["lookup", "inbound"] as const;
@@ -130,11 +133,38 @@ export function candidateJoinFields(
 }
 
 /**
+ * True when a property lands in the composed document. `@searchable` puts it in
+ * the response shape; `@filterable` and `@aggregatable` put it in the index for
+ * query-time use. Any of the three is a statement about what the document
+ * carries, so all three admit the field the same way projection resolution
+ * does.
+ */
+function contributesToDocument(
+	program: Program,
+	property: ModelProperty,
+): boolean {
+	return (
+		isSearchable(program, property) ||
+		hasFilterable(program, property) ||
+		hasAggregatable(program, property)
+	);
+}
+
+function declaresDocumentContent(program: Program, model: Model): boolean {
+	if (isSearchInfer(program, model)) {
+		return model.properties.size > 0;
+	}
+	return [...model.properties.values()].some((property) =>
+		contributesToDocument(program, property),
+	);
+}
+
+/**
  * True when something states which of the joined entity enters the document
- * (issue #195): a `SearchProjection<T>` document, a `@searchInfer` model whose
- * fields the emitter derives, or a plain model with `@searchable` properties.
- * A model offering none of the three composes into an empty object, which the
- * mapping and the SDL cannot express.
+ * (issue #195): a `SearchProjection<T>` document that resolves at least one
+ * field, a `@searchInfer` model whose fields the emitter derives, or a plain
+ * model declaring what it contributes. A model offering none of the three
+ * composes into an empty object, which the mapping and the SDL cannot express.
  */
 export function composesIntoDocument(
 	program: Program,
@@ -144,15 +174,16 @@ export function composesIntoDocument(
 	if (joined.kind !== "Model") {
 		return false;
 	}
-	if (
-		isSearchProjectionModel(program, joined) ||
-		isSearchInfer(program, joined)
-	) {
-		return true;
+	const sourceModel = getProjectionSourceModel(program, joined);
+	if (sourceModel) {
+		if (getJoinDependencies(program, joined).length > 0) {
+			return true;
+		}
+		return isSearchInfer(program, joined)
+			? sourceModel.properties.size > 0
+			: declaresDocumentContent(program, sourceModel);
 	}
-	return [...joined.properties.values()].some((property) =>
-		isSearchable(program, property),
-	);
+	return declaresDocumentContent(program, joined);
 }
 
 export function resolveJoinDependencies(
@@ -206,14 +237,85 @@ function hasExpectedArity(
 	return direction === "inbound" ? isArray : !isArray;
 }
 
+/**
+ * Every entity a document is composed from, the ones reached through another
+ * join included (issue #197). A joined document carrying its own `@dependsOn`
+ * puts that entity's rows in the driving document, so a write there re-indexes
+ * it just the same — a manifest listing only the first hop names fewer triggers
+ * than the document actually has.
+ *
+ * The closure is flat: `field` carries the joined value's key path in the
+ * composed document, dotted for a transitive entry, which is where a consumer
+ * places the value and how two hops over the same entity stay apart.
+ */
+export function collectJoinDependencies(
+	program: Program,
+	projection: ResolvedProjection,
+): JoinDependencyManifestEntry[] {
+	const entries: JoinDependencyManifestEntry[] = [];
+	const seen = new Set<string>();
+
+	const walk = (current: ResolvedProjection, prefix: string | undefined) => {
+		for (const dependency of current.joins ?? []) {
+			const entry = toJoinDependencyManifestEntry(
+				program,
+				dependency,
+				documentKeyPath(program, dependency.field, prefix),
+			);
+			const key = JSON.stringify(entry);
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			entries.push(entry);
+		}
+
+		for (const field of current.fields) {
+			if (!field.subProjection) {
+				continue;
+			}
+			walk(
+				field.subProjection,
+				documentKeyPath(
+					program,
+					field.sourceProperty,
+					prefix,
+					field.projectedName,
+				),
+			);
+		}
+	};
+
+	walk(projection, undefined);
+	return entries;
+}
+
+function documentKeyPath(
+	program: Program,
+	property: ModelProperty,
+	prefix: string | undefined,
+	projectedName?: string,
+): string {
+	const key = projectedName ?? getSearchAs(program, property) ?? property.name;
+	return prefix ? `${prefix}.${key}` : key;
+}
+
+/**
+ * `field` names the document key the joined value lands in, so it carries the
+ * projected name — a `@searchAs` rename moves the key, and a consumer placing
+ * the value by the TypeSpec property name would write a key the mapping does
+ * not declare.
+ */
 export function toJoinDependencyManifestEntry(
+	program: Program,
 	dependency: ResolvedJoinDependency,
+	field = documentKeyPath(program, dependency.field, undefined),
 ): JoinDependencyManifestEntry {
 	return {
 		entity: dependency.entity.name,
 		direction: dependency.direction,
 		joinKey: dependency.joinKey.name,
-		field: dependency.field.name,
+		field,
 		...(dependency.index ? { index: dependency.index } : {}),
 	};
 }
