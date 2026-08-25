@@ -43,7 +43,11 @@ function isReachable(
 	return !!typeModel && isSearchInfer(program, typeModel);
 }
 
-import { candidateJoinFields, type ResolvedJoinDependency } from "./joins.js";
+import {
+	candidateJoinFields,
+	type ResolvedJoinDependency,
+	resolveJoinDependencies,
+} from "./joins.js";
 import { reportDiagnostic } from "./lib.js";
 import {
 	getProjectionSourceModel,
@@ -73,9 +77,10 @@ export interface ResolvedProjectionField {
 }
 
 /**
- * True when the property is the field a declared join fills (issue #194).
- * `join-field-not-composed` states the same thing to the author; the emitter
- * only needs to know the field is accounted for, not missing from the source.
+ * True when the property is the field a declared join fills (issue #194). It
+ * is accounted for whether or not the join survives validation, so a broken
+ * declaration reports its own diagnostic instead of also reading as a field
+ * missing from the source model.
  */
 function isJoinProvidedField(
 	program: Program,
@@ -100,9 +105,9 @@ export interface ResolvedProjection {
 	indexSettings?: Record<string, unknown>;
 	fields: ResolvedProjectionField[];
 	/**
-	 * Cross-domain joins declared with `@dependsOn` (issue #194). Filled by
-	 * `resolveJoinDependencies` after the projection resolves, so a projection
-	 * carries the joins that survived validation.
+	 * Cross-domain joins declared with `@dependsOn` (issue #194) that survived
+	 * validation. Each one also contributes its bound field to `fields`, so the
+	 * document type, mapping, SDL, filters and aggregations carry it.
 	 */
 	joins?: ResolvedJoinDependency[];
 }
@@ -239,13 +244,50 @@ export function resolveProjectionModel(
 		}
 	}
 
+	const joins = resolveJoinDependencies(program, projectionModel);
+	for (const join of joins) {
+		fields.push(resolveJoinField(program, projectionModel, join, inferOnModel));
+	}
+
 	return {
 		projectionModel,
 		sourceModel,
 		indexName: getIndexName(program, projectionModel),
 		indexSettings: getIndexSettings(program, projectionModel),
 		fields,
+		joins,
 	};
+}
+
+/**
+ * The document field a `@dependsOn` declaration fills (issue #195). No source
+ * model owns the bound property, so it stands in for both axes, and the
+ * declaration itself is what puts the field in the response shape — a join
+ * states that the value belongs on the document.
+ */
+function resolveJoinField(
+	program: Program,
+	projectionModel: Model,
+	join: ResolvedJoinDependency,
+	inferOnModel: boolean,
+): ResolvedProjectionField {
+	const field = resolveProjectionField(
+		program,
+		join.field,
+		join.field,
+		inferOnModel,
+	);
+	const subProjection =
+		resolveSubProjectionFromType(program, field.type) ??
+		(shouldVirtualRecurse(program, field.type, inferOnModel)
+			? buildVirtualSubProjection(
+					program,
+					field.type,
+					new Set([projectionModel.name]),
+				)
+			: undefined);
+
+	return { ...field, searchable: true, subProjection };
 }
 
 function resolveProjectionField(
@@ -647,12 +689,18 @@ function resolveSubProjectionModel(
 		fields.push(field);
 	}
 
+	const joins = resolveJoinDependencies(program, model);
+	for (const join of joins) {
+		fields.push(resolveJoinField(program, model, join, inferOnModel));
+	}
+
 	return {
 		projectionModel: model,
 		sourceModel,
 		indexName: getIndexName(program, model),
 		indexSettings: getIndexSettings(program, model),
 		fields,
+		joins,
 	};
 }
 

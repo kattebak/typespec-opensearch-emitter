@@ -45,7 +45,6 @@ import {
 } from "./emit-string-module.js";
 import {
 	type ResolvableByManifestEntry,
-	resolveJoinDependencies,
 	toJoinDependencyManifestEntry,
 } from "./joins.js";
 import { type OpenSearchEmitterOptions, reportDiagnostic } from "./lib.js";
@@ -84,14 +83,7 @@ export async function $onEmit(
 
 	const resolved: ResolvedProjection[] = projectionModels
 		.map((model) => resolveProjectionModel(context.program, model))
-		.filter((x): x is ResolvedProjection => x !== undefined)
-		.map((projection) => ({
-			...projection,
-			joins: resolveJoinDependencies(
-				context.program,
-				projection.projectionModel,
-			),
-		}));
+		.filter((x): x is ResolvedProjection => x !== undefined);
 
 	// Issue #123 — `is SearchProjection<T>` declares a projection-shaped type;
 	// `@searchProjection` is the additional gate for *top-level* emission

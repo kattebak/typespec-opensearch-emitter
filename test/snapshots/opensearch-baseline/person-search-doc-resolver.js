@@ -36,8 +36,8 @@ export function response(ctx) {
 		totalCount: totalHits,
 		aggregations: {
 			byId: (_a.byId?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
-			byCountry: (_a.byCountry?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
-			byCity: (_a.byCity?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			byAddressCountry: (_a.byAddressCountry?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			byAddressCity: (_a.byAddressCity?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
 		},
 		pageInfo: {
 			hasNextPage,

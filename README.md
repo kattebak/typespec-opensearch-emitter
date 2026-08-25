@@ -616,6 +616,8 @@ Field-name conventions in the generated `*SearchAggregations` type (singular for
 | `date_histogram` | `by<Field>OverTime` | `[DateHistogramBucket!]!` |
 | `range` | `by<Field>Range` | `[RangeBucket!]!` |
 
+A field inside a sub-projection is addressed by its path in the document and named for it: `address.country` aggregates on `address.country` and surfaces as `byAddressCountry`. A `@nested` sub-projection wraps its aggregations in a `nested` aggregation on that path; a plain object sub-projection needs no wrapper.
+
 `date_histogram` requires `interval` (one of `year`, `quarter`, `month`, `week`, `day`, `hour` — defaults to `month` if omitted) and takes an optional `bounds` — see [Bounding a date_histogram](#bounding-a-date_histogram). `range` requires `ranges` (array of `{ from?, to?, key? }`; each entry must set at least one of `from` / `to`). `terms` `sub` allows numeric metric sub-aggregations (`sum`/`avg`/`min`/`max`/`cardinality`) keyed by output bucket field name.
 
 #### Bounding a `date_histogram`
@@ -741,7 +743,7 @@ A pet care view wants three things in one index: the pet, its passport (a separa
 model PetPassport {
   passportId: string;
   @searchable @keyword microchipId: string;
-  @searchable @keyword issuedCountry: string;
+  @searchable @keyword @filterable("term") @aggregatable("terms") issuedCountry: string;
   @searchable @keyword vaccinations: string[];
 }
 
@@ -749,7 +751,7 @@ model PetPassport {
 model OwnershipRecord {
   ownershipRecordId: string;
   petId: string;
-  @searchable @keyword ownerName: string;
+  @searchable @keyword @filterable("term") ownerName: string;
   @searchable @filterable("range") transferredAt: utcDateTime;
 }
 
@@ -773,7 +775,46 @@ Both joins are left joins. Waffles the beagle has a passport; Nugget, a stray, d
 
 A declaration says where the joined value lands, not only that it exists. Each `@dependsOn` binds to **exactly one** projection field — the one typed as the entity or as its search document. A `lookup` fills a single-valued field, an `inbound` fills an array. That binding is what names the resolver method and what `dependencies[].field` carries.
 
-Until the emitter composes the joined values, a bound field is absent from the emitted document type, mapping and SDL, and `join-field-not-composed` says so on every compile.
+A field typed as the entity itself, rather than as its search document, composes from that model's `@searchable` properties — or from the whole model when it carries `@searchInfer`. A model offering neither has nothing to contribute and reports `join-field-not-composed`.
+
+### What a bound field composes into
+
+The bound field is an ordinary field of the document from there on. It lands in the emitted document type, the index mapping and the GraphQL SDL, mapped `nested` where the projection declares `@nested`:
+
+```ts
+export interface PetCareSearchDoc {
+	petId: string;
+	name: string;
+	species: string;
+	passportId: string;
+	passport?: PetPassportSearchDoc;
+	ownershipHistory: OwnershipRecordSearchDoc[];
+}
+```
+
+```json
+"passport": { "type": "object", "properties": { "microchipId": { "type": "keyword" } } },
+"ownershipHistory": { "type": "nested", "properties": { "ownerName": { "type": "keyword" } } }
+```
+
+Both joins are left joins, so an absent passport leaves the field absent and a pet with no records carries `[]`.
+
+### Filtering and faceting a joined field
+
+A joined field filters, sorts and aggregates like any other field of its type: the joined document's own `@filterable`, `@aggregatable` and `@sortable` declarations reach the parent's `SearchFilter`, sort enum and aggregations, addressed by their path in the composed document.
+
+```graphql
+input PetCareSearchFilter {
+  passport: PetPassportSearchFilter
+  ownershipHistory: OwnershipRecordSearchFilter
+}
+
+type PetCareSearchAggregations {
+  byPassportIssuedCountry: [TermBucket!]!
+}
+```
+
+This is the point of composing at index time: one query facets over fields several domains own, with exact counts.
 
 ### The read a join runs against
 
@@ -837,6 +878,67 @@ export interface PetCareSearchDocJoinResolver {
 
 A `lookup` returns one row or nothing; a discovery returns however many rows the index holds. Naming the method after the field keeps two joins over the same entity apart, since a model cannot declare a property twice.
 
+### Implementing a join resolver
+
+The interface is the whole contract. The emitter names the methods and types them; the implementation supplies the bodies, and nothing about it is prescribed — a REST client, a database read, a cache, an in-memory map all satisfy the same interface.
+
+**A `lookup` returns the one row its key names, or `undefined`.** The argument is the value the driving row carries in the declared join key. `undefined` means the reference resolves to nothing, and the field is absent from the composed document.
+
+**A discovery returns every row referencing the driving entity, or `[]`.** The argument is the driving entity's key value. Order is not significant — a `@nested` array is queried per row, not by position. No rows is `[]`, never `undefined`.
+
+**Return the document shape, not the source entity.** The return type is the field's declared type, so only the fields the mapping declares are carried. Anything else is written into the index unmapped.
+
+**A read that fails, fails the compose.** Never return `undefined` or `[]` to stand in for an error: both are valid answers, so a swallowed failure writes a document that is silently wrong and stays wrong until the next write to the driving entity.
+
+For the pet care view, with reads the caller supplies:
+
+```ts
+import type {
+	OwnershipRecordSearchDoc,
+	PetCareSearchDocJoinResolver,
+	PetPassportSearchDoc,
+} from "./generated/index.js";
+
+interface PetCareReads {
+	petPassport(passportId: string): Promise<PetPassportSearchDoc | undefined>;
+	ownershipRecords(petId: string): Promise<OwnershipRecordSearchDoc[]>;
+}
+
+export function petCareJoinResolver(
+	reads: PetCareReads,
+): PetCareSearchDocJoinResolver {
+	return {
+		lookupPassport: (passportId) => reads.petPassport(passportId),
+		discoverOwnershipHistory: (petId) => reads.ownershipRecords(petId),
+	};
+}
+```
+
+Composing one document is then a function of the driving row:
+
+```ts
+const passport = await resolver.lookupPassport(pet.passportId);
+const ownershipHistory = await resolver.discoverOwnershipHistory(pet.petId);
+
+const document: PetCareSearchDoc = {
+	...pet,
+	...(passport ? { passport } : {}),
+	ownershipHistory,
+};
+```
+
+#### What re-indexes a document
+
+A composed document is a snapshot: it is only as fresh as the last compose, and a query never reads through to the joined domain. Keeping it current is the writer's job, and `dependencies[]` states which writes matter.
+
+| Write | Re-index |
+| --- | --- |
+| The driving entity | Its own document |
+| An entity reached by `lookup` | Every document whose join key names it |
+| An entity reached by `inbound` | The document its join key names |
+
+An `inbound` declaration is what makes a write in the joined domain a trigger at all, which is why it requires a `@resolvableBy` index: discovering affected documents is a query by the join key, not a fetch. Recompose the whole document rather than patching the changed field — the compose is a pure function of the driving row's id, so a replay or a reordered trigger converges on the same document.
+
 ### Diagnostics
 
 | Code | Severity | Fires when |
@@ -849,7 +951,7 @@ A `lookup` returns one row or nothing; a discovery returns however many rows the
 | `join-field-missing` | error | No projection field is typed to receive the declared entity. |
 | `join-field-ambiguous` | error | More than one field could receive it, so nothing decides which. |
 | `join-field-arity` | error | A `lookup` bound to an array field, or an `inbound` bound to a single-valued one. |
-| `join-field-not-composed` | warning | The binding holds, but the joined value is not yet composed into the document. |
+| `join-field-not-composed` | error | The bound field names a model that states nothing about what enters the document — no `SearchProjection<T>`, no `@searchInfer`, no `@searchable` property — so composing it would emit an empty object. |
 | `join-read-operation-missing` | warning | No `@restResolver` GET returns the entity and takes its declared key, so the join has nothing to call. |
 
 

@@ -25,12 +25,19 @@ export const NESTED_INNER_AGG_NAME = "inner";
 export function collectAggregations(
 	projection: ResolvedProjection,
 ): AggregationEntry[] {
-	return collectAggregationsRecursive(projection, undefined);
+	return collectAggregationsRecursive(projection, undefined, undefined);
 }
 
+/**
+ * `documentPath` is where the field sits in the document; `nestedPath` is the
+ * `nested` wrapper the aggregation runs inside, which only a `@nested` field
+ * opens. A plain object sub-projection deepens the first and leaves the second
+ * alone, the way the filter shape already threads a dotted path (issue #98).
+ */
 function collectAggregationsRecursive(
 	projection: ResolvedProjection,
 	nestedPath: string | undefined,
+	documentPath: string | undefined,
 ): AggregationEntry[] {
 	const entries: AggregationEntry[] = [];
 
@@ -45,8 +52,8 @@ function collectAggregationsRecursive(
 			const fieldPart = useTextType
 				? `${projectedName}.keyword`
 				: projectedName;
-			const openSearchField = nestedPath
-				? `${nestedPath}.${fieldPart}`
+			const openSearchField = documentPath
+				? `${documentPath}.${fieldPart}`
 				: fieldPart;
 
 			for (const directive of field.aggregations) {
@@ -56,7 +63,7 @@ function collectAggregationsRecursive(
 					aggName: aggregationFieldName(
 						projectedName,
 						directive.kind,
-						nestedPath,
+						documentPath,
 						isArrayType(field.type),
 					),
 					openSearchField,
@@ -68,11 +75,16 @@ function collectAggregationsRecursive(
 		}
 
 		if (field.subProjection) {
-			const childPath = field.nested
-				? joinNestedPath(nestedPath, field.projectedName ?? field.name)
-				: nestedPath;
+			const childPath = joinNestedPath(
+				documentPath,
+				field.projectedName ?? field.name,
+			);
 			entries.push(
-				...collectAggregationsRecursive(field.subProjection, childPath),
+				...collectAggregationsRecursive(
+					field.subProjection,
+					field.nested ? childPath : nestedPath,
+					childPath,
+				),
 			);
 		}
 	}
@@ -96,7 +108,7 @@ export function aggregationsTypeName(projectionName: string): string {
 export function aggregationFieldName(
 	fieldName: string,
 	kind: AggregationKind,
-	nestedPath?: string,
+	documentPath?: string,
 	fieldIsArray = false,
 ): string {
 	// Only collapse a trailing "s" when the source field is itself an array
@@ -106,7 +118,7 @@ export function aggregationFieldName(
 	const fieldPart = capitalize(
 		fieldIsArray ? singularize(fieldName) : fieldName,
 	);
-	const prefix = nestedPath ? nestedPathPrefix(nestedPath) : "";
+	const prefix = documentPath ? documentPathPrefix(documentPath) : "";
 	const capital = `${prefix}${fieldPart}`;
 	const camel = lowerFirst(capital);
 	switch (kind) {
@@ -136,8 +148,8 @@ function lowerFirst(name: string): string {
 	return name[0].toLowerCase() + name.slice(1);
 }
 
-function nestedPathPrefix(nestedPath: string): string {
-	return nestedPath
+function documentPathPrefix(documentPath: string): string {
+	return documentPath
 		.split(".")
 		.map((segment) => capitalize(singularize(segment)))
 		.join("");

@@ -2,7 +2,7 @@ import { util } from "@aws-appsync/utils";
 
 const FILTER_SPEC = [{i:"id",k:"term",f:"id"}, {i:"idIn",k:"terms",f:"id"}, {i:"idExists",k:"exists",f:"id"}, {i:"address",k:"object",c:[{i:"country",k:"term",f:"address.country"}, {i:"countryIn",k:"terms",f:"address.country"}, {i:"countryExists",k:"exists",f:"address.country"}, {i:"city",k:"term",f:"address.city"}, {i:"cityIn",k:"terms",f:"address.city"}, {i:"cityExists",k:"exists",f:"address.city"}]}];
 
-const AGG_SPEC = [{n:"byId",a:{ terms: { field: "id", size: 10 } }}, {n:"byCountry",a:{ terms: { field: "country", size: 10 } }}, {n:"byCity",a:{ terms: { field: "city", size: 10 } }}];
+const AGG_SPEC = [{n:"byId",a:{ terms: { field: "id", size: 10 } }}, {n:"byAddressCountry",a:{ terms: { field: "address.country", size: 10 } }}, {n:"byAddressCity",a:{ terms: { field: "address.city", size: 10 } }}];
 
 export function request(ctx) {
 	const args = ctx.args;

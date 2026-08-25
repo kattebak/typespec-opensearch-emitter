@@ -32,9 +32,9 @@ type PersonSearchAggregations {
 
   byId: [TermBucket!]!
 
-  byCountry: [TermBucket!]!
+  byAddressCountry: [TermBucket!]!
 
-  byCity: [TermBucket!]!
+  byAddressCity: [TermBucket!]!
 
 }
 
