@@ -47,6 +47,7 @@ import {
 	candidateJoinFields,
 	type ResolvedJoinDependency,
 	resolveJoinDependencies,
+	unwrapArrayElement,
 } from "./joins.js";
 import { reportDiagnostic } from "./lib.js";
 import {
@@ -128,6 +129,8 @@ export function resolveProjectionModel(
 	}
 
 	const inferOnModel = isSearchInfer(program, projectionModel);
+	// Composition path: a model already on it cannot be composed into itself.
+	const visited: ReadonlySet<string> = new Set([projectionModel.name]);
 
 	const fields: ResolvedProjectionField[] = [];
 	for (const sourceProperty of sourceModel.properties.values()) {
@@ -150,6 +153,7 @@ export function resolveProjectionModel(
 			const subProj = resolveSubProjectionFromType(
 				program,
 				projectionProperty.type,
+				visited,
 			);
 			if (subProj) {
 				field.subProjection = subProj;
@@ -165,11 +169,7 @@ export function resolveProjectionModel(
 			!isSearchSkip(program, sourceProperty) &&
 			shouldVirtualRecurse(program, field.type, inferOnModel)
 		) {
-			const virtual = buildVirtualSubProjection(
-				program,
-				field.type,
-				new Set([projectionModel.name]),
-			);
+			const virtual = buildVirtualSubProjection(program, field.type, visited);
 			if (virtual) {
 				field.subProjection = virtual;
 			}
@@ -218,7 +218,11 @@ export function resolveProjectionModel(
 			);
 
 			// Check for sub-projection on the projection property
-			const subProj = resolveSubProjectionFromType(program, projProp.type);
+			const subProj = resolveSubProjectionFromType(
+				program,
+				projProp.type,
+				visited,
+			);
 			if (subProj) {
 				field.subProjection = subProj;
 			}
@@ -229,10 +233,11 @@ export function resolveProjectionModel(
 		}
 
 		if (!sourceProp || !isReachable(program, sourceProp, inferOnModel)) {
-			// Allow sub-projection fields that reference a valid source field
-			const subProj = resolveSubProjectionFromType(program, projProp.type);
+			// Allow sub-projection fields that reference a valid source field.
+			// Naming one is all this asks — resolving it here would report its
+			// diagnostics a second time.
 			if (
-				(!subProj || !sourceProp) &&
+				(!namesSubProjection(program, projProp.type) || !sourceProp) &&
 				!isJoinProvidedField(program, projectionModel, projProp)
 			) {
 				reportDiagnostic(program, {
@@ -244,10 +249,15 @@ export function resolveProjectionModel(
 		}
 	}
 
-	const joins = resolveJoinDependencies(program, projectionModel);
-	for (const join of joins) {
-		fields.push(resolveJoinField(program, projectionModel, join, inferOnModel));
-	}
+	const joins = composeJoinFields(
+		program,
+		projectionModel,
+		sourceModel,
+		inferOnModel,
+		visited,
+		fields,
+		resolvedFieldNames,
+	);
 
 	return {
 		projectionModel,
@@ -257,6 +267,50 @@ export function resolveProjectionModel(
 		fields,
 		joins,
 	};
+}
+
+/**
+ * Appends the fields a projection's `@dependsOn` declarations fill, dropping
+ * any declaration that cannot take its place in the document: one composing a
+ * model already on the composition path, and one whose field name is already
+ * taken by the source model. Both are reported, and neither reaches `joins` —
+ * a dependency the document does not carry would name a re-index trigger for a
+ * field that is not there.
+ */
+function composeJoinFields(
+	program: Program,
+	projectionModel: Model,
+	sourceModel: Model,
+	inferOnModel: boolean,
+	visited: ReadonlySet<string>,
+	fields: ResolvedProjectionField[],
+	resolvedFieldNames: Set<string>,
+): ResolvedJoinDependency[] {
+	const joins: ResolvedJoinDependency[] = [];
+	for (const join of resolveJoinDependencies(program, projectionModel)) {
+		const field = resolveJoinField(
+			program,
+			projectionModel,
+			join,
+			inferOnModel,
+			visited,
+		);
+		if (!field) {
+			continue;
+		}
+		if (resolvedFieldNames.has(field.name)) {
+			reportDiagnostic(program, {
+				code: "join-field-collision",
+				format: { name: field.name, sourceModel: sourceModel.name },
+				target: join.field,
+			});
+			continue;
+		}
+		resolvedFieldNames.add(field.name);
+		fields.push(field);
+		joins.push(join);
+	}
+	return joins;
 }
 
 /**
@@ -270,22 +324,40 @@ function resolveJoinField(
 	projectionModel: Model,
 	join: ResolvedJoinDependency,
 	inferOnModel: boolean,
-): ResolvedProjectionField {
+	visited: ReadonlySet<string>,
+): ResolvedProjectionField | undefined {
+	const joined = unwrapArrayElement(join.field.type) ?? join.field.type;
+	if (joined.kind === "Model" && visited.has(joined.name)) {
+		reportDiagnostic(program, {
+			code: "join-cycle",
+			format: {
+				field: join.field.name,
+				entity: joined.name,
+				projection: projectionModel.name,
+			},
+			target: join.field,
+		});
+		return undefined;
+	}
+
 	const field = resolveProjectionField(
 		program,
 		join.field,
 		join.field,
 		inferOnModel,
 	);
+	// A joined field composes whether or not the type is a SearchProjection<T>:
+	// an entity typed directly still owes the document its filter and
+	// aggregation contract, so it gets a sub-projection over what it declares
+	// rather than a bare object the specs silently skip (issue #197).
 	const subProjection =
-		resolveSubProjectionFromType(program, field.type) ??
-		(shouldVirtualRecurse(program, field.type, inferOnModel)
-			? buildVirtualSubProjection(
-					program,
-					field.type,
-					new Set([projectionModel.name]),
-				)
-			: undefined);
+		resolveSubProjectionFromType(program, field.type, visited) ??
+		buildVirtualSubProjection(
+			program,
+			field.type,
+			visited,
+			shouldVirtualRecurse(program, field.type, inferOnModel),
+		);
 
 	return { ...field, searchable: true, subProjection };
 }
@@ -556,10 +628,17 @@ function unwrapStructModel(type: Type): Model | undefined {
 	return undefined;
 }
 
+/**
+ * `infer` is off when the model states its own contribution field by field —
+ * a joined entity typed directly (issue #197). Then only the properties a
+ * decorator admits compose, and their explicit directives are all that carries,
+ * matching what the document type and the mapping already emit for it.
+ */
 function buildVirtualSubProjection(
 	program: Program,
 	type: Type,
-	visited: Set<string>,
+	visited: ReadonlySet<string>,
+	infer = true,
 ): ResolvedProjection | undefined {
 	let model: Model | undefined;
 	if (type.kind === "Model") {
@@ -590,8 +669,12 @@ function buildVirtualSubProjection(
 	const fields: ResolvedProjectionField[] = [];
 	for (const prop of model.properties.values()) {
 		if (isSearchSkip(program, prop)) continue;
-		const field = resolveProjectionField(program, prop, undefined, true);
-		if (!field.subProjection) {
+		if (!infer && !isReachable(program, prop, false)) continue;
+		const field = resolveProjectionField(program, prop, undefined, infer);
+		if (
+			!field.subProjection &&
+			shouldVirtualRecurse(program, field.type, infer)
+		) {
 			const nestedVirtual = buildVirtualSubProjection(
 				program,
 				field.type,
@@ -618,17 +701,27 @@ function buildVirtualSubProjection(
  * Given a Type, check if it is (or is an array of) a SearchProjection model,
  * and if so resolve it recursively.
  */
+function namesSubProjection(program: Program, type: Type): boolean {
+	if (type.kind !== "Model") {
+		return false;
+	}
+	const element = unwrapArrayElement(type);
+	const model = element?.kind === "Model" ? element : type;
+	return !!getProjectionSourceModel(program, model);
+}
+
 function resolveSubProjectionFromType(
 	program: Program,
 	type: Type,
+	visited: ReadonlySet<string>,
 ): ResolvedProjection | undefined {
 	// Handle direct model reference: TagSearchDoc
 	if (type.kind === "Model") {
 		// Handle Array<TagSearchDoc> — e.g. TagSearchDoc[]
 		if (type.name === "Array" && type.indexer?.value?.kind === "Model") {
-			return resolveSubProjectionModel(program, type.indexer.value);
+			return resolveSubProjectionModel(program, type.indexer.value, visited);
 		}
-		return resolveSubProjectionModel(program, type);
+		return resolveSubProjectionModel(program, type, visited);
 	}
 	return undefined;
 }
@@ -636,11 +729,19 @@ function resolveSubProjectionFromType(
 function resolveSubProjectionModel(
 	program: Program,
 	model: Model,
+	parentVisited: ReadonlySet<string>,
 ): ResolvedProjection | undefined {
 	const sourceModel = getProjectionSourceModel(program, model);
 	if (!sourceModel) {
 		return undefined;
 	}
+
+	// Already being composed further up the path: stop rather than recurse
+	// forever. A join into the cycle reports join-cycle and drops the field.
+	if (parentVisited.has(model.name)) {
+		return undefined;
+	}
+	const visited: ReadonlySet<string> = new Set(parentVisited).add(model.name);
 
 	const inferOnModel = isSearchInfer(program, model);
 
@@ -662,6 +763,7 @@ function resolveSubProjectionModel(
 			const subProj = resolveSubProjectionFromType(
 				program,
 				projectionProperty.type,
+				visited,
 			);
 			if (subProj) {
 				field.subProjection = subProj;
@@ -676,11 +778,7 @@ function resolveSubProjectionModel(
 			!isSearchSkip(program, sourceProperty) &&
 			shouldVirtualRecurse(program, field.type, inferOnModel)
 		) {
-			const virtual = buildVirtualSubProjection(
-				program,
-				field.type,
-				new Set([model.name]),
-			);
+			const virtual = buildVirtualSubProjection(program, field.type, visited);
 			if (virtual) {
 				field.subProjection = virtual;
 			}
@@ -689,10 +787,15 @@ function resolveSubProjectionModel(
 		fields.push(field);
 	}
 
-	const joins = resolveJoinDependencies(program, model);
-	for (const join of joins) {
-		fields.push(resolveJoinField(program, model, join, inferOnModel));
-	}
+	const joins = composeJoinFields(
+		program,
+		model,
+		sourceModel,
+		inferOnModel,
+		visited,
+		fields,
+		new Set(fields.map((x) => x.name)),
+	);
 
 	return {
 		projectionModel: model,

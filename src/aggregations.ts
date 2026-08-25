@@ -1,5 +1,6 @@
-import type { Type } from "@typespec/compiler";
+import { NoTarget, type Program, type Type } from "@typespec/compiler";
 import type { AggregationKind, AggregationOptions } from "./decorators.js";
+import { reportDiagnostic } from "./lib.js";
 import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
@@ -94,6 +95,51 @@ function collectAggregationsRecursive(
 
 function joinNestedPath(parent: string | undefined, segment: string): string {
 	return parent ? `${parent}.${segment}` : segment;
+}
+
+/**
+ * Two fields can derive the same aggregation name — `addressCountry` and a
+ * nested `address.country` both reach `byAddressCountry`, and singularizing a
+ * path segment widens the overlap. Assembly keeps the first and drops the
+ * rest, so the second aggregation would silently never run: say so instead.
+ */
+export function reportAggregationNameCollisions(
+	program: Program,
+	aggregations: readonly AggregationEntry[],
+): void {
+	const claimed = new Map<string, AggregationEntry>();
+	const reported = new Set<string>();
+
+	for (const entry of aggregations) {
+		const prior = claimed.get(entry.aggName);
+		if (!prior) {
+			claimed.set(entry.aggName, entry);
+			continue;
+		}
+		if (
+			prior.kind === entry.kind &&
+			prior.openSearchField === entry.openSearchField &&
+			prior.nestedPath === entry.nestedPath
+		) {
+			continue;
+		}
+		if (reported.has(entry.aggName)) {
+			continue;
+		}
+		reported.add(entry.aggName);
+		reportDiagnostic(program, {
+			code: "aggregation-name-collision",
+			format: {
+				aggName: entry.aggName,
+				first: prior.openSearchField,
+				second: entry.openSearchField,
+			},
+			target:
+				entry.field.projectionProperty ??
+				entry.field.sourceProperty ??
+				NoTarget,
+		});
+	}
 }
 
 export function hasAggregations(projection: ResolvedProjection): boolean {

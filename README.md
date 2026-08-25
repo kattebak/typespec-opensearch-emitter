@@ -618,6 +618,8 @@ Field-name conventions in the generated `*SearchAggregations` type (singular for
 
 A field inside a sub-projection is addressed by its path in the document and named for it: `address.country` aggregates on `address.country` and surfaces as `byAddressCountry`. A `@nested` sub-projection wraps its aggregations in a `nested` aggregation on that path; a plain object sub-projection needs no wrapper.
 
+Two fields can reach the same name that way — a top-level `addressCountry` alongside a nested `address.country` — and the generated type carries one field per name. That reports `aggregation-name-collision`: rename one of the fields, or give one a distinct `@searchAs` name.
+
 `date_histogram` requires `interval` (one of `year`, `quarter`, `month`, `week`, `day`, `hour` — defaults to `month` if omitted) and takes an optional `bounds` — see [Bounding a date_histogram](#bounding-a-date_histogram). `range` requires `ranges` (array of `{ from?, to?, key? }`; each entry must set at least one of `from` / `to`). `terms` `sub` allows numeric metric sub-aggregations (`sum`/`avg`/`min`/`max`/`cardinality`) keyed by output bucket field name.
 
 #### Bounding a `date_histogram`
@@ -775,7 +777,9 @@ Both joins are left joins. Waffles the beagle has a passport; Nugget, a stray, d
 
 A declaration says where the joined value lands, not only that it exists. Each `@dependsOn` binds to **exactly one** projection field — the one typed as the entity or as its search document. A `lookup` fills a single-valued field, an `inbound` fills an array. That binding is what names the resolver method and what `dependencies[].field` carries.
 
-A field typed as the entity itself, rather than as its search document, composes from that model's `@searchable` properties — or from the whole model when it carries `@searchInfer`. A model offering neither has nothing to contribute and reports `join-field-not-composed`.
+A field typed as the entity itself, rather than as its search document, composes from the properties that model declares with `@searchable`, `@filterable` or `@aggregatable` — or from the whole model when it carries `@searchInfer`. Either way the joined document is composed the same: response shape, mapping, filters and facets alike. A model declaring nothing, or a `SearchProjection<T>` that resolves no field, has nothing to contribute and reports `join-field-not-composed`.
+
+A join field takes a document key of its own. One whose name is already resolved from the source model reports `join-field-collision`, and one composing a model already being composed reports `join-cycle` — a document cannot contain itself, and each hop would re-index the one before it without ever settling.
 
 ### What a bound field composes into
 
@@ -837,7 +841,7 @@ The read operation's `graphql-resolvers.json` entry carries a `resolvableBy` blo
 }
 ```
 
-The projection's `opensearch-projections.json` entry carries `dependencies[]`, one object per declaration:
+The projection's `opensearch-projections.json` entry carries `dependencies[]`, one object per declaration the document is composed from:
 
 ```json
 {
@@ -862,6 +866,19 @@ The projection's `opensearch-projections.json` entry carries `dependencies[]`, o
 ```
 
 `index` appears on an `inbound` entry only: a lookup fetches the row its key names, so the discovery index has nothing to say about it.
+
+`field` is the key path the joined value lands at in the composed document, projected names throughout — a `@searchAs` rename moves the key, and the entry follows it.
+
+The list is a transitive closure. A joined document carrying its own `@dependsOn` puts that entity's rows in this document too, so its writes re-index this one just the same, and it gets an entry here. Those entries stay flat and are told apart by their path:
+
+```json
+{
+  "entity": "Vet",
+  "direction": "lookup",
+  "joinKey": "vetId",
+  "field": "passport.vet"
+}
+```
 
 Both blocks ship a JSON schema, exported from the package as `./schema/resolvable-by.schema.json` and `./schema/dependencies.schema.json`. Each key is omitted when nothing declares it, so a spec with no joins emits an unchanged manifest.
 
@@ -936,6 +953,7 @@ A composed document is a snapshot: it is only as fresh as the last compose, and 
 | The driving entity | Its own document |
 | An entity reached by `lookup` | Every document whose join key names it |
 | An entity reached by `inbound` | The document its join key names |
+| An entity reached through another join | The same, one hop further out |
 
 An `inbound` declaration is what makes a write in the joined domain a trigger at all, which is why it requires a `@resolvableBy` index: discovering affected documents is a query by the join key, not a fetch. Recompose the whole document rather than patching the changed field — the compose is a pure function of the driving row's id, so a replay or a reordered trigger converges on the same document.
 
@@ -951,7 +969,9 @@ An `inbound` declaration is what makes a write in the joined domain a trigger at
 | `join-field-missing` | error | No projection field is typed to receive the declared entity. |
 | `join-field-ambiguous` | error | More than one field could receive it, so nothing decides which. |
 | `join-field-arity` | error | A `lookup` bound to an array field, or an `inbound` bound to a single-valued one. |
-| `join-field-not-composed` | error | The bound field names a model that states nothing about what enters the document — no `SearchProjection<T>`, no `@searchInfer`, no `@searchable` property — so composing it would emit an empty object. |
+| `join-field-not-composed` | error | The bound field names a model that states nothing about what enters the document — no `@searchInfer`, no `@searchable`/`@filterable`/`@aggregatable` property, or a `SearchProjection<T>` resolving no field — so composing it would emit an empty object. |
+| `join-field-collision` | error | The bound field's name is already resolved from the projection's source model, so two fields would claim one document key. |
+| `join-cycle` | error | A join composes a document already being composed, directly or through another join. |
 | `join-read-operation-missing` | warning | No `@restResolver` GET returns the entity and takes its declared key, so the join has nothing to call. |
 
 

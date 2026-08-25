@@ -8,6 +8,7 @@ import { collectAggregations } from "./aggregations.js";
 import { getJoinDependencies, getResolvableBy } from "./decorators.js";
 import { buildSearchFilterShape } from "./filters.js";
 import {
+	collectJoinDependencies,
 	resolveJoinDependencies,
 	toJoinDependencyManifestEntry,
 	toResolvableByManifestEntry,
@@ -140,8 +141,8 @@ describe("@resolvableBy / @dependsOn", () => {
 		assert.ok(petCare);
 
 		assert.deepEqual(
-			resolveJoinDependencies(runner.program, petCare).map(
-				toJoinDependencyManifestEntry,
+			resolveJoinDependencies(runner.program, petCare).map((x) =>
+				toJoinDependencyManifestEntry(runner.program, x),
 			),
 			[
 				{
@@ -685,6 +686,231 @@ describe("projection resolution of join fields", () => {
 		);
 	});
 
+	it("reports join-cycle when a projection joins itself, instead of recursing forever", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			@resolvableBy(Pet.petId)
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword name: string;
+				@searchable @keyword parentId: string;
+			}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(Pet, "lookup", Pet.parentId)
+			model PetSearchDoc is SearchProjection<Pet> {
+				parent?: PetSearchDoc;
+			}
+
+			@route("/pets")
+			namespace Pets {
+				@restResolver @get op getPet(@path petId: string): Pet;
+			}
+		`);
+
+		const pet = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetSearchDoc");
+		assert.ok(pet);
+
+		const before = runner.program.diagnostics.length;
+		const resolved = resolveProjectionModel(runner.program, pet);
+		assert.ok(resolved);
+
+		const reported = withCode(
+			runner.program.diagnostics.slice(before),
+			"join-cycle",
+		);
+		assert.equal(reported.length, 1);
+		assert.equal(reported[0].target, pet.properties.get("parent"));
+
+		// The cycle takes the whole declaration with it: an entity the document
+		// does not carry must not name a re-index trigger either.
+		assert.deepEqual(
+			resolved.fields.map((x) => x.name),
+			["petId", "name", "parentId"],
+		);
+		assert.deepEqual(resolved.joins, []);
+	});
+
+	it("reports join-cycle when two projections compose each other", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			@resolvableBy(Owner.ownerId)
+			model Owner {
+				@searchable @keyword ownerId: string;
+				@searchable @keyword petId: string;
+			}
+
+			@resolvableBy(Pet.petId)
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword ownerId: string;
+			}
+
+			@dependsOn(Owner, "lookup", Pet.ownerId)
+			model PetSearchDoc is SearchProjection<Pet> {
+				owner?: OwnerSearchDoc;
+			}
+
+			@searchProjection
+			@indexName("owners_v1")
+			@dependsOn(Pet, "lookup", Owner.petId)
+			model OwnerSearchDoc is SearchProjection<Owner> {
+				pet?: PetSearchDoc;
+			}
+
+			@route("/pets")
+			namespace Pets {
+				@restResolver @get op getPet(@path petId: string): Pet;
+			}
+
+			@route("/owners")
+			namespace Owners {
+				@restResolver @get op getOwner(@path ownerId: string): Owner;
+			}
+		`);
+
+		const owner = runner.program
+			.getGlobalNamespaceType()
+			.models.get("OwnerSearchDoc");
+		assert.ok(owner);
+
+		const before = runner.program.diagnostics.length;
+		const resolved = resolveProjectionModel(runner.program, owner);
+		assert.ok(resolved);
+
+		const reported = withCode(
+			runner.program.diagnostics.slice(before),
+			"join-cycle",
+		);
+		assert.equal(reported.length, 1);
+
+		const pet = resolved.fields.find((x) => x.name === "pet");
+		assert.ok(pet);
+		assert.deepEqual(
+			pet.subProjection?.fields.map((x) => x.name),
+			["petId", "ownerId"],
+		);
+		assert.deepEqual(pet.subProjection?.joins, []);
+	});
+
+	it("reports join-field-collision when a join field is already resolved from the source", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passport: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				@searchable @keyword microchipId: string;
+			}
+
+			model PetPassportSearchDoc is SearchProjection<PetPassport> {}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.petId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassportSearchDoc;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+		`);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const before = runner.program.diagnostics.length;
+		const resolved = resolveProjectionModel(runner.program, petCare);
+		assert.ok(resolved);
+
+		const reported = withCode(
+			runner.program.diagnostics.slice(before),
+			"join-field-collision",
+		);
+		assert.equal(reported.length, 1);
+		assert.equal(reported[0].target, petCare.properties.get("passport"));
+
+		assert.deepEqual(
+			resolved.fields.map((x) => x.name),
+			["petId", "passport"],
+		);
+		assert.deepEqual(resolved.joins, []);
+	});
+
+	it("composes an entity declaring only @filterable and @aggregatable", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passportId: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				@keyword @filterable("term") @aggregatable("terms") issuedCountry: string;
+			}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassport;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+		`);
+
+		assert.deepEqual(diagnostics.map(shortCode), []);
+	});
+
+	it("reports join-field-not-composed for a search document that resolves no field", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passportId: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				microchipId: string;
+			}
+
+			model PetPassportSearchDoc is SearchProjection<PetPassport> {}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassportSearchDoc;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+		`);
+
+		const reported = withCode(diagnostics, "join-field-not-composed");
+		assert.equal(reported.length, 1);
+	});
+
 	it("still reports a field that no join accounts for", async () => {
 		const runner = await createRunner();
 		await runner.diagnose(`
@@ -715,5 +941,159 @@ describe("projection resolution of join fields", () => {
 		);
 		assert.equal(reported.length, 1);
 		assert.equal(reported[0].target, petCare.properties.get("kennelName"));
+	});
+
+	it("carries the filter and aggregation contract of an entity-typed join field", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passportId: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				@searchable @keyword @filterable("term") @aggregatable("terms") issuedCountry: string;
+				notInTheDocument: string;
+			}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassport;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+		`);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const resolved = resolveProjectionModel(runner.program, petCare);
+		assert.ok(resolved);
+
+		const passport = resolved.fields.find((x) => x.name === "passport");
+		assert.deepEqual(
+			passport?.subProjection?.fields.map((x) => x.name),
+			["issuedCountry"],
+		);
+
+		assert.deepEqual(
+			collectAggregations(resolved).map((x) => [x.aggName, x.openSearchField]),
+			[["byPassportIssuedCountry", "passport.issuedCountry"]],
+		);
+
+		assert.deepEqual(
+			buildSearchFilterShape(resolved)?.nodes.map((x) => [x.inputName, x.kind]),
+			[["passport", "object"]],
+		);
+	});
+});
+
+describe("join dependency manifest entries", () => {
+	it("closes over a transitive join, keyed by its path in the composed document", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passportId: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				@searchable @keyword vetId: string;
+			}
+
+			@resolvableBy(Vet.vetId)
+			model Vet {
+				vetId: string;
+				@searchable @keyword clinic: string;
+			}
+
+			model VetSearchDoc is SearchProjection<Vet> {}
+
+			@dependsOn(Vet, "lookup", PetPassport.vetId)
+			model PetPassportSearchDoc is SearchProjection<PetPassport> {
+				vet?: VetSearchDoc;
+			}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassportSearchDoc;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+
+			@route("/vets")
+			namespace Vets {
+				@restResolver @get op getVet(@path vetId: string): Vet;
+			}
+		`);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const resolved = resolveProjectionModel(runner.program, petCare);
+		assert.ok(resolved);
+
+		assert.deepEqual(collectJoinDependencies(runner.program, resolved), [
+			{
+				entity: "PetPassport",
+				direction: "lookup",
+				joinKey: "passportId",
+				field: "passport",
+			},
+			{
+				entity: "Vet",
+				direction: "lookup",
+				joinKey: "vetId",
+				field: "passport.vet",
+			},
+		]);
+	});
+
+	it("names the document key a @searchAs rename moves the joined value to", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+			${ENTITIES}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				@searchAs("travelDocument")
+				passport?: PetPassportSearchDoc;
+			}
+
+			${READS}
+		`);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const resolved = resolveProjectionModel(runner.program, petCare);
+		assert.ok(resolved);
+
+		assert.deepEqual(
+			collectJoinDependencies(runner.program, resolved).map((x) => x.field),
+			["travelDocument"],
+		);
 	});
 });

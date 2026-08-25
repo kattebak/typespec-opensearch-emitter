@@ -31,7 +31,7 @@ model OwnershipRecord {
 	ownershipRecordId: string;
 	petId: string;
 
-	@searchable @keyword @filterable("term") ownerName: string;
+	@searchable @keyword @filterable("term") @aggregatable("terms") ownerName: string;
 	@searchable @filterable("range") transferredAt: utcDateTime;
 }
 

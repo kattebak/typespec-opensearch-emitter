@@ -2,7 +2,7 @@
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
 	"$id": "https://kattebak.github.io/typespec-opensearch-emitter/schema/dependencies.schema.json",
 	"title": "dependencies",
-	"description": "Cross-domain joins a projection composes its document from. Emitted on the opensearch-projections.json entry of the projection, one object per @dependsOn declaration.",
+	"description": "Cross-domain joins a projection composes its document from, closed over transitive joins: one object per @dependsOn declaration reached from the projection, including those declared on a joined document. Emitted on the opensearch-projections.json entry of the projection.",
 	"type": "array",
 	"items": {
 		"type": "object",
@@ -24,9 +24,10 @@
 				"minLength": 1
 			},
 			"field": {
-				"description": "Property of the projection the joined value lands in. A lookup fills a single-valued field, an inbound an array.",
+				"description": "Key path the joined value lands at in the composed document, projected names throughout — dotted when the join is declared on a joined document rather than on this one. A lookup fills a single-valued key, an inbound an array.",
 				"type": "string",
-				"minLength": 1
+				"minLength": 1,
+				"pattern": "^[^.]+(\\.[^.]+)*$"
 			},
 			"index": {
 				"description": "Index the joined rows are discovered by, carried from the entity's resolvableBy declaration. An inbound join only.",

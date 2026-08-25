@@ -190,6 +190,35 @@ describe("collectFilterables", () => {
 			assert.equal(entry.openSearchField, "tags.name");
 		}
 	});
+
+	it("deepens the document path through a plain object sub-projection", () => {
+		const subProjection = {
+			projectionModel: { name: "Address" },
+			sourceModel: { name: "Address" },
+			fields: [
+				makeField({
+					name: "country",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		} as unknown as ResolvedProjection;
+
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "address",
+					subProjection,
+					type: { kind: "Model", name: "Address" } as unknown as Type,
+				}),
+			],
+		});
+
+		const entries = collectFilterables(projection);
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0].openSearchField, "address.country");
+		assert.equal(entries[0].nestedPath, undefined);
+	});
 });
 
 describe("hasFilterables", () => {

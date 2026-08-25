@@ -43,6 +43,10 @@ export function emitIndex(projections: TopLevelProjection[]): EmittedIndexFile {
 		lines.push(
 			`export type { ${sp.projectionModel.name} } from "./${docTypeFile}";`,
 		);
+		// A joined document carrying its own `@dependsOn` gets a join-resolver
+		// module too (issue #197). Emitting it without exporting it leaves the
+		// consumer nothing to implement the transitive read against.
+		lines.push(...joinResolverExport(sp));
 	}
 
 	for (const projection of sorted) {
@@ -55,20 +59,24 @@ export function emitIndex(projections: TopLevelProjection[]): EmittedIndexFile {
 		lines.push(
 			`export const ${toIndexConstantName(projection.projectionModel.name)} = "${projection.indexName}";`,
 		);
-		if (projection.joins && projection.joins.length > 0) {
-			const joinResolverFile = toJoinResolverFileName(
-				projection.projectionModel.name,
-			).replace(/\.ts$/, ".js");
-			lines.push(
-				`export type { ${toJoinResolverInterfaceName(projection.projectionModel.name)} } from "./${joinResolverFile}";`,
-			);
-		}
+		lines.push(...joinResolverExport(projection));
 	}
 
 	return {
 		fileName: "index.ts",
 		content: `${lines.join("\n")}\n`,
 	};
+}
+
+function joinResolverExport(projection: ResolvedProjection): string[] {
+	if (!projection.joins || projection.joins.length === 0) {
+		return [];
+	}
+	const name = projection.projectionModel.name;
+	const file = toJoinResolverFileName(name).replace(/\.ts$/, ".js");
+	return [
+		`export type { ${toJoinResolverInterfaceName(name)} } from "./${file}";`,
+	];
 }
 
 export function toIndexConstantName(projectionModelName: string): string {

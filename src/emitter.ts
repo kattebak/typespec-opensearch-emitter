@@ -44,8 +44,8 @@ import {
 	sdlModuleSpecifier,
 } from "./emit-string-module.js";
 import {
+	collectJoinDependencies,
 	type ResolvableByManifestEntry,
-	toJoinDependencyManifestEntry,
 } from "./joins.js";
 import { type OpenSearchEmitterOptions, reportDiagnostic } from "./lib.js";
 import {
@@ -179,7 +179,7 @@ export async function $onEmit(
 
 		await emitFile(context.program, {
 			path: resolvePath(context.emitterOutputDir, outputFile),
-			content: `${JSON.stringify(serializeProjections(topLevel), null, 2)}\n`,
+			content: `${JSON.stringify(serializeProjections(context.program, topLevel), null, 2)}\n`,
 		});
 	}
 
@@ -442,35 +442,41 @@ function isTemplateDeclaration(model: Model): boolean {
 	return false;
 }
 
-function serializeProjections(resolved: TopLevelProjection[]) {
+function serializeProjections(
+	program: Program,
+	resolved: TopLevelProjection[],
+) {
 	return {
-		projections: resolved.map((projection) => ({
-			name: projection.projectionModel.name,
-			sourceModel: projection.sourceModel.name,
-			indexName: projection.indexName,
-			...(projection.indexSettings
-				? { indexSettings: projection.indexSettings }
-				: {}),
-			// `dependencies` (issue #194) is omitted when a projection declares
-			// no `@dependsOn`, so an unjoined spec emits an unchanged manifest.
-			...(projection.joins && projection.joins.length > 0
-				? {
-						dependencies: projection.joins.map(toJoinDependencyManifestEntry),
-					}
-				: {}),
-			fields: projection.fields.map((field) => ({
-				name: field.name,
-				...(field.projectedName ? { projectedName: field.projectedName } : {}),
-				optional: field.optional,
-				keyword: field.keyword,
-				nested: field.nested,
-				analyzer: field.analyzer,
-				boost: field.boost,
-				...(field.aggregations && field.aggregations.length > 0
-					? { aggregations: field.aggregations.map((d) => d.kind) }
+		projections: resolved.map((projection) => {
+			// `dependencies` (issue #194) is omitted when a projection composes
+			// nothing from another domain, so an unjoined spec emits an unchanged
+			// manifest. It closes over transitive joins (issue #197) — a write to
+			// an entity a joined document depends on re-indexes this one too.
+			const dependencies = collectJoinDependencies(program, projection);
+			return {
+				name: projection.projectionModel.name,
+				sourceModel: projection.sourceModel.name,
+				indexName: projection.indexName,
+				...(projection.indexSettings
+					? { indexSettings: projection.indexSettings }
 					: {}),
-			})),
-		})),
+				...(dependencies.length > 0 ? { dependencies } : {}),
+				fields: projection.fields.map((field) => ({
+					name: field.name,
+					...(field.projectedName
+						? { projectedName: field.projectedName }
+						: {}),
+					optional: field.optional,
+					keyword: field.keyword,
+					nested: field.nested,
+					analyzer: field.analyzer,
+					boost: field.boost,
+					...(field.aggregations && field.aggregations.length > 0
+						? { aggregations: field.aggregations.map((d) => d.kind) }
+						: {}),
+				})),
+			};
+		}),
 	};
 }
 
@@ -714,6 +720,14 @@ function generateTsConfig(
 			const subFileName = toDocTypeFileName(subProj.projectionModel.name);
 			if (!tsFiles.includes(subFileName)) {
 				tsFiles.push(subFileName);
+			}
+			if (subProj.joins && subProj.joins.length > 0) {
+				const subJoinFile = toJoinResolverFileName(
+					subProj.projectionModel.name,
+				);
+				if (!tsFiles.includes(subJoinFile)) {
+					tsFiles.push(subJoinFile);
+				}
 			}
 		}
 	}
