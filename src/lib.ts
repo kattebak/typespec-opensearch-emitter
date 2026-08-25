@@ -249,9 +249,9 @@ export const $lib = createTypeSpecLibrary({
 			},
 		},
 		"join-field-not-composed": {
-			severity: "warning",
+			severity: "error",
 			messages: {
-				default: paramMessage`Field "${"field"}" is filled by the @dependsOn(${"entity"}, "${"direction"}", ...) join, which the emitter declares but does not yet compose. The field is absent from the emitted document type, mapping and SDL; the join-resolver interface and the manifest's dependencies[] carry the contract in the meantime.`,
+				default: paramMessage`Field "${"field"}" is bound to a join over "${"entity"}", but nothing states which of that model enters the document: it is neither a SearchProjection<${"entity"}> nor a @searchInfer model, and carries no @searchable property. Composing it would emit an empty object, which the mapping and the SDL cannot express. Type the field as a SearchProjection<${"entity"}> document, or declare on "${"entity"}" what the document carries.`,
 			},
 		},
 		"join-read-operation-missing": {

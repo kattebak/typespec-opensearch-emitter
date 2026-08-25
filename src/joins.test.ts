@@ -4,7 +4,9 @@ import { describe, it } from "node:test";
 import type { Diagnostic } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import { HttpTestLibrary } from "@typespec/http/testing";
+import { collectAggregations } from "./aggregations.js";
 import { getJoinDependencies, getResolvableBy } from "./decorators.js";
+import { buildSearchFilterShape } from "./filters.js";
 import {
 	resolveJoinDependencies,
 	toJoinDependencyManifestEntry,
@@ -48,7 +50,7 @@ const ENTITIES = `
 	model PetPassport {
 		passportId: string;
 		@searchable @keyword microchipId: string;
-		@searchable @keyword issuedCountry: string;
+		@searchable @keyword @filterable("term") @aggregatable("terms") issuedCountry: string;
 		@searchable @keyword vaccinations: string[];
 	}
 
@@ -56,7 +58,7 @@ const ENTITIES = `
 	model OwnershipRecord {
 		ownershipRecordId: string;
 		petId: string;
-		@searchable @keyword ownerName: string;
+		@searchable @keyword @filterable("term") ownerName: string;
 		@searchable @filterable("range") transferredAt: utcDateTime;
 	}
 
@@ -96,14 +98,7 @@ describe("@resolvableBy / @dependsOn", () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(PET_CARE);
 
-		assert.deepEqual(
-			diagnostics.filter((x) => x.severity === "error"),
-			[],
-		);
-		assert.deepEqual(diagnostics.map(shortCode), [
-			"join-field-not-composed",
-			"join-field-not-composed",
-		]);
+		assert.deepEqual(diagnostics.map(shortCode), []);
 
 		const globals = runner.program.getGlobalNamespaceType();
 		const passport = globals.models.get("PetPassport");
@@ -506,22 +501,80 @@ describe("@resolvableBy / @dependsOn", () => {
 		assert.equal(reported[0].target, passport);
 	});
 
-	it("reports join-field-not-composed against the field, once per bound join", async () => {
+	it("reports join-field-not-composed when nothing states what the joined entity contributes", async () => {
 		const runner = await createRunner();
-		const diagnostics = await runner.diagnose(PET_CARE);
+		const diagnostics = await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passportId: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				microchipId: string;
+			}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassport;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+		`);
 
 		const reported = withCode(diagnostics, "join-field-not-composed");
-		assert.equal(reported.length, 2);
+		assert.equal(reported.length, 1);
 
 		const petCare = runner.program
 			.getGlobalNamespaceType()
 			.models.get("PetCareSearchDoc");
+		assert.equal(reported[0].target, petCare?.properties.get("passport"));
+	});
+
+	it("composes a join field typed as the entity itself from its @searchable properties", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+			model Pet {
+				@searchable @keyword petId: string;
+				@searchable @keyword passportId: string;
+			}
+
+			@resolvableBy(PetPassport.passportId)
+			model PetPassport {
+				passportId: string;
+				@searchable @keyword microchipId: string;
+			}
+
+			@searchProjection
+			@indexName("pet_care_v1")
+			@dependsOn(PetPassport, "lookup", Pet.passportId)
+			model PetCareSearchDoc is SearchProjection<Pet> {
+				passport?: PetPassport;
+			}
+
+			@route("/pet-passports")
+			namespace PetPassports {
+				@restResolver @get op getPetPassport(@path passportId: string): PetPassport;
+			}
+		`);
+
+		assert.deepEqual(diagnostics.map(shortCode), []);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const resolved = resolveProjectionModel(runner.program, petCare);
 		assert.deepEqual(
-			reported.map((x) => x.target),
-			[
-				petCare?.properties.get("passport"),
-				petCare?.properties.get("ownershipHistory"),
-			],
+			resolved?.fields.map((x) => x.name),
+			["petId", "passportId", "passport"],
 		);
 	});
 
@@ -548,6 +601,69 @@ describe("@resolvableBy / @dependsOn", () => {
 });
 
 describe("projection resolution of join fields", () => {
+	it("composes a lookup as a single-valued field and an inbound as an array", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(PET_CARE);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const resolved = resolveProjectionModel(runner.program, petCare);
+		assert.ok(resolved);
+
+		const passport = resolved.fields.find((x) => x.name === "passport");
+		assert.ok(passport);
+		assert.equal(passport.optional, true);
+		assert.equal(passport.nested, false);
+		assert.equal(passport.searchable, true);
+		assert.equal(
+			passport.subProjection?.projectionModel.name,
+			"PetPassportSearchDoc",
+		);
+
+		const history = resolved.fields.find((x) => x.name === "ownershipHistory");
+		assert.ok(history);
+		assert.equal(history.optional, false);
+		assert.equal(history.nested, true);
+		assert.equal(history.searchable, true);
+		assert.equal(
+			history.subProjection?.projectionModel.name,
+			"OwnershipRecordSearchDoc",
+		);
+	});
+
+	it("carries a joined field's own filterables and aggregations into the parent", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(PET_CARE);
+
+		const petCare = runner.program
+			.getGlobalNamespaceType()
+			.models.get("PetCareSearchDoc");
+		assert.ok(petCare);
+
+		const resolved = resolveProjectionModel(runner.program, petCare);
+		assert.ok(resolved);
+
+		assert.deepEqual(
+			collectAggregations(resolved).map((x) => [
+				x.aggName,
+				x.openSearchField,
+				x.nestedPath,
+			]),
+			[["byPassportIssuedCountry", "passport.issuedCountry", undefined]],
+		);
+
+		assert.deepEqual(
+			buildSearchFilterShape(resolved)?.nodes.map((x) => [x.inputName, x.kind]),
+			[
+				["passport", "object"],
+				["ownershipHistory", "nested"],
+			],
+		);
+	});
+
 	it("does not report a join field as absent from the source model", async () => {
 		const runner = await createRunner();
 		await runner.diagnose(PET_CARE);

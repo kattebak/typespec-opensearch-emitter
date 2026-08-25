@@ -5,7 +5,6 @@ import type { Program } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import { HttpTestLibrary } from "@typespec/http/testing";
 import { emitJoinResolver } from "./emit-join-resolver.js";
-import { resolveJoinDependencies } from "./joins.js";
 import {
 	type ResolvedProjection,
 	resolveProjectionModel,
@@ -38,10 +37,7 @@ async function resolveAll(code: string) {
 		if (!isSearchProjectionModel(program, model)) continue;
 		const projection = resolveProjectionModel(program, model);
 		if (!projection) continue;
-		projections.push({
-			...projection,
-			joins: resolveJoinDependencies(program, model),
-		});
+		projections.push(projection);
 	}
 
 	return { program, projections };
@@ -144,7 +140,7 @@ export interface PetCareSearchDocJoinResolver {
 			@resolvableBy(PetPassport.passportId)
 			model PetPassport {
 				passportId: string;
-				microchipId: string;
+				@searchable @keyword microchipId: string;
 				boosterDue?: utcDateTime;
 			}
 

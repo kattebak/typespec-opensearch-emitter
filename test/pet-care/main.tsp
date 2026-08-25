@@ -16,7 +16,13 @@ model PetPassport {
 	passportId: string;
 
 	@searchable @keyword microchipId: string;
-	@searchable @keyword issuedCountry: string;
+
+	@searchable
+	@keyword
+	@filterable("term")
+	@aggregatable("terms")
+	issuedCountry: string;
+
 	@searchable @keyword vaccinations: string[];
 }
 
@@ -25,7 +31,7 @@ model OwnershipRecord {
 	ownershipRecordId: string;
 	petId: string;
 
-	@searchable @keyword ownerName: string;
+	@searchable @keyword @filterable("term") ownerName: string;
 	@searchable @filterable("range") transferredAt: utcDateTime;
 }
 

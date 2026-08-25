@@ -11,9 +11,14 @@ import {
 	getJoinDependencies,
 	getResolvableBy,
 	isRestResolver,
+	isSearchable,
+	isSearchInfer,
 } from "./decorators.js";
 import { reportDiagnostic } from "./lib.js";
-import { getProjectionSourceModel } from "./projection.js";
+import {
+	getProjectionSourceModel,
+	isSearchProjectionModel,
+} from "./projection.js";
 
 export const JOIN_DIRECTIONS = ["lookup", "inbound"] as const;
 export type JoinDirection = (typeof JOIN_DIRECTIONS)[number];
@@ -124,6 +129,32 @@ export function candidateJoinFields(
 	});
 }
 
+/**
+ * True when something states which of the joined entity enters the document
+ * (issue #195): a `SearchProjection<T>` document, a `@searchInfer` model whose
+ * fields the emitter derives, or a plain model with `@searchable` properties.
+ * A model offering none of the three composes into an empty object, which the
+ * mapping and the SDL cannot express.
+ */
+export function composesIntoDocument(
+	program: Program,
+	field: ModelProperty,
+): boolean {
+	const joined = unwrapArrayElement(field.type) ?? field.type;
+	if (joined.kind !== "Model") {
+		return false;
+	}
+	if (
+		isSearchProjectionModel(program, joined) ||
+		isSearchInfer(program, joined)
+	) {
+		return true;
+	}
+	return [...joined.properties.values()].some((property) =>
+		isSearchable(program, property),
+	);
+}
+
 export function resolveJoinDependencies(
 	program: Program,
 	projectionModel: Model,
@@ -147,6 +178,9 @@ export function resolveJoinDependencies(
 		}
 		const field = candidates[0];
 		if (!hasExpectedArity(declaration.direction, field)) {
+			continue;
+		}
+		if (!composesIntoDocument(program, field)) {
 			continue;
 		}
 		resolved.push({
@@ -403,11 +437,13 @@ function validateJoinField(
 		return;
 	}
 
-	reportDiagnostic(program, {
-		code: "join-field-not-composed",
-		format: { field: field.name, entity: entity.name, direction },
-		target: field,
-	});
+	if (!composesIntoDocument(program, field)) {
+		reportDiagnostic(program, {
+			code: "join-field-not-composed",
+			format: { field: field.name, entity: entity.name },
+			target: field,
+		});
+	}
 }
 
 function collectModels(program: Program): Model[] {

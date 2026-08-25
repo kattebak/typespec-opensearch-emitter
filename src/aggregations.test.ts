@@ -454,7 +454,7 @@ describe("collectAggregations with nested sub-projections", () => {
 		assert.equal(missingTagNoteCount.openSearchField, "tags.note.keyword");
 	});
 
-	it("does not set nestedPath on object (non-nested) sub-projections", () => {
+	it("addresses an object (non-nested) sub-projection by its dotted path, opening no nested wrapper", () => {
 		const ownerSubProjection = {
 			projectionModel: { name: "OwnerSearchDoc" },
 			sourceModel: { name: "Owner" },
@@ -482,8 +482,8 @@ describe("collectAggregations with nested sub-projections", () => {
 		const entries = collectAggregations(projection);
 		assert.equal(entries.length, 1);
 		assert.equal(entries[0].nestedPath, undefined);
-		assert.equal(entries[0].openSearchField, "name");
-		assert.equal(entries[0].aggName, "byName");
+		assert.equal(entries[0].openSearchField, "owner.name");
+		assert.equal(entries[0].aggName, "byOwnerName");
 	});
 
 	it("hasAggregations returns true when only nested sub-projection has aggs", () => {
