@@ -33,6 +33,11 @@ model Pet {
 	@searchable name: string;
 	@searchable @keyword @aggregatable("terms") @filterable("term", "term_negate") species: string;
 	@searchable breed?: string;
+	// Issue #201 — a per-field terms size, with a sub-aggregation.
+	@searchable
+	@keyword
+	@aggregatable("terms", #{ size: 50, sub: #{ topRank: #{ kind: "max", field: "rank" } } })
+	breedGroup: string;
 	@searchable @filterable("range") birthDate: plainDate;
 	@searchable @filterable("range") createdAt: utcDateTime;
 	@searchable @nested tags: Tag[];

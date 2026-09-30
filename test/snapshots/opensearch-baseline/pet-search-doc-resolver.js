@@ -48,6 +48,7 @@ export function response(ctx) {
 		totalCount: totalHits - droppedIds.length,
 		aggregations: {
 			bySpecies: (_a.bySpecies?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
+			byBreedGroup: (_a.byBreedGroup?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count, topRank: b.topRank?.value ?? null })),
 			byTagName: (_a_tags.byTagName?.buckets ?? []).map((b) => ({ key: b.key, count: b.doc_count })),
 			uniqueTagNameCount: _a_tags.uniqueTagNameCount?.value ?? 0,
 			missingTagNoteCount: _a_tags.missingTagNoteCount?.doc_count ?? 0,
@@ -71,7 +72,7 @@ function normalizeNode(node) {
 			for (const name of ["tags","aliases","categories","approvals","bankAccountApprovals"]) {
 				if (container[name] == null) container[name] = [];
 			}
-			for (const name of ["id","name","species","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"]) {
+			for (const name of ["id","name","species","breedGroup","birthDate","createdAt","owner","feedingTime","walkDuration","rank","stock","score","active"]) {
 				if (container[name] == null) return null;
 			}
 		}

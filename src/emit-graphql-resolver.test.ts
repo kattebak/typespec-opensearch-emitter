@@ -457,6 +457,7 @@ const defaultOptions = {
 	defaultPageSize: 20,
 	maxPageSize: 100,
 	trackTotalHitsUpTo: 10000,
+	termsBuckets: 10,
 	monolithicThresholdBytes: 0,
 };
 
@@ -1028,6 +1029,7 @@ describe("emitGraphQLResolver", () => {
 			defaultPageSize: 20,
 			maxPageSize: 100,
 			trackTotalHitsUpTo: 10000,
+			termsBuckets: 10,
 		});
 		assert.equal(result.mode, "monolithic");
 		// The TEXT_SORT_FIELDS literal must include "name", and the buildSort
@@ -2007,6 +2009,80 @@ describe("emitGraphQLResolver", () => {
 		assert.ok(
 			combinedContent(result).includes(
 				", latestValidTo: b.latestValidTo?.value ?? null",
+			),
+		);
+	});
+
+	it("sizes every terms aggregation from the terms-buckets option", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "status", keyword: true, aggregations: ["terms"] }),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [{ kind: "terms", options: { topHits: 5 } }],
+				}),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, {
+			...defaultOptions,
+			termsBuckets: 50,
+		});
+		const content = combinedContent(result);
+		assert.ok(
+			content.includes(
+				'{n:"byStatus",a:{ terms: { field: "status", size: 50 } }}',
+			),
+		);
+		assert.ok(
+			content.includes(
+				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId", size: 50 }, aggs: { "hits": { top_hits: { size: 5 } } } }}',
+			),
+		);
+	});
+
+	it("lets a per-field terms size override the terms-buckets option", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "status",
+					keyword: true,
+					aggregations: [{ kind: "terms", options: { size: 200 } }],
+				}),
+				makeField({
+					name: "counterpartyId",
+					keyword: true,
+					aggregations: [
+						{
+							kind: "terms",
+							options: {
+								size: 3,
+								sub: { latestValidTo: { kind: "max", field: "validTo" } },
+							},
+						},
+					],
+				}),
+				makeField({ name: "region", keyword: true, aggregations: ["terms"] }),
+			],
+		});
+		const result = await emitGraphQLResolver(projection, {
+			...defaultOptions,
+			termsBuckets: 50,
+		});
+		const content = combinedContent(result);
+		assert.ok(
+			content.includes(
+				'{n:"byStatus",a:{ terms: { field: "status", size: 200 } }}',
+			),
+		);
+		assert.ok(
+			content.includes(
+				'{n:"byCounterpartyId",a:{ terms: { field: "counterpartyId", size: 3 }, aggs: { "latestValidTo": { max: { field: "validTo" } } } }}',
+			),
+		);
+		assert.ok(
+			content.includes(
+				'{n:"byRegion",a:{ terms: { field: "region", size: 50 } }}',
 			),
 		);
 	});
@@ -3797,6 +3873,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
+		termsBuckets: 10,
 		monolithicThresholdBytes: 32000,
 	};
 
@@ -4090,6 +4167,7 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
+		termsBuckets: 10,
 		monolithicThresholdBytes: 0,
 	};
 
@@ -4617,6 +4695,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
+		termsBuckets: 10,
 		monolithicThresholdBytes: 0,
 	};
 

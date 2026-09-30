@@ -509,6 +509,11 @@ export interface TermsOptions {
 	 * to fetch examples. Not inferred by default — opt-in only.
 	 */
 	topHits?: number;
+	/**
+	 * Bucket count of the emitted `terms` aggregation. Overrides the
+	 * `graphql.terms-buckets` emitter option, which defaults to 10.
+	 */
+	size?: number;
 }
 
 export type AggregationOptions =
@@ -585,17 +590,9 @@ function validateOptions(
 	context: DecoratorContext,
 	target: ModelProperty,
 	kind: AggregationKind,
-	raw: unknown,
+	raw: Record<string, unknown>,
 ): AggregationOptions | undefined {
 	if (kind === "date_histogram") {
-		if (!isPlainObject(raw)) {
-			reportDiagnostic(context.program, {
-				code: "invalid-aggregation-options",
-				format: { kind, reason: "expected an options object" },
-				target,
-			});
-			return undefined;
-		}
 		const interval = raw.interval ?? "month";
 		if (!isDateHistogramInterval(interval)) {
 			reportDiagnostic(context.program, {
@@ -631,7 +628,7 @@ function validateOptions(
 		return { interval, bounds };
 	}
 	if (kind === "range") {
-		if (!isPlainObject(raw) || !Array.isArray(raw.ranges)) {
+		if (!Array.isArray(raw.ranges)) {
 			reportDiagnostic(context.program, {
 				code: "invalid-aggregation-options",
 				format: {
@@ -672,14 +669,6 @@ function validateOptions(
 		return { ranges };
 	}
 	if (kind === "terms") {
-		if (!isPlainObject(raw)) {
-			reportDiagnostic(context.program, {
-				code: "invalid-aggregation-options",
-				format: { kind, reason: "expected { sub: {...}, topHits?: N }" },
-				target,
-			});
-			return undefined;
-		}
 		const result: TermsOptions = {};
 		if (raw.sub !== undefined) {
 			if (!isPlainObject(raw.sub)) {
@@ -731,6 +720,24 @@ function validateOptions(
 				return undefined;
 			}
 			result.topHits = raw.topHits;
+		}
+		if (raw.size !== undefined) {
+			if (
+				typeof raw.size !== "number" ||
+				!Number.isInteger(raw.size) ||
+				raw.size <= 0
+			) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: {
+						kind,
+						reason: "size must be a positive integer",
+					},
+					target,
+				});
+				return undefined;
+			}
+			result.size = raw.size;
 		}
 		return result;
 	}

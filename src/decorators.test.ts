@@ -431,6 +431,78 @@ describe("decorators", () => {
 		assert.equal(getAggregatableKinds(runner.program, name), undefined);
 	});
 
+	it("stores a terms size", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms", #{ size: 50 }) @searchable tags: string[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const tags = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("tags");
+		assert.ok(tags);
+		assert.deepEqual(getAggregatableDirectives(runner.program, tags), [
+			{ kind: "terms", options: { size: 50 } },
+		]);
+	});
+
+	it("rejects a terms size that is not a positive integer", async () => {
+		for (const size of ["0", "-5", "2.5", '"10"']) {
+			const runner = await createRunner();
+			const diagnostics = await runner.diagnose(`
+        model Product {
+          @aggregatable("terms", #{ size: ${size} }) @searchable tags: string[];
+        }
+      `);
+
+			const diagnostic = diagnostics.find((x) =>
+				x.code.endsWith("/invalid-aggregation-options"),
+			);
+			assert.ok(diagnostic, `size ${size} must be rejected`);
+			assert.ok(diagnostic.message.includes("size must be a positive integer"));
+			const tags = runner.program
+				.getGlobalNamespaceType()
+				.models.get("Product")
+				?.properties.get("tags");
+			assert.ok(tags);
+			assert.equal(getAggregatableDirectives(runner.program, tags), undefined);
+		}
+	});
+
+	it("stores a terms size alongside sub and topHits", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms", #{ size: 25, topHits: 3, sub: #{ latest: #{ kind: "max", field: "validTo" } } })
+        @searchable counterpartyId: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const counterpartyId = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("counterpartyId");
+		assert.ok(counterpartyId);
+		assert.deepEqual(
+			getAggregatableDirectives(runner.program, counterpartyId),
+			[
+				{
+					kind: "terms",
+					options: {
+						sub: { latest: { kind: "max", field: "validTo" } },
+						topHits: 3,
+						size: 25,
+					},
+				},
+			],
+		);
+	});
+
 	it("emits diagnostic for unknown @aggregatable kind", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

@@ -1069,6 +1069,7 @@ describe("emitted resolver size budget", () => {
 			defaultPageSize: 20,
 			maxPageSize: 100,
 			trackTotalHitsUpTo: 10000,
+			termsBuckets: 10,
 		});
 
 		// AppSync APPSYNC_JS hard cap on resolver source code. With the

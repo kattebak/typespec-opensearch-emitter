@@ -2,6 +2,7 @@ import { type AggregationEntry, collectAggregations } from "./aggregations.js";
 import {
 	type DateHistogramOptions,
 	supportsMinimumInterval,
+	type TermsOptions,
 } from "./decorators.js";
 import { toGraphQLQueryFieldName } from "./emit-graphql-sdl.js";
 import {
@@ -65,6 +66,7 @@ export interface ResolverOptions {
 	 * aggregation declares no bounds. See DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS.
 	 */
 	autoDateHistogramBuckets?: number;
+	termsBuckets: number;
 }
 
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 31_000;
@@ -211,7 +213,10 @@ export async function emitGraphQLResolver(
 		)
 		.map((f) => f.projectedName ?? f.name);
 
-	const aggregations = collectAggregations(projection);
+	const aggregations = withTermsSize(
+		collectAggregations(projection),
+		options.termsBuckets,
+	);
 	const searchFilterShape = buildSearchFilterShape(projection);
 	const documentSpec = collectDocumentSpec(projection);
 
@@ -2124,6 +2129,41 @@ function histogramFlag(entry: AggregationEntry): string {
 	return usesAutoDateHistogram(entry) ? ",h:1" : "";
 }
 
+function withTermsSize(
+	aggregations: AggregationEntry[],
+	termsBuckets: number,
+): AggregationEntry[] {
+	return aggregations.map((entry) => {
+		if (entry.kind !== "terms") {
+			return entry;
+		}
+		const opts = (entry.options ?? {}) as TermsOptions;
+		if (opts.size !== undefined) {
+			return entry;
+		}
+		return { ...entry, options: { ...opts, size: termsBuckets } };
+	});
+}
+
+export function totalTermsAndRangeBuckets(
+	projection: ResolvedProjection,
+	termsBuckets: number,
+): number {
+	const seen = new Set<string>();
+	let total = 0;
+	for (const entry of collectAggregations(projection)) {
+		if (seen.has(entry.aggName)) continue;
+		seen.add(entry.aggName);
+		if (entry.kind === "terms") {
+			total += ((entry.options ?? {}) as TermsOptions).size ?? termsBuckets;
+		}
+		if (entry.kind === "range" && entry.options && "ranges" in entry.options) {
+			total += entry.options.ranges.length;
+		}
+	}
+	return total;
+}
+
 function usesAutoDateHistogram(entry: AggregationEntry): boolean {
 	if (entry.kind !== "date_histogram") {
 		return false;
@@ -2366,15 +2406,12 @@ function renderAggInner(entry: AggregationEntry): string {
 		return `{ ${aggType}: { field: ${fieldLit}, ranges: ${rangesLit} } }`;
 	}
 	if (entry.kind === "terms") {
-		const opts = (entry.options ?? {}) as {
-			sub?: Record<string, { kind: string; field: string }>;
-			topHits?: number;
-		};
+		const opts = (entry.options ?? {}) as TermsOptions;
 		const subEntries = Object.entries(opts.sub ?? {});
 		const hasSub = subEntries.length > 0;
 		const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
 		if (!hasSub && !hasTopHits) {
-			return `{ ${aggType}: { field: ${fieldLit}, size: ${DEFAULT_TERMS_SIZE} } }`;
+			return `{ ${aggType}: { field: ${fieldLit}, size: ${opts.size} } }`;
 		}
 		const subLines = subEntries.map(
 			([name, spec]) =>
@@ -2383,7 +2420,7 @@ function renderAggInner(entry: AggregationEntry): string {
 		if (hasTopHits) {
 			subLines.push(`"hits": { top_hits: { size: ${opts.topHits} } }`);
 		}
-		return `{ ${aggType}: { field: ${fieldLit}, size: ${DEFAULT_TERMS_SIZE} }, aggs: { ${subLines.join(", ")} } }`;
+		return `{ ${aggType}: { field: ${fieldLit}, size: ${opts.size} }, aggs: { ${subLines.join(", ")} } }`;
 	}
 	return `{ ${aggType}: { field: ${fieldLit} } }`;
 }

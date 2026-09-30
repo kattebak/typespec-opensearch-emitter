@@ -61,6 +61,15 @@
           "nested": false
         },
         {
+          "name": "breedGroup",
+          "optional": false,
+          "keyword": true,
+          "nested": false,
+          "aggregations": [
+            "terms"
+          ]
+        },
+        {
           "name": "birthDate",
           "optional": false,
           "keyword": false,
@@ -190,6 +199,15 @@
           "optional": true,
           "keyword": false,
           "nested": false
+        },
+        {
+          "name": "breedGroup",
+          "optional": false,
+          "keyword": true,
+          "nested": false,
+          "aggregations": [
+            "terms"
+          ]
         },
         {
           "name": "birthDate",

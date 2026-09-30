@@ -152,6 +152,49 @@ test("emits graphql aggregation types and resolver block", async () => {
 	assert.ok(resolver.includes("_a.byAlias?.buckets"));
 });
 
+// Issue #201 — test/main.tsp declares `breedGroup` with `size: 50`, and
+// test/package/tspconfig.yaml sets `graphql.terms-buckets: 25`.
+test("a terms aggregation carries its declared size", async () => {
+	const prepare = await readFile(
+		`${OUT_DIR}/pet-search-doc-fn-prepare.js`,
+		"utf8",
+	);
+
+	assert.ok(
+		prepare.includes(
+			'{n:"byBreedGroup",a:{ terms: { field: "breedGroup", size: 50 }, aggs: { "topRank": { max: { field: "rank" } } } }}',
+		),
+	);
+	assert.ok(
+		prepare.includes(
+			'{n:"bySpecies",a:{ terms: { field: "species", size: 10 } }}',
+		),
+	);
+});
+
+test("graphql.terms-buckets sizes a terms aggregation that declares no size", async () => {
+	const prepare = await readFile(
+		"build/package-emit/pet-search-doc-fn-prepare.js",
+		"utf8",
+	);
+
+	assert.ok(
+		prepare.includes(
+			'{n:"bySpecies",a:{ terms: { field: "species", size: 25 } }}',
+		),
+	);
+	assert.ok(
+		prepare.includes(
+			'{n:"byAlias",a:{ terms: { field: "aliases.keyword", size: 25 } }}',
+		),
+	);
+	assert.ok(
+		prepare.includes(
+			'{n:"byBreedGroup",a:{ terms: { field: "breedGroup", size: 50 }, aggs: { "topRank": { max: { field: "rank" } } } }}',
+		),
+	);
+});
+
 test("emits SearchFilter input with filterable kinds and nested sub-filter", async () => {
 	const sdl = await readFile(`${OUT_DIR}/pet-search-doc.graphql`, "utf8");
 	const prepare = await readFile(

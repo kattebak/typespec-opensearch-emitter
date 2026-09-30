@@ -3,6 +3,7 @@ type PetSearchDoc {
   name: String!
   species: String!
   breed: String
+  breedGroup: String!
   birthDate: String!
   createdAt: String!
   tags: [TagSearchDoc!]!
@@ -26,6 +27,7 @@ type Owner {
 
 input PetSearchDocFilter {
   species: String
+  breedGroup: String
 }
 
 input PetSearchFilter {
@@ -60,9 +62,17 @@ type TermBucket {
   count: Int!
 }
 
+type ByBreedGroupBucket {
+  key: String!
+  count: Int!
+  topRank: Float
+}
+
 type PetSearchAggregations {
 
   bySpecies: [TermBucket!]!
+
+  byBreedGroup: [ByBreedGroupBucket!]!
 
   byTagName: [TermBucket!]!
 

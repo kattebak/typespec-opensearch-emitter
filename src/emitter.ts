@@ -14,9 +14,12 @@ import {
 import {
 	APPSYNC_FUNCTION_BYTE_LIMIT,
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
+	DEFAULT_TERMS_SIZE,
 	type EmittedResolverFile,
 	emitGraphQLResolver,
 	MAX_PIPELINE_FUNCTIONS,
+	PER_REQUEST_BUCKET_BUDGET,
+	totalTermsAndRangeBuckets,
 } from "./emit-graphql-resolver.js";
 import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
@@ -214,6 +217,7 @@ export async function $onEmit(
 			autoDateHistogramBuckets:
 				graphqlOptions["auto-date-histogram-buckets"] ??
 				DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
+			termsBuckets: graphqlOptions["terms-buckets"] ?? DEFAULT_TERMS_SIZE,
 		};
 
 		// Top-level projections get the full SDL + resolver + manifest entry.
@@ -226,6 +230,11 @@ export async function $onEmit(
 			artifactFileNames.push(sdlFile.fileName);
 			sdlModules.push(emitSdlStringModule(sdlFile.fileName, sdlFile.content));
 
+			assertTermsBucketsFit(
+				context.program,
+				projection,
+				resolverOptions.termsBuckets,
+			);
 			const resolverFile = await emitGraphQLResolver(
 				projection,
 				resolverOptions,
@@ -666,6 +675,30 @@ function assertResolverFilesFit(
 	}
 }
 
+const SEARCH_MAX_BUCKETS = 65_535;
+const TERMS_AND_RANGE_BUCKET_HEADROOM =
+	SEARCH_MAX_BUCKETS - PER_REQUEST_BUCKET_BUDGET;
+
+function assertTermsBucketsFit(
+	program: Program,
+	projection: ResolvedProjection,
+	termsBuckets: number,
+): void {
+	const total = totalTermsAndRangeBuckets(projection, termsBuckets);
+	if (total <= TERMS_AND_RANGE_BUCKET_HEADROOM) {
+		return;
+	}
+	reportDiagnostic(program, {
+		code: "terms-buckets-over-budget",
+		format: {
+			name: projection.projectionModel.name,
+			total: String(total),
+			headroom: String(TERMS_AND_RANGE_BUCKET_HEADROOM),
+		},
+		target: projection.projectionModel,
+	});
+}
+
 /**
  * Issue #157 — `@searchProjection` states an intent for top-level emission.
  * Without `@indexName` that intent is discarded, and the result is
@@ -691,6 +724,7 @@ export const __test = {
 	collectProjectionModels,
 	reportDemotedProjections,
 	assertResolverFilesFit,
+	assertTermsBucketsFit,
 	isCandidateModel,
 	isTemplateDeclaration,
 	serializeProjections,

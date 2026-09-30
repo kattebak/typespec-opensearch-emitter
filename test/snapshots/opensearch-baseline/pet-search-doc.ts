@@ -7,6 +7,7 @@ export interface PetSearchDoc {
 	name: string;
 	species: string;
 	breed?: string;
+	breedGroup: string;
 	birthDate: string;
 	createdAt: string;
 	tags: TagSearchDoc[];
