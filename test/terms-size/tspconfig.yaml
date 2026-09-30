@@ -1,8 +1,0 @@
-emit:
-  - "@kattebak/typespec-opensearch-emitter"
-options:
-  "@kattebak/typespec-opensearch-emitter":
-    emitter-output-dir: "{cwd}/build/terms-size-emit"
-    graphql:
-      emit: true
-      terms-buckets: 25

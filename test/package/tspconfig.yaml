@@ -10,3 +10,5 @@ options:
       emit: true
       # Pipeline mode, one prepare function per projection.
       monolithic-threshold-bytes: 0
+      # Issue #201 — sizes every terms aggregation that declares no size.
+      terms-buckets: 25

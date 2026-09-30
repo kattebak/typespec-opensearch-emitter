@@ -3,6 +3,7 @@ export interface PetPublicSearchDoc {
 	name: string;
 	species: string;
 	breed?: string;
+	breedGroup: string;
 	birthDate: string;
 	createdAt: string;
 	tags: {

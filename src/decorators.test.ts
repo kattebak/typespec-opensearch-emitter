@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { DecoratorContext } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
-	__test,
 	getAggregatableDirectives,
 	getAggregatableKinds,
 	getAnalyzer,
@@ -461,12 +459,11 @@ describe("decorators", () => {
         }
       `);
 
-			const codes = diagnostics.map((x) => x.code);
-			assert.equal(
-				hasDiagnosticCode(codes, "invalid-aggregation-options"),
-				true,
-				`size ${size} must be rejected`,
+			const diagnostic = diagnostics.find((x) =>
+				x.code.endsWith("/invalid-aggregation-options"),
 			);
+			assert.ok(diagnostic, `size ${size} must be rejected`);
+			assert.ok(diagnostic.message.includes("size must be a positive integer"));
 			const tags = runner.program
 				.getGlobalNamespaceType()
 				.models.get("Product")
@@ -503,49 +500,6 @@ describe("decorators", () => {
 					},
 				},
 			],
-		);
-	});
-
-	it("names the size field in the size diagnostic", async () => {
-		const runner = await createRunner();
-		const diagnostics = await runner.diagnose(`
-      model Product {
-        @aggregatable("terms", #{ size: 0 }) @searchable tags: string[];
-      }
-    `);
-
-		const diagnostic = diagnostics.find((x) =>
-			x.code.endsWith("/invalid-aggregation-options"),
-		);
-		assert.ok(diagnostic);
-		assert.ok(diagnostic.message.includes("size must be a positive integer"));
-	});
-
-	it("lists size among the accepted terms options", async () => {
-		const runner = await createRunner();
-		await runner.diagnose(`
-      model Product {
-        @searchable tags: string[];
-      }
-    `);
-		const tags = runner.program
-			.getGlobalNamespaceType()
-			.models.get("Product")
-			?.properties.get("tags");
-		assert.ok(tags);
-		const context = { program: runner.program } as unknown as DecoratorContext;
-
-		const options = __test.validateOptions(context, tags, "terms", [1]);
-
-		assert.equal(options, undefined);
-		const diagnostic = runner.program.diagnostics.find((x) =>
-			x.code.endsWith("/invalid-aggregation-options"),
-		);
-		assert.ok(diagnostic);
-		assert.ok(
-			diagnostic.message.includes(
-				"expected { sub?: {...}, topHits?: N, size?: N }",
-			),
 		);
 	});
 

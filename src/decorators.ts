@@ -590,17 +590,9 @@ function validateOptions(
 	context: DecoratorContext,
 	target: ModelProperty,
 	kind: AggregationKind,
-	raw: unknown,
+	raw: Record<string, unknown>,
 ): AggregationOptions | undefined {
 	if (kind === "date_histogram") {
-		if (!isPlainObject(raw)) {
-			reportDiagnostic(context.program, {
-				code: "invalid-aggregation-options",
-				format: { kind, reason: "expected an options object" },
-				target,
-			});
-			return undefined;
-		}
 		const interval = raw.interval ?? "month";
 		if (!isDateHistogramInterval(interval)) {
 			reportDiagnostic(context.program, {
@@ -636,7 +628,7 @@ function validateOptions(
 		return { interval, bounds };
 	}
 	if (kind === "range") {
-		if (!isPlainObject(raw) || !Array.isArray(raw.ranges)) {
+		if (!Array.isArray(raw.ranges)) {
 			reportDiagnostic(context.program, {
 				code: "invalid-aggregation-options",
 				format: {
@@ -677,17 +669,6 @@ function validateOptions(
 		return { ranges };
 	}
 	if (kind === "terms") {
-		if (!isPlainObject(raw)) {
-			reportDiagnostic(context.program, {
-				code: "invalid-aggregation-options",
-				format: {
-					kind,
-					reason: "expected { sub?: {...}, topHits?: N, size?: N }",
-				},
-				target,
-			});
-			return undefined;
-		}
 		const result: TermsOptions = {};
 		if (raw.sub !== undefined) {
 			if (!isPlainObject(raw.sub)) {
@@ -972,5 +953,4 @@ export function getSearchAs(
 export const __test = {
 	isArrayOfModelType,
 	isStringType,
-	validateOptions,
 };

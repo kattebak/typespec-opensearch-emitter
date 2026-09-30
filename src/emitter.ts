@@ -19,7 +19,7 @@ import {
 	emitGraphQLResolver,
 	MAX_PIPELINE_FUNCTIONS,
 	PER_REQUEST_BUCKET_BUDGET,
-	totalTermsBuckets,
+	totalTermsAndRangeBuckets,
 } from "./emit-graphql-resolver.js";
 import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
@@ -675,19 +675,17 @@ function assertResolverFilesFit(
 	}
 }
 
-/**
- * Issue #201 — a raised terms size comes off the histogram bucket budget at
- * request time, but the budget cannot absorb terms sizes that exceed it on
- * their own. Fail compile rather than emit a request that can only hit
- * search.max_buckets.
- */
+const SEARCH_MAX_BUCKETS = 65_535;
+const TERMS_AND_RANGE_BUCKET_HEADROOM =
+	SEARCH_MAX_BUCKETS - PER_REQUEST_BUCKET_BUDGET;
+
 function assertTermsBucketsFit(
 	program: Program,
 	projection: ResolvedProjection,
 	termsBuckets: number,
 ): void {
-	const total = totalTermsBuckets(projection, termsBuckets);
-	if (total <= PER_REQUEST_BUCKET_BUDGET) {
+	const total = totalTermsAndRangeBuckets(projection, termsBuckets);
+	if (total <= TERMS_AND_RANGE_BUCKET_HEADROOM) {
 		return;
 	}
 	reportDiagnostic(program, {
@@ -695,7 +693,7 @@ function assertTermsBucketsFit(
 		format: {
 			name: projection.projectionModel.name,
 			total: String(total),
-			budget: String(PER_REQUEST_BUCKET_BUDGET),
+			headroom: String(TERMS_AND_RANGE_BUCKET_HEADROOM),
 		},
 		target: projection.projectionModel,
 	});

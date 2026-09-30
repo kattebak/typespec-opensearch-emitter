@@ -457,6 +457,7 @@ const defaultOptions = {
 	defaultPageSize: 20,
 	maxPageSize: 100,
 	trackTotalHitsUpTo: 10000,
+	termsBuckets: 10,
 	monolithicThresholdBytes: 0,
 };
 
@@ -1028,6 +1029,7 @@ describe("emitGraphQLResolver", () => {
 			defaultPageSize: 20,
 			maxPageSize: 100,
 			trackTotalHitsUpTo: 10000,
+			termsBuckets: 10,
 		});
 		assert.equal(result.mode, "monolithic");
 		// The TEXT_SORT_FIELDS literal must include "name", and the buildSort
@@ -3603,75 +3605,6 @@ describe("emitGraphQLResolver histogram bucket budget (issue #155)", () => {
 		}
 	});
 
-	it("takes a raised terms size off the budget before dividing it (issue #201)", async () => {
-		const projection = makeProjection({
-			fields: [
-				...histogramProjection(3).fields,
-				makeField({
-					name: "status",
-					keyword: true,
-					aggregations: [{ kind: "terms", options: { size: 5000 } }],
-				}),
-				makeField({ name: "region", keyword: true, aggregations: ["terms"] }),
-			],
-		});
-		const result = await emitGraphQLResolver(projection, defaultOptions);
-		const source = prepareFunctionContent(result);
-		const names = histogramAggNames(source);
-		assert.equal(names.length, 3);
-
-		const withTerms = evalRequestBody(
-			source,
-			aggSelection([...names, "byStatus", "byRegion"]),
-		);
-		const reserved = Math.floor((PER_REQUEST_BUCKET_BUDGET - 5000) / 3); // 5615
-		for (const name of names) {
-			assert.equal(bucketsOf(withTerms, name), reserved);
-		}
-
-		const withoutTerms = evalRequestBody(source, aggSelection(names));
-		for (const name of names) {
-			assert.equal(bucketsOf(withoutTerms, name), expectedBudget(3));
-		}
-	});
-
-	it("keeps the floor when raised terms sizes leave little budget", async () => {
-		const projection = makeProjection({
-			fields: [
-				...histogramProjection(4).fields,
-				makeField({
-					name: "status",
-					keyword: true,
-					aggregations: [{ kind: "terms", options: { size: 21000 } }],
-				}),
-			],
-		});
-		const result = await emitGraphQLResolver(projection, defaultOptions);
-		const source = prepareFunctionContent(result);
-		const names = histogramAggNames(source);
-		const body = evalRequestBody(source, aggSelection([...names, "byStatus"]));
-		for (const name of names) {
-			assert.equal(bucketsOf(body, name), MIN_AUTO_DATE_HISTOGRAM_BUCKETS);
-		}
-	});
-
-	it("keeps the budget division unchanged for default-sized terms", async () => {
-		const projection = makeProjection({
-			fields: [
-				...histogramProjection(3).fields,
-				makeField({ name: "status", keyword: true, aggregations: ["terms"] }),
-			],
-		});
-		const result = await emitGraphQLResolver(projection, defaultOptions);
-		const source = prepareFunctionContent(result);
-		assert.ok(!source.includes("reserved"));
-		const names = histogramAggNames(source);
-		const body = evalRequestBody(source, aggSelection([...names, "byStatus"]));
-		for (const name of names) {
-			assert.equal(bucketsOf(body, name), expectedBudget(3));
-		}
-	});
-
 	it("leaves an author-bounded histogram out of the budget (bounds opt-out)", async () => {
 		// Declared bounds pin the range, so the histogram is the author's
 		// explicit choice: it keeps its fixed interval and hard_bounds, carries
@@ -3940,6 +3873,7 @@ describe("emitGraphQLResolver two-stage emit (issue #112)", () => {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
+		termsBuckets: 10,
 		monolithicThresholdBytes: 32000,
 	};
 
@@ -4233,6 +4167,7 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
+		termsBuckets: 10,
 		monolithicThresholdBytes: 0,
 	};
 
@@ -4745,106 +4680,6 @@ describe("emitGraphQLResolver recursive pipeline split (issue #173)", () => {
 			"split aggs (with search-side budget division) must match the monolithic aggs",
 		);
 	});
-
-	it("takes raised terms sizes off the budget across partitions (issue #201)", async () => {
-		function sub(name: string, fields: ResolvedProjection["fields"]) {
-			return {
-				projectionModel: { name: `${name}SearchDoc` },
-				sourceModel: { name },
-				indexName: name.toLowerCase(),
-				fields,
-			} as unknown as ResolvedProjection;
-		}
-		const projection = makeProjection({
-			name: "WidgetSearchDoc",
-			indexName: "widgets",
-			fields: [
-				...Array.from({ length: 6 }, (_, i) =>
-					makeField({
-						name: `root${i}`,
-						type: { kind: "Scalar", name: "utcDateTime" } as unknown as Type,
-						aggregations: [
-							{ kind: "date_histogram", options: { interval: "month" } },
-						],
-					}),
-				),
-				makeField({
-					name: "status",
-					keyword: true,
-					aggregations: [{ kind: "terms", options: { size: 1000 } }],
-				}),
-				makeField({
-					name: "parts",
-					nested: true,
-					type: {
-						kind: "Model",
-						name: "Array",
-						indexer: { value: { kind: "Model" } },
-					} as unknown as Type,
-					subProjection: sub("Part", [
-						...Array.from({ length: 6 }, (_, i) =>
-							makeField({
-								name: `shipped${i}`,
-								type: {
-									kind: "Scalar",
-									name: "utcDateTime",
-								} as unknown as Type,
-								aggregations: [
-									{ kind: "date_histogram", options: { interval: "day" } },
-								],
-							}),
-						),
-						makeField({
-							name: "partId",
-							keyword: true,
-							aggregations: [{ kind: "terms", options: { size: 2000 } }],
-						}),
-					]),
-				}),
-			],
-		});
-		const monolithic = await emitGraphQLResolver(projection, {
-			...forcePipeline,
-			monolithicThresholdBytes: 32000,
-		});
-		const split = await emitGraphQLResolver(projection, {
-			...forcePipeline,
-			monolithicThresholdBytes: 1,
-		});
-		assert.equal(monolithic.mode, "monolithic");
-		assert.ok(
-			split.functions.filter((f) => f.name.startsWith("prepare-aggs")).length >=
-				2,
-			"the aggs workload must partition so the cross-partition budget is exercised",
-		);
-
-		const info = {
-			selectionSetList: [
-				"aggregations",
-				"aggregations/byStatus",
-				"aggregations/byPartPartId",
-				...Array.from(
-					{ length: 6 },
-					(_, i) => `aggregations/byRoot${i}OverTime`,
-				),
-				...Array.from(
-					{ length: 6 },
-					(_, i) => `aggregations/byPartShipped${i}OverTime`,
-				),
-			],
-		};
-		const monoBody = evalRequestBody(monolithic.content, info, {});
-		const splitBody = runSplitPipeline(split, info, {});
-		assert.deepEqual(canonical(splitBody.aggs), canonical(monoBody.aggs));
-		const aggs = splitBody.aggs as Record<
-			string,
-			{ auto_date_histogram?: { buckets?: number } }
-		>;
-		assert.equal(
-			aggs.byRoot0OverTime.auto_date_histogram?.buckets,
-			Math.floor((21_845 - 3000) / 12),
-		);
-	});
 });
 
 // Issue #179 — the recursive split (issue #173) only measured and subdivided
@@ -4860,6 +4695,7 @@ describe("emitGraphQLResolver response-side split (issue #179)", () => {
 		defaultPageSize: 20,
 		maxPageSize: 100,
 		trackTotalHitsUpTo: 10000,
+		termsBuckets: 10,
 		monolithicThresholdBytes: 0,
 	};
 

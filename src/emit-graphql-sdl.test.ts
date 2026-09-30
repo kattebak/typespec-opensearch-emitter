@@ -508,22 +508,6 @@ describe("emitGraphQLSdl aggregations", () => {
 		assert.ok(!result.content.includes("aggregations:"));
 	});
 
-	it("keeps the shared TermBucket type when a terms size is set", () => {
-		const projection = makeProjection({
-			name: "CounterpartySearchDoc",
-			fields: [
-				makeField({
-					name: "status",
-					aggregations: [{ kind: "terms", options: { size: 50 } }],
-				}),
-			],
-		});
-
-		const result = emitGraphQLSdl(dummyProgram, projection, defaultOptions);
-		assert.ok(result.content.includes("byStatus: [TermBucket!]!"));
-		assert.ok(!result.content.includes("ByStatusBucket"));
-	});
-
 	it("emits TermBucket and aggregations type when fields are aggregatable", () => {
 		const projection = makeProjection({
 			name: "CounterpartySearchDoc",

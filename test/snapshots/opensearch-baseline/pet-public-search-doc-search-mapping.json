@@ -26,6 +26,9 @@
           }
         }
       },
+      "breedGroup": {
+        "type": "keyword"
+      },
       "birthDate": {
         "type": "date"
       },

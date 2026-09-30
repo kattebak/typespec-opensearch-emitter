@@ -3,6 +3,7 @@ type PetPublicSearchDoc {
   name: String!
   species: String!
   breed: String
+  breedGroup: String!
   birthDate: String!
   createdAt: String!
   tags: [Tag!]!
@@ -42,6 +43,7 @@ type BankAccountApproval {
 input PetPublicSearchDocFilter {
   name: String
   species: String
+  breedGroup: String
 }
 
 input PetPublicSearchFilter {
@@ -67,9 +69,17 @@ type TermBucket {
   count: Int!
 }
 
+type ByBreedGroupBucket {
+  key: String!
+  count: Int!
+  topRank: Float
+}
+
 type PetPublicSearchAggregations {
 
   bySpecies: [TermBucket!]!
+
+  byBreedGroup: [ByBreedGroupBucket!]!
 
   byAlias: [TermBucket!]!
 

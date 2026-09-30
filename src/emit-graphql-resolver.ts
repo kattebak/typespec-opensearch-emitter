@@ -66,11 +66,7 @@ export interface ResolverOptions {
 	 * aggregation declares no bounds. See DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS.
 	 */
 	autoDateHistogramBuckets?: number;
-	/**
-	 * `size` of every emitted `terms` aggregation whose decorator sets none.
-	 * See DEFAULT_TERMS_SIZE.
-	 */
-	termsBuckets?: number;
+	termsBuckets: number;
 }
 
 const DEFAULT_MONOLITHIC_THRESHOLD_BYTES = 31_000;
@@ -117,8 +113,7 @@ export const DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS = 10_000;
  * count — but the emitter's invariant is that no bucketing aggregation ships
  * without a hard ceiling visible in the emitted body, so the default is made
  * explicit. Set to OpenSearch's own default so the emitted queries return the
- * same buckets they always have. The `graphql.terms-buckets` option and a
- * per-field `size` raise it (issue #201).
+ * same buckets they always have.
  */
 export const DEFAULT_TERMS_SIZE = 10;
 
@@ -128,9 +123,7 @@ export const DEFAULT_TERMS_SIZE = 10;
  * request, not one aggregation, so the emitted `buildAggs` divides this budget
  * across the `auto_date_histogram` aggregations a request actually selects
  * (issue #155). A request that reaches the hard cap is already a 503; a third
- * leaves room for the terms and metric buckets sharing the request. A `terms`
- * aggregation sized above DEFAULT_TERMS_SIZE outgrows that room, so its size
- * comes off this budget before the division (issue #201).
+ * leaves room for the terms and metric buckets sharing the request.
  */
 export const PER_REQUEST_BUCKET_BUDGET = 21_845;
 
@@ -222,7 +215,7 @@ export async function emitGraphQLResolver(
 
 	const aggregations = withTermsSize(
 		collectAggregations(projection),
-		options.termsBuckets ?? DEFAULT_TERMS_SIZE,
+		options.termsBuckets,
 	);
 	const searchFilterShape = buildSearchFilterShape(projection);
 	const documentSpec = collectDocumentSpec(projection);
@@ -1951,12 +1944,7 @@ ${hasAuto ? "\t\tnormalizeAggBudget(aggs);\n" : ""}		body.aggs = aggs;
 `
 		: "";
 
-	const budgetHelper = hasAuto
-		? renderNormalizeAggBudgetFunction(
-				options,
-				aggregations.some(hasRaisedTermsSize),
-			)
-		: "";
+	const budgetHelper = hasAuto ? renderNormalizeAggBudgetFunction(options) : "";
 
 	return `import { util } from "@aws-appsync/utils";
 
@@ -2012,45 +2000,29 @@ ${budgetHelper}`;
  * the division sees all selected histograms regardless of how the aggs
  * partitions were laid out (issue #173).
  */
-function renderNormalizeAggBudgetFunction(
-	options: ResolverOptions,
-	reserveTerms: boolean,
-): string {
+function renderNormalizeAggBudgetFunction(options: ResolverOptions): string {
 	const cap =
 		options.autoDateHistogramBuckets ?? DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS;
-	const reservedDecl = reserveTerms ? "\n\tlet reserved = 0;" : "";
-	const reserveTop = reserveTerms
-		? `\n\t\t} else if (node.terms && node.terms.size > ${DEFAULT_TERMS_SIZE}) {
-			reserved += node.terms.size;`
-		: "";
-	const reserveInner = reserveTerms
-		? ` else if (inner.terms && inner.terms.size > ${DEFAULT_TERMS_SIZE}) {
-					reserved += inner.terms.size;
-				}`
-		: "";
-	const available = reserveTerms
-		? `(${PER_REQUEST_BUCKET_BUDGET} - reserved)`
-		: `${PER_REQUEST_BUCKET_BUDGET}`;
 	return `
 function normalizeAggBudget(aggs) {
-	const histograms = [];${reservedDecl}
+	const histograms = [];
 	const keys = Object.keys(aggs);
 	for (const key of keys) {
 		const node = aggs[key];
 		if (node.auto_date_histogram) {
-			histograms.push(node.auto_date_histogram);${reserveTop}
+			histograms.push(node.auto_date_histogram);
 		} else if (node.aggs) {
 			const innerKeys = Object.keys(node.aggs);
 			for (const innerKey of innerKeys) {
 				const inner = node.aggs[innerKey];
 				if (inner.auto_date_histogram) {
 					histograms.push(inner.auto_date_histogram);
-				}${reserveInner}
+				}
 			}
 		}
 	}
 	if (histograms.length > 0) {
-		let budget = Math.floor(${available} / histograms.length);
+		let budget = Math.floor(${PER_REQUEST_BUCKET_BUDGET} / histograms.length);
 		if (budget > ${cap}) budget = ${cap};
 		if (budget < ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS}) budget = ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS};
 		for (const h of histograms) {
@@ -2173,29 +2145,23 @@ function withTermsSize(
 	});
 }
 
-export function totalTermsBuckets(
+export function totalTermsAndRangeBuckets(
 	projection: ResolvedProjection,
 	termsBuckets: number,
 ): number {
 	const seen = new Set<string>();
 	let total = 0;
-	for (const entry of withTermsSize(
-		collectAggregations(projection),
-		termsBuckets,
-	)) {
-		if (entry.kind !== "terms" || seen.has(entry.aggName)) continue;
+	for (const entry of collectAggregations(projection)) {
+		if (seen.has(entry.aggName)) continue;
 		seen.add(entry.aggName);
-		total += termsSize(entry);
+		if (entry.kind === "terms") {
+			total += ((entry.options ?? {}) as TermsOptions).size ?? termsBuckets;
+		}
+		if (entry.kind === "range" && entry.options && "ranges" in entry.options) {
+			total += entry.options.ranges.length;
+		}
 	}
 	return total;
-}
-
-function termsSize(entry: AggregationEntry): number {
-	return ((entry.options ?? {}) as TermsOptions).size ?? DEFAULT_TERMS_SIZE;
-}
-
-function hasRaisedTermsSize(entry: AggregationEntry): boolean {
-	return entry.kind === "terms" && termsSize(entry) > DEFAULT_TERMS_SIZE;
 }
 
 function usesAutoDateHistogram(entry: AggregationEntry): boolean {
@@ -2324,22 +2290,13 @@ function renderBuildAggsFunction(
 	const trackHistogram = hasAuto
 		? "\n\t\t\tif (spec.h) histograms.push(spec);"
 		: "";
-	const reserveTerms = hasAuto && aggregations.some(hasRaisedTermsSize);
-	const trackTerms = reserveTerms
-		? `\n\t\t\tif (spec.a.terms && spec.a.terms.size > ${DEFAULT_TERMS_SIZE}) reserved += spec.a.terms.size;`
-		: "";
-	const histogramDecl = hasAuto
-		? `\n\tconst histograms = [];${reserveTerms ? "\n\tlet reserved = 0;" : ""}`
-		: "";
-	const available = reserveTerms
-		? `(${PER_REQUEST_BUCKET_BUDGET} - reserved)`
-		: `${PER_REQUEST_BUCKET_BUDGET}`;
+	const histogramDecl = hasAuto ? "\n\tconst histograms = [];" : "";
 	const budgetBlock = hasAuto
 		? `
 	// search.max_buckets caps the whole request: divide a soft budget across the
 	// selected histograms, capped and floored per histogram (issue #155).
 	if (histograms.length > 0) {
-		let budget = Math.floor(${available} / histograms.length);
+		let budget = Math.floor(${PER_REQUEST_BUCKET_BUDGET} / histograms.length);
 		if (budget > ${cap}) budget = ${cap};
 		if (budget < ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS}) budget = ${MIN_AUTO_DATE_HISTOGRAM_BUCKETS};
 		for (const spec of histograms) {
@@ -2370,7 +2327,7 @@ function buildAggs(selectionSetList) {
 	let requested = false;${histogramDecl}
 	for (const spec of AGG_SPEC) {
 		if (aliased || selectionSetList.indexOf("aggregations/" + spec.n) >= 0) {
-			requested = true;${trackHistogram}${trackTerms}
+			requested = true;${trackHistogram}
 			if (spec.g) {
 				const group = aggs[spec.g] || { nested: { path: spec.p }, aggs: {} };
 				group.aggs[spec.n] = spec.a;
@@ -2450,12 +2407,11 @@ function renderAggInner(entry: AggregationEntry): string {
 	}
 	if (entry.kind === "terms") {
 		const opts = (entry.options ?? {}) as TermsOptions;
-		const size = opts.size ?? DEFAULT_TERMS_SIZE;
 		const subEntries = Object.entries(opts.sub ?? {});
 		const hasSub = subEntries.length > 0;
 		const hasTopHits = typeof opts.topHits === "number" && opts.topHits > 0;
 		if (!hasSub && !hasTopHits) {
-			return `{ ${aggType}: { field: ${fieldLit}, size: ${size} } }`;
+			return `{ ${aggType}: { field: ${fieldLit}, size: ${opts.size} } }`;
 		}
 		const subLines = subEntries.map(
 			([name, spec]) =>
@@ -2464,7 +2420,7 @@ function renderAggInner(entry: AggregationEntry): string {
 		if (hasTopHits) {
 			subLines.push(`"hits": { top_hits: { size: ${opts.topHits} } }`);
 		}
-		return `{ ${aggType}: { field: ${fieldLit}, size: ${size} }, aggs: { ${subLines.join(", ")} } }`;
+		return `{ ${aggType}: { field: ${fieldLit}, size: ${opts.size} }, aggs: { ${subLines.join(", ")} } }`;
 	}
 	return `{ ${aggType}: { field: ${fieldLit} } }`;
 }
@@ -2593,7 +2549,6 @@ export const __test = {
 	renderAggSpecLiteral,
 	renderBuildAggsFunction,
 	renderResponseAggregations,
-	withTermsSize,
 	collectDocumentSpec,
 	partitionAggregationsByTopPath,
 	DEFAULT_MONOLITHIC_THRESHOLD_BYTES,

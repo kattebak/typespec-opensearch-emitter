@@ -893,11 +893,16 @@ describe("assertTermsBucketsFit (issue #201)", () => {
 		return { program: runner.program, projection };
 	}
 
-	it("hard-errors when terms sizes alone exceed the bucket budget", async () => {
+	function overBudget(program: Program) {
+		return program.diagnostics.filter((d) => d.code === TERMS_OVER_BUDGET_CODE);
+	}
+
+	it("hard-errors when terms and range buckets exceed the headroom", async () => {
 		const { program, projection } = await resolve(`
       model Widget {
-        @keyword @aggregatable("terms", #{ size: 20000 }) status: string;
-        @keyword @aggregatable("terms", #{ size: 2000 }) region: string;
+        @keyword @aggregatable("terms", #{ size: 40000 }) status: string;
+        @keyword @aggregatable("terms", #{ size: 3690 }) region: string;
+        @aggregatable("range", #{ ranges: #[#{ to: 100 }] }) price: float64;
       }
       @indexName("widgets")
       model WidgetSearchDoc is SearchProjection<Widget> {}
@@ -905,13 +910,12 @@ describe("assertTermsBucketsFit (issue #201)", () => {
 
 		__test.assertTermsBucketsFit(program, projection, 10);
 
-		const relevant = program.diagnostics.filter(
-			(d) => d.code === TERMS_OVER_BUDGET_CODE,
-		);
+		const relevant = overBudget(program);
 		assert.equal(relevant.length, 1);
 		assert.equal(relevant[0].severity, "error");
 		assert.ok(relevant[0].message.includes("WidgetSearchDoc"));
-		assert.ok(relevant[0].message.includes("22000"));
+		assert.ok(relevant[0].message.includes("43691"));
+		assert.ok(relevant[0].message.includes("43690"));
 	});
 
 	it("counts the terms-buckets option for terms without a size", async () => {
@@ -924,20 +928,17 @@ describe("assertTermsBucketsFit (issue #201)", () => {
       model WidgetSearchDoc is SearchProjection<Widget> {}
     `);
 
-		__test.assertTermsBucketsFit(program, projection, 11000);
+		__test.assertTermsBucketsFit(program, projection, 22000);
 
-		assert.equal(
-			program.diagnostics.filter((d) => d.code === TERMS_OVER_BUDGET_CODE)
-				.length,
-			1,
-		);
+		assert.equal(overBudget(program).length, 1);
 	});
 
-	it("stays silent when terms sizes fit the budget", async () => {
+	it("accepts terms sizes above the histogram budget but within the headroom", async () => {
 		const { program, projection } = await resolve(`
       model Widget {
-        @keyword @aggregatable("terms", #{ size: 5000 }) status: string;
-        @keyword @aggregatable("terms") region: string;
+        @keyword @aggregatable("terms", #{ size: 20000 }) status: string;
+        @keyword @aggregatable("terms", #{ size: 2000 }) region: string;
+        @keyword @aggregatable("terms") desk: string;
       }
       @indexName("widgets")
       model WidgetSearchDoc is SearchProjection<Widget> {}
@@ -945,11 +946,7 @@ describe("assertTermsBucketsFit (issue #201)", () => {
 
 		__test.assertTermsBucketsFit(program, projection, 10);
 
-		assert.equal(
-			program.diagnostics.filter((d) => d.code === TERMS_OVER_BUDGET_CODE)
-				.length,
-			0,
-		);
+		assert.equal(overBudget(program).length, 0);
 	});
 });
 

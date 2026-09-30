@@ -275,7 +275,7 @@ export const $lib = createTypeSpecLibrary({
 		"terms-buckets-over-budget": {
 			severity: "error",
 			messages: {
-				default: paramMessage`Projection "${"name"}" sizes its terms aggregations at ${"total"} buckets in total, over the per-request bucket budget of ${"budget"}. OpenSearch counts every bucket in a request against search.max_buckets, so a request selecting them all would leave no room for date histograms and could fail with too_many_buckets_exception. Lower the @aggregatable("terms", #{ size: N }) values or graphql.terms-buckets.`,
+				default: paramMessage`Projection "${"name"}" declares ${"total"} terms and range buckets in total, over the ${"headroom"} that search.max_buckets (65,535) leaves beside the date histogram budget. A request selecting them all could fail with too_many_buckets_exception. Lower the @aggregatable("terms", #{ size: N }) values or graphql.terms-buckets.`,
 			},
 		},
 		"aggregation-name-collision": {
