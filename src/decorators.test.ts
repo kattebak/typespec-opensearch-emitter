@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import type { DecoratorContext } from "@typespec/compiler";
 import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
+	__test,
 	getAggregatableDirectives,
 	getAggregatableKinds,
 	getAnalyzer,
@@ -429,6 +431,122 @@ describe("decorators", () => {
 		const name = product.properties.get("name");
 		assert.ok(name);
 		assert.equal(getAggregatableKinds(runner.program, name), undefined);
+	});
+
+	it("stores a terms size", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms", #{ size: 50 }) @searchable tags: string[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const tags = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("tags");
+		assert.ok(tags);
+		assert.deepEqual(getAggregatableDirectives(runner.program, tags), [
+			{ kind: "terms", options: { size: 50 } },
+		]);
+	});
+
+	it("rejects a terms size that is not a positive integer", async () => {
+		for (const size of ["0", "-5", "2.5", '"10"']) {
+			const runner = await createRunner();
+			const diagnostics = await runner.diagnose(`
+        model Product {
+          @aggregatable("terms", #{ size: ${size} }) @searchable tags: string[];
+        }
+      `);
+
+			const codes = diagnostics.map((x) => x.code);
+			assert.equal(
+				hasDiagnosticCode(codes, "invalid-aggregation-options"),
+				true,
+				`size ${size} must be rejected`,
+			);
+			const tags = runner.program
+				.getGlobalNamespaceType()
+				.models.get("Product")
+				?.properties.get("tags");
+			assert.ok(tags);
+			assert.equal(getAggregatableDirectives(runner.program, tags), undefined);
+		}
+	});
+
+	it("stores a terms size alongside sub and topHits", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms", #{ size: 25, topHits: 3, sub: #{ latest: #{ kind: "max", field: "validTo" } } })
+        @searchable counterpartyId: string;
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const counterpartyId = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("counterpartyId");
+		assert.ok(counterpartyId);
+		assert.deepEqual(
+			getAggregatableDirectives(runner.program, counterpartyId),
+			[
+				{
+					kind: "terms",
+					options: {
+						sub: { latest: { kind: "max", field: "validTo" } },
+						topHits: 3,
+						size: 25,
+					},
+				},
+			],
+		);
+	});
+
+	it("names the size field in the size diagnostic", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @aggregatable("terms", #{ size: 0 }) @searchable tags: string[];
+      }
+    `);
+
+		const diagnostic = diagnostics.find((x) =>
+			x.code.endsWith("/invalid-aggregation-options"),
+		);
+		assert.ok(diagnostic);
+		assert.ok(diagnostic.message.includes("size must be a positive integer"));
+	});
+
+	it("lists size among the accepted terms options", async () => {
+		const runner = await createRunner();
+		await runner.diagnose(`
+      model Product {
+        @searchable tags: string[];
+      }
+    `);
+		const tags = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("tags");
+		assert.ok(tags);
+		const context = { program: runner.program } as unknown as DecoratorContext;
+
+		const options = __test.validateOptions(context, tags, "terms", [1]);
+
+		assert.equal(options, undefined);
+		const diagnostic = runner.program.diagnostics.find((x) =>
+			x.code.endsWith("/invalid-aggregation-options"),
+		);
+		assert.ok(diagnostic);
+		assert.ok(
+			diagnostic.message.includes(
+				"expected { sub?: {...}, topHits?: N, size?: N }",
+			),
+		);
 	});
 
 	it("emits diagnostic for unknown @aggregatable kind", async () => {

@@ -509,6 +509,11 @@ export interface TermsOptions {
 	 * to fetch examples. Not inferred by default — opt-in only.
 	 */
 	topHits?: number;
+	/**
+	 * Bucket count of the emitted `terms` aggregation. Overrides the
+	 * `graphql.terms-buckets` emitter option, which defaults to 10.
+	 */
+	size?: number;
 }
 
 export type AggregationOptions =
@@ -675,7 +680,10 @@ function validateOptions(
 		if (!isPlainObject(raw)) {
 			reportDiagnostic(context.program, {
 				code: "invalid-aggregation-options",
-				format: { kind, reason: "expected { sub: {...}, topHits?: N }" },
+				format: {
+					kind,
+					reason: "expected { sub?: {...}, topHits?: N, size?: N }",
+				},
 				target,
 			});
 			return undefined;
@@ -731,6 +739,24 @@ function validateOptions(
 				return undefined;
 			}
 			result.topHits = raw.topHits;
+		}
+		if (raw.size !== undefined) {
+			if (
+				typeof raw.size !== "number" ||
+				!Number.isInteger(raw.size) ||
+				raw.size <= 0
+			) {
+				reportDiagnostic(context.program, {
+					code: "invalid-aggregation-options",
+					format: {
+						kind,
+						reason: "size must be a positive integer",
+					},
+					target,
+				});
+				return undefined;
+			}
+			result.size = raw.size;
 		}
 		return result;
 	}
@@ -946,4 +972,5 @@ export function getSearchAs(
 export const __test = {
 	isArrayOfModelType,
 	isStringType,
+	validateOptions,
 };

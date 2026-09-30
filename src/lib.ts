@@ -33,6 +33,12 @@ export interface GraphQLEmitterOptions {
 	 * Issue #150.
 	 */
 	"auto-date-histogram-buckets"?: number;
+	/**
+	 * `size` of every emitted `terms` aggregation. A per-field
+	 * `@aggregatable("terms", #{ size: N })` overrides it. Default: 10,
+	 * OpenSearch's own default. Issue #201.
+	 */
+	"terms-buckets"?: number;
 	directives?: GraphQLDirectivesOptions;
 }
 
@@ -266,6 +272,12 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Join field "${"name"}" collides with a field already resolved from source model "${"sourceModel"}". A join fills a field of its own; rename either the joined field or the source property so each one names a distinct document key.`,
 			},
 		},
+		"terms-buckets-over-budget": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Projection "${"name"}" sizes its terms aggregations at ${"total"} buckets in total, over the per-request bucket budget of ${"budget"}. OpenSearch counts every bucket in a request against search.max_buckets, so a request selecting them all would leave no room for date histograms and could fail with too_many_buckets_exception. Lower the @aggregatable("terms", #{ size: N }) values or graphql.terms-buckets.`,
+			},
+		},
 		"aggregation-name-collision": {
 			severity: "error",
 			messages: {
@@ -389,6 +401,12 @@ export const $lib = createTypeSpecLibrary({
 							type: "number",
 							nullable: true,
 							default: 10000,
+						},
+						"terms-buckets": {
+							type: "integer",
+							nullable: true,
+							minimum: 1,
+							default: 10,
 						},
 						directives: {
 							type: "object",

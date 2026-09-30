@@ -877,6 +877,82 @@ describe("reportDemotedProjections (issue #157)", () => {
 	});
 });
 
+const TERMS_OVER_BUDGET_CODE =
+	"@kattebak/typespec-opensearch-emitter/terms-buckets-over-budget";
+
+describe("assertTermsBucketsFit (issue #201)", () => {
+	async function resolve(source: string) {
+		const runner = await createRunner();
+		await runner.diagnose(source);
+		const model = runner.program
+			.getGlobalNamespaceType()
+			.models.get("WidgetSearchDoc");
+		assert.ok(model);
+		const projection = resolveProjectionModel(runner.program, model);
+		assert.ok(projection);
+		return { program: runner.program, projection };
+	}
+
+	it("hard-errors when terms sizes alone exceed the bucket budget", async () => {
+		const { program, projection } = await resolve(`
+      model Widget {
+        @keyword @aggregatable("terms", #{ size: 20000 }) status: string;
+        @keyword @aggregatable("terms", #{ size: 2000 }) region: string;
+      }
+      @indexName("widgets")
+      model WidgetSearchDoc is SearchProjection<Widget> {}
+    `);
+
+		__test.assertTermsBucketsFit(program, projection, 10);
+
+		const relevant = program.diagnostics.filter(
+			(d) => d.code === TERMS_OVER_BUDGET_CODE,
+		);
+		assert.equal(relevant.length, 1);
+		assert.equal(relevant[0].severity, "error");
+		assert.ok(relevant[0].message.includes("WidgetSearchDoc"));
+		assert.ok(relevant[0].message.includes("22000"));
+	});
+
+	it("counts the terms-buckets option for terms without a size", async () => {
+		const { program, projection } = await resolve(`
+      model Widget {
+        @keyword @aggregatable("terms") status: string;
+        @keyword @aggregatable("terms") region: string;
+      }
+      @indexName("widgets")
+      model WidgetSearchDoc is SearchProjection<Widget> {}
+    `);
+
+		__test.assertTermsBucketsFit(program, projection, 11000);
+
+		assert.equal(
+			program.diagnostics.filter((d) => d.code === TERMS_OVER_BUDGET_CODE)
+				.length,
+			1,
+		);
+	});
+
+	it("stays silent when terms sizes fit the budget", async () => {
+		const { program, projection } = await resolve(`
+      model Widget {
+        @keyword @aggregatable("terms", #{ size: 5000 }) status: string;
+        @keyword @aggregatable("terms") region: string;
+      }
+      @indexName("widgets")
+      model WidgetSearchDoc is SearchProjection<Widget> {}
+    `);
+
+		__test.assertTermsBucketsFit(program, projection, 10);
+
+		assert.equal(
+			program.diagnostics.filter((d) => d.code === TERMS_OVER_BUDGET_CODE)
+				.length,
+			0,
+		);
+	});
+});
+
 // Issue #173 — the split ships fitting output for realistic projections, but a
 // projection wide enough that even the fully split pipeline can't fit must fail
 // compile, not emit an undeployable resolver that only breaks at AppSync

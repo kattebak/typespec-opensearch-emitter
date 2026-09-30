@@ -14,9 +14,12 @@ import {
 import {
 	APPSYNC_FUNCTION_BYTE_LIMIT,
 	DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
+	DEFAULT_TERMS_SIZE,
 	type EmittedResolverFile,
 	emitGraphQLResolver,
 	MAX_PIPELINE_FUNCTIONS,
+	PER_REQUEST_BUCKET_BUDGET,
+	totalTermsBuckets,
 } from "./emit-graphql-resolver.js";
 import { emitGraphQLSdl, resolveDirectives } from "./emit-graphql-sdl.js";
 import { emitIndex } from "./emit-index.js";
@@ -214,6 +217,7 @@ export async function $onEmit(
 			autoDateHistogramBuckets:
 				graphqlOptions["auto-date-histogram-buckets"] ??
 				DEFAULT_AUTO_DATE_HISTOGRAM_BUCKETS,
+			termsBuckets: graphqlOptions["terms-buckets"] ?? DEFAULT_TERMS_SIZE,
 		};
 
 		// Top-level projections get the full SDL + resolver + manifest entry.
@@ -226,6 +230,11 @@ export async function $onEmit(
 			artifactFileNames.push(sdlFile.fileName);
 			sdlModules.push(emitSdlStringModule(sdlFile.fileName, sdlFile.content));
 
+			assertTermsBucketsFit(
+				context.program,
+				projection,
+				resolverOptions.termsBuckets,
+			);
 			const resolverFile = await emitGraphQLResolver(
 				projection,
 				resolverOptions,
@@ -667,6 +676,32 @@ function assertResolverFilesFit(
 }
 
 /**
+ * Issue #201 — a raised terms size comes off the histogram bucket budget at
+ * request time, but the budget cannot absorb terms sizes that exceed it on
+ * their own. Fail compile rather than emit a request that can only hit
+ * search.max_buckets.
+ */
+function assertTermsBucketsFit(
+	program: Program,
+	projection: ResolvedProjection,
+	termsBuckets: number,
+): void {
+	const total = totalTermsBuckets(projection, termsBuckets);
+	if (total <= PER_REQUEST_BUCKET_BUDGET) {
+		return;
+	}
+	reportDiagnostic(program, {
+		code: "terms-buckets-over-budget",
+		format: {
+			name: projection.projectionModel.name,
+			total: String(total),
+			budget: String(PER_REQUEST_BUCKET_BUDGET),
+		},
+		target: projection.projectionModel,
+	});
+}
+
+/**
  * Issue #157 — `@searchProjection` states an intent for top-level emission.
  * Without `@indexName` that intent is discarded, and the result is
  * byte-identical to an undecorated model, so the demotion is invisible in the
@@ -691,6 +726,7 @@ export const __test = {
 	collectProjectionModels,
 	reportDemotedProjections,
 	assertResolverFilesFit,
+	assertTermsBucketsFit,
 	isCandidateModel,
 	isTemplateDeclaration,
 	serializeProjections,
