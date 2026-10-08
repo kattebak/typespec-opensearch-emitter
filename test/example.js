@@ -249,9 +249,7 @@ test("emits SearchFilter input with filterable kinds and nested sub-filter", asy
 	assert.ok(
 		prepare.includes("outFilters.push({ prefix: { [node.f]: value } })"),
 	);
-	assert.ok(
-		prepare.includes("outFilters.push({ match: { [node.f]: value } })"),
-	);
+	assert.ok(prepare.includes("outMusts.push({ match: { [node.f]: value } })"));
 });
 
 test("emits nested-aware aggregations on nested sub-projections", async () => {

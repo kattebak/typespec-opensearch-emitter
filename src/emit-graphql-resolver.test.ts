@@ -2426,6 +2426,77 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		});
 	});
 
+	it("buildQuery scores a match filter in bool.must and keeps a term filter in bool.filter", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({ name: "name", filterables: ["match"] }),
+				makeField({
+					name: "species",
+					keyword: true,
+					filterables: ["term"],
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
+		);
+		const result = buildQuery(undefined, undefined, {
+			nameMatch: "Acme Energy SPA",
+			species: "cat",
+		});
+		assert.deepEqual(result, {
+			bool: {
+				must: [{ match: { name: "Acme Energy SPA" } }],
+				filter: [{ term: { species: "cat" } }],
+			},
+		});
+	});
+
+	it("buildQuery scores a nested match filter in bool.must", async () => {
+		const projection = makeProjection({
+			fields: [
+				makeField({
+					name: "tags",
+					nested: true,
+					subProjection: {
+						projectionModel: { name: "TagSearchDoc" },
+						sourceModel: { name: "Tag" },
+						indexName: "tags",
+						fields: [makeField({ name: "label", filterables: ["match"] })],
+					} as unknown as ResolvedProjection,
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
+		);
+		const result = buildQuery(undefined, undefined, {
+			tags: { labelMatch: "vip" },
+		});
+		assert.deepEqual(result, {
+			bool: {
+				must: [
+					{
+						nested: {
+							path: "tags",
+							score_mode: "max",
+							query: { bool: { must: [{ match: { "tags.label": "vip" } }] } },
+						},
+					},
+				],
+			},
+		});
+	});
+
 	it("buildQuery emits terms (multi-value) filter as bool.filter[terms]", async () => {
 		const projection = makeProjection({
 			fields: [
