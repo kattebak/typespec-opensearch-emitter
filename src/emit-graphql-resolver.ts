@@ -1266,7 +1266,7 @@ function renderBuildSortFunction(): string {
  * pools instead of recursion or growable arrays (APPSYNC_JS constraints).
  */
 function renderApplyFilterSpecFunction(slotsLiteral: string): string {
-	return `function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
+	return `function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
 	const procSlots = ${slotsLiteral};
@@ -1274,6 +1274,7 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 	procSlots[0] = {
 		spec: rootSpec,
 		input: rootInput,
+		outMusts: rootOutMusts,
 		outFilters: rootOutFilters,
 		outMustNots: rootOutMustNots,
 	};
@@ -1287,6 +1288,7 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 			procHead = procHead + 1;
 			const spec = item.spec;
 			const input = item.input;
+			const outMusts = item.outMusts;
 			const outFilters = item.outFilters;
 			const outMustNots = item.outMustNots;
 
@@ -1294,6 +1296,7 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 				const value = input[node.i];
 				if (node.k === "nested") {
 					if (value != null) {
+						const childMusts = [];
 						const childFilters = [];
 						const childMustNots = [];
 						if (procTail + 1 > procSlots.length) {
@@ -1309,14 +1312,17 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 						procSlots[procTail] = {
 							spec: node.c,
 							input: value,
+							outMusts: childMusts,
 							outFilters: childFilters,
 							outMustNots: childMustNots,
 						};
 						procTail = procTail + 1;
 						finSlots[finTail] = {
 							path: node.p,
+							childMusts,
 							childFilters,
 							childMustNots,
+							parentMusts: outMusts,
 							parentFilters: outFilters,
 							parentMustNots: outMustNots,
 						};
@@ -1332,6 +1338,7 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 						procSlots[procTail] = {
 							spec: node.c,
 							input: value,
+							outMusts,
 							outFilters,
 							outMustNots,
 						};
@@ -1397,7 +1404,7 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 					}
 				} else if (node.k === "match") {
 					if (value != null && value !== "") {
-						outFilters.push({ match: { [node.f]: value } });
+						outMusts.push({ match: { [node.f]: value } });
 					}
 				}
 			}
@@ -1408,6 +1415,15 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 		if (finTail > 0) {
 			finTail = finTail - 1;
 			const item = finSlots[finTail];
+			for (const clause of item.childMusts) {
+				item.parentMusts.push({
+					nested: {
+						path: item.path,
+						score_mode: "max",
+						query: { bool: { must: [clause] } },
+					},
+				});
+			}
 			for (const clause of item.childFilters) {
 				item.parentFilters.push({
 					nested: {
@@ -1536,7 +1552,7 @@ ${textQueryPush}
 	}
 
 	if (searchFilter) {
-		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+		applyFilterSpec(FILTER_SPEC, searchFilter, musts, filters, mustNots);
 	}
 
 	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
@@ -1694,7 +1710,7 @@ ${textQueryPush}
 	}
 
 	if (searchFilter) {
-		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+		applyFilterSpec(FILTER_SPEC, searchFilter, musts, filters, mustNots);
 	}
 
 	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
@@ -1779,11 +1795,13 @@ const FILTER_SPEC = ${filterSpecLiteral};
 
 export function request(ctx) {
 	const searchFilter = ctx.args.searchFilter;
+	const musts = ctx.stash.musts || [];
 	const filters = ctx.stash.filters || [];
 	const mustNots = ctx.stash.mustNots || [];
 	if (searchFilter) {
-		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+		applyFilterSpec(FILTER_SPEC, searchFilter, musts, filters, mustNots);
 	}
+	ctx.stash.musts = musts;
 	ctx.stash.filters = filters;
 	ctx.stash.mustNots = mustNots;
 	return { payload: null };
@@ -1847,7 +1865,7 @@ ${textQueryPush}
 	}
 
 	if (searchFilter) {
-		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+		applyFilterSpec(FILTER_SPEC, searchFilter, musts, filters, mustNots);
 	}
 }
 

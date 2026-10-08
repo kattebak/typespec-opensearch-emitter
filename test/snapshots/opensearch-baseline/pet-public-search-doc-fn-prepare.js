@@ -96,7 +96,7 @@ function buildQuery(queryText, filter, searchFilter) {
 	}
 
 	if (searchFilter) {
-		applyFilterSpec(FILTER_SPEC, searchFilter, filters, mustNots);
+		applyFilterSpec(FILTER_SPEC, searchFilter, musts, filters, mustNots);
 	}
 
 	if (musts.length === 0 && filters.length === 0 && mustNots.length === 0) {
@@ -136,7 +136,7 @@ function buildSort(sortBy) {
 	return out;
 }
 
-function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
+function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
 	const procSlots = [null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null];
@@ -144,6 +144,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 	procSlots[0] = {
 		spec: rootSpec,
 		input: rootInput,
+		outMusts: rootOutMusts,
 		outFilters: rootOutFilters,
 		outMustNots: rootOutMustNots,
 	};
@@ -157,6 +158,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 			procHead = procHead + 1;
 			const spec = item.spec;
 			const input = item.input;
+			const outMusts = item.outMusts;
 			const outFilters = item.outFilters;
 			const outMustNots = item.outMustNots;
 
@@ -164,6 +166,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 				const value = input[node.i];
 				if (node.k === "nested") {
 					if (value != null) {
+						const childMusts = [];
 						const childFilters = [];
 						const childMustNots = [];
 						if (procTail + 1 > procSlots.length) {
@@ -179,14 +182,17 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 						procSlots[procTail] = {
 							spec: node.c,
 							input: value,
+							outMusts: childMusts,
 							outFilters: childFilters,
 							outMustNots: childMustNots,
 						};
 						procTail = procTail + 1;
 						finSlots[finTail] = {
 							path: node.p,
+							childMusts,
 							childFilters,
 							childMustNots,
+							parentMusts: outMusts,
 							parentFilters: outFilters,
 							parentMustNots: outMustNots,
 						};
@@ -202,6 +208,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 						procSlots[procTail] = {
 							spec: node.c,
 							input: value,
+							outMusts,
 							outFilters,
 							outMustNots,
 						};
@@ -267,7 +274,7 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 					}
 				} else if (node.k === "match") {
 					if (value != null && value !== "") {
-						outFilters.push({ match: { [node.f]: value } });
+						outMusts.push({ match: { [node.f]: value } });
 					}
 				}
 			}
@@ -278,6 +285,15 @@ function applyFilterSpec(rootSpec, rootInput, rootOutFilters, rootOutMustNots) {
 		if (finTail > 0) {
 			finTail = finTail - 1;
 			const item = finSlots[finTail];
+			for (const clause of item.childMusts) {
+				item.parentMusts.push({
+					nested: {
+						path: item.path,
+						score_mode: "max",
+						query: { bool: { must: [clause] } },
+					},
+				});
+			}
 			for (const clause of item.childFilters) {
 				item.parentFilters.push({
 					nested: {
