@@ -224,6 +224,60 @@ describe("emitRestSdl", () => {
 		assert.ok(content.includes("listPets(limit: Int!): [Pet!]"));
 	});
 
+	it("puts operation @graphqlDirectives on its field and every object type its response reaches", async () => {
+		const DIRECTIVES = `
+      model Owner {
+        ownerId: string;
+      }
+
+      model Pet {
+        petId: string;
+        owner: Owner;
+        status: PetStatus;
+      }
+
+      model Order {
+        orderId: string;
+      }
+
+      enum PetStatus { Available, Sold }
+
+      model CreatePetInput {
+        name: string;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver
+        @graphqlDirectives("@aws_cognito_user_pools", "@aws_iam")
+        @get
+        op getPet(@path petId: string): Pet[];
+
+        @restResolver @post op createPet(@body input: CreatePetInput): Pet;
+        @restResolver @get op getOrder(@path orderId: string): Order;
+      }
+    `;
+
+		const { runner, resolved } = await resolveFixture(DIRECTIVES);
+		const [{ content }] = emitRestSdl(runner.program, resolved, {
+			sdlFileName: "all.graphql",
+		});
+
+		assert.ok(
+			content.includes(
+				"  getPet(petId: String!): [Pet!] @aws_cognito_user_pools @aws_iam",
+			),
+		);
+		assert.ok(content.includes("type Pet @aws_cognito_user_pools @aws_iam {"));
+		assert.ok(
+			content.includes("type Owner @aws_cognito_user_pools @aws_iam {"),
+		);
+		assert.ok(content.includes("  createPet(input: CreatePetInput!): Pet\n"));
+		assert.ok(content.includes("type Order {"));
+		assert.ok(content.includes("input CreatePetInput {"));
+		assert.ok(content.includes("enum PetStatus {"));
+	});
+
 	it("sdlFileName option: all ops in one file", async () => {
 		const MULTI_MODEL = `
       model Pet {

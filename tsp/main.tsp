@@ -18,7 +18,10 @@ extern dec filterable(target: ModelProperty, ...kinds: valueof string[]);
 extern dec searchInfer(target: Model);
 extern dec searchSkip(target: ModelProperty);
 extern dec sortable(target: ModelProperty);
-extern dec graphqlDirectives(target: Model, ...directives: valueof string[]);
+extern dec graphqlDirectives(
+  target: Model | Operation,
+  ...directives: valueof string[]
+);
 extern dec searchProjection(target: Model);
 extern dec restResolver(target: Operation);
 extern dec graphqlId(target: ModelProperty);

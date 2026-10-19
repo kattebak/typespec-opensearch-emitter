@@ -5,7 +5,7 @@ import type {
 	Program,
 	Type,
 } from "@typespec/compiler";
-import { isGraphqlId } from "./decorators.js";
+import { getGraphqlDirectives, isGraphqlId } from "./decorators.js";
 import { toGraphQLType } from "./graphql-types.js";
 import type { ResolvedRestOperation } from "./rest-operations.js";
 import { toKebabCase } from "./utils.js";
@@ -17,6 +17,10 @@ import { toKebabCase } from "./utils.js";
  * follow their TypeSpec optionality, a `@body` model becomes a generated
  * GraphQL `input` type. Scalar mapping is shared with the OpenSearch SDL
  * path (graphql-types.ts).
+ *
+ * `@graphqlDirectives(...)` on an operation lands on its field and on every
+ * object type its response reaches, merged across operations, so an AppSync
+ * auth mode reaches the whole response path.
  *
  * Operations are grouped per return model — both `getPet` and `createPet`
  * returning `Pet` land in `pet.graphql` together with the types they need.
@@ -112,6 +116,7 @@ interface TypeRegistry {
 	objects: Map<string, Model>;
 	inputs: Map<string, Model>;
 	enums: Map<string, Enum>;
+	objectDirectives: Map<string, string[]>;
 }
 
 function renderGroup(
@@ -122,6 +127,7 @@ function renderGroup(
 		objects: new Map(),
 		inputs: new Map(),
 		enums: new Map(),
+		objectDirectives: new Map(),
 	};
 
 	const queryFields: string[] = [];
@@ -175,8 +181,43 @@ function renderField(
 	}
 
 	const returnRef = restTypeRef(program, op.returnType, registry, "object");
+	const directives = getGraphqlDirectives(program, op.operation) ?? [];
+	attachObjectDirectives(op.returnType, directives, registry, new Set());
 	const argList = args.length > 0 ? `(${args.join(", ")})` : "";
-	return `  ${op.fieldName}${argList}: ${returnRef}`;
+	return `  ${op.fieldName}${argList}: ${returnRef}${directiveSuffix(directives)}`;
+}
+
+function directiveSuffix(directives: string[]): string {
+	return directives.length > 0 ? ` ${directives.join(" ")}` : "";
+}
+
+/**
+ * Merges an operation's directives onto every object type its response
+ * reaches. AppSync authorizes each type on the response path separately, so a
+ * directive on the field alone would still reject the caller one level down.
+ */
+function attachObjectDirectives(
+	type: Type,
+	directives: string[],
+	registry: TypeRegistry,
+	visited: Set<string>,
+): void {
+	if (directives.length === 0 || type.kind !== "Model") return;
+	if (type.name === "Array" && type.indexer?.value) {
+		attachObjectDirectives(type.indexer.value, directives, registry, visited);
+		return;
+	}
+	const name = restModelName(type);
+	if (!type.name || !registry.objects.has(name) || visited.has(name)) return;
+	visited.add(name);
+	const merged = registry.objectDirectives.get(name) ?? [];
+	for (const directive of directives) {
+		if (!merged.includes(directive)) merged.push(directive);
+	}
+	registry.objectDirectives.set(name, merged);
+	for (const property of type.properties.values()) {
+		attachObjectDirectives(property.type, directives, registry, visited);
+	}
 }
 
 /**
@@ -264,7 +305,10 @@ function renderModelBlock(
 		const nullable = property.optional ? "" : "!";
 		return `  ${property.name}: ${gqlType}${nullable}`;
 	});
-	return `${keyword} ${restModelName(model)} {\n${fieldLines.join("\n")}\n}`;
+	const name = restModelName(model);
+	const directives =
+		keyword === "type" ? (registry.objectDirectives.get(name) ?? []) : [];
+	return `${keyword} ${name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
 }
 
 function renderEnumBlock(enumType: Enum): string {

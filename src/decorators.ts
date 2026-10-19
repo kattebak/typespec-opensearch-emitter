@@ -119,7 +119,7 @@ export function isGraphqlId(program: Program, target: ModelProperty): boolean {
 
 export function $graphqlDirectives(
 	context: DecoratorContext,
-	target: Model,
+	target: Model | Operation,
 	...directives: string[]
 ): void {
 	// Declared as variadic in tsp/main.tsp because TypeSpec parses a single
@@ -136,11 +136,12 @@ export function $graphqlDirectives(
  * or `undefined` when none is set. The override is a full replacement of the
  * emitter's `graphql.directives.default` list — `@graphqlDirectives()`
  * (zero args) is preserved as `[]` and opts the model out of all directives.
- * Issue #121.
+ * Issue #121. On a `@restResolver` operation the list is attached to the
+ * operation field and to every object type its response reaches.
  */
 export function getGraphqlDirectives(
 	program: Program,
-	target: Model,
+	target: Model | Operation,
 ): string[] | undefined {
 	return program.stateMap(StateKeys.graphqlDirectives).get(target);
 }
