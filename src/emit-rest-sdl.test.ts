@@ -386,6 +386,48 @@ describe("emitRestSdl", () => {
 		assert.ok(!content.includes("type ResultList "));
 	});
 
+	it("names a template instance with scalar arguments after them (issue #206)", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      scalar DecimalAmount extends decimal;
+      model FieldValue<T> { kind: "Value"; value: T; }
+      model Quote {
+        price: FieldValue<DecimalAmount>;
+        quantity: FieldValue<int32>;
+      }
+
+      @route("/quotes")
+      namespace Quotes {
+        @restResolver @get op getQuote(): Quote;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				"type Quote {\n  price: DecimalAmountFieldValue!\n  quantity: Int32FieldValue!\n}",
+			),
+		);
+		assert.ok(content.includes("type DecimalAmountFieldValue {"));
+		assert.ok(content.includes("type Int32FieldValue {"));
+	});
+
+	it("keeps the scalar mapping for an inline union of models", async () => {
+		const { runner, resolved } = await resolveFixture(`
+      model Cat { kind: "Cat"; }
+      model Dog { kind: "Dog"; }
+      model Owner { pet: Cat | Dog; }
+
+      @route("/owners")
+      namespace Owners {
+        @restResolver @get op getOwner(): Owner;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(content.includes("type Owner {\n  pet: String!\n}"));
+		assert.ok(!content.includes("union "));
+	});
+
 	it("still dedupes the same generic instantiation reused across operations", async () => {
 		const { runner, resolved } = await resolveFixture(`
       model ResultList<T> {

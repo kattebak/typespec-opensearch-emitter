@@ -1,0 +1,34 @@
+type Quote {
+  quoteId: String!
+  price: DecimalAmountField!
+  quantity: Int32Field!
+  history: [DecimalAmountField!]!
+  settlement: String!
+}
+
+type DecimalAmountFieldValue {
+  kind: String!
+  value: Float!
+}
+
+type FieldNoData {
+  kind: String!
+}
+
+type FieldNotInSubscription {
+  kind: String!
+}
+
+type Int32FieldValue {
+  kind: String!
+  value: Int!
+}
+
+union DecimalAmountField = DecimalAmountFieldValue | FieldNoData | FieldNotInSubscription
+
+union Int32Field = Int32FieldValue | FieldNoData | FieldNotInSubscription
+
+type Query {
+  getQuote(quoteId: String!): Quote
+  listQuotes: [Quote!]
+}

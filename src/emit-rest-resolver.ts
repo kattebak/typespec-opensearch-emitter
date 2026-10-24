@@ -1,4 +1,9 @@
 import type { RestOperationShape, RestQueryParam } from "./rest-operations.js";
+import type {
+	TypenamePlan,
+	TypenameStep,
+	TypenameVisitor,
+} from "./rest-typenames.js";
 
 /**
  * APPSYNC_JS resolver codegen for `@restResolver` operations (issue #134).
@@ -56,13 +61,12 @@ export function emitRestResolver(
 		"",
 		renderRequest(op, options.resourcePathPrefix),
 		"",
-		"export function response(ctx) {",
-		"\treturn mapResponse(ctx);",
-		"}",
+		renderResponse(op.typenames),
 		"",
 		...(needsQueryString(op) ? [renderQueryString(op), ""] : []),
 		renderMapResponse(options.errorMap),
 		"",
+		...(op.typenames ? [renderTypenameVisitors(op.typenames), ""] : []),
 	].join("\n");
 
 	return {
@@ -222,10 +226,79 @@ function renderMapResponse(errorMap?: Record<string, string>): string {
 	].join("\n");
 }
 
+function renderResponse(typenames?: TypenamePlan): string {
+	if (!typenames) {
+		return [
+			"export function response(ctx) {",
+			"\treturn mapResponse(ctx);",
+			"}",
+		].join("\n");
+	}
+	return [
+		"export function response(ctx) {",
+		"\tconst result = mapResponse(ctx);",
+		...renderStep(typenames.entry, "result", 0).map((line) => `\t${line}`),
+		"\treturn result;",
+		"}",
+	].join("\n");
+}
+
+/**
+ * AppSync resolves a union member from `__typename` (issue #206), which a REST
+ * body does not carry. Each union value gets it from its discriminator; each
+ * object on the way there is walked by its own function, since APPSYNC_JS
+ * rejects recursion.
+ */
+function renderTypenameVisitors(typenames: TypenamePlan): string {
+	return typenames.visitors.map(renderVisitor).join("\n\n");
+}
+
+function renderVisitor(visitor: TypenameVisitor): string {
+	const body =
+		visitor.kind === "object"
+			? visitor.fields.flatMap(({ property, step }) =>
+					renderStep(step, `value.${property}`, 0),
+				)
+			: visitor.variants.flatMap(({ value, typeName, visitor: inner }) => [
+					`if (value.${visitor.discriminator} === ${JSON.stringify(value)}) {`,
+					`\tvalue.__typename = ${JSON.stringify(typeName)};`,
+					...(inner ? [`\t${visitorFunctionName(inner)}(value);`] : []),
+					"}",
+				]);
+	return [
+		`function ${visitorFunctionName(visitor.name)}(value) {`,
+		"\tif (value === undefined || value === null) return;",
+		...body.map((line) => `\t${line}`),
+		"}",
+	].join("\n");
+}
+
+function renderStep(
+	step: TypenameStep,
+	expression: string,
+	depth: number,
+): string[] {
+	if (step.kind === "visit") {
+		return [`${visitorFunctionName(step.visitor)}(${expression});`];
+	}
+	const item = depth === 0 ? "item" : `item${depth}`;
+	return [
+		`for (const ${item} of ${expression} ?? []) {`,
+		...renderStep(step.step, item, depth + 1).map((line) => `\t${line}`),
+		"}",
+	];
+}
+
+function visitorFunctionName(typeName: string): string {
+	return `tag${typeName}`;
+}
+
 export const __test = {
 	renderBaseHeaders,
 	renderRequest,
 	renderResourcePath,
 	renderQueryString,
 	renderMapResponse,
+	renderResponse,
+	renderTypenameVisitors,
 };

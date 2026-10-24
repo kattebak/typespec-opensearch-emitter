@@ -790,6 +790,22 @@ The message names the file and its size. Work in this order:
 
 Do not raise the constant in the assertion. 32,768 is an AWS limit, not a project policy — a green test with a raised cap fails at deploy instead.
 
+### REST unions and template instances
+
+In the `@restResolver` SDL, a named union whose variants are all models emits as a GraphQL `union`, one object type per variant. Every variant must carry a property with a distinct string-literal value, such as `kind: "Value"`; the resolver copies the matching variant name into `__typename`, which AppSync uses to pick the union member. A union with a scalar, literal or `null` variant, and an inline `A | B` union, keep the scalar mapping.
+
+A template instance is named after its arguments when each is a named model or a scalar: `ResultList<Pet>` emits as `PetResultList` and `FieldValue<int32>` as `Int32FieldValue`.
+
+```tsp
+model FieldValue<T> { kind: "Value"; value: T; }
+model FieldNoData { kind: "NoData"; }
+union Field<T> { FieldValue<T>, FieldNoData }
+```
+
+```graphql
+union DecimalAmountField = DecimalAmountFieldValue | FieldNoData
+```
+
 ## Cross-domain view joins
 
 `SearchProjection<T>` resolves fields from one source model, so a field owned by another spec cannot enter the document and no manifest key says a write over there should re-index anything here. `@resolvableBy` and `@dependsOn` declare that join.
@@ -1109,6 +1125,7 @@ npm test          # runs build + lint + unit tests + emit test + example test
 - `test/main.tsp` — integration fixture compiled by `npm run test:emit`
 - `test/example.js` — validates emitted output files against expectations
 - `test/pet-care/main.tsp` — cross-domain join fixture compiled by `npm run test:emit:joins`; `test/pet-care-example.js` validates the emitted blocks against the published JSON schemas
+- `test/field-union/main.tsp` — REST union fixture compiled by `npm run test:emit:rest:union`; `test/field-union-example.js` checks the SDL and the `__typename` tagging
 - `test/string-modules.js` — validates the `resolvers/` and `schema/` string modules, their `exports` subpaths and the barrels against the manifest
 
 ## License

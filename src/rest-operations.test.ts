@@ -196,3 +196,41 @@ describe("resolveRestOperation", () => {
 		);
 	});
 });
+
+describe("resolveRestOperation typenames (issue #206)", () => {
+	it("refuses a model union without a string-literal discriminator", async () => {
+		const runner = await createRestRunner();
+		await runner.diagnose(`
+      model Cat { name: string; }
+      model Dog { name: string; }
+      union Pet { Cat, Dog }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(): Pet;
+      }
+    `);
+		const [operation] = collectRestOperations(
+			runner.program,
+			runner.program.getGlobalNamespaceType(),
+		);
+
+		assert.throws(
+			() => resolveRestOperation(runner.program, operation),
+			/union Pet: every variant needs a property with a distinct string-literal value/,
+		);
+	});
+
+	it("plans no typenames for a response without a model union", async () => {
+		const { resolved } = await resolveFixture(`
+      model Pet { petId: string; }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(): Pet;
+      }
+    `);
+
+		assert.equal(resolved[0].typenames, undefined);
+	});
+});

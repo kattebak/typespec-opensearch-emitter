@@ -4,9 +4,11 @@ import type {
 	ModelProperty,
 	Program,
 	Type,
+	Union,
 } from "@typespec/compiler";
 import { getGraphqlDirectives, isGraphqlId } from "./decorators.js";
 import { toGraphQLType } from "./graphql-types.js";
+import { isModelUnion, isObjectModel, restTypeName } from "./rest-names.js";
 import type { ResolvedRestOperation } from "./rest-operations.js";
 import { toKebabCase } from "./utils.js";
 
@@ -76,7 +78,7 @@ export function emitRestSdl(
 /** Group key: the (unwrapped) return model name, falling back to the field name. */
 function groupName(op: ResolvedRestOperation): string {
 	const model = unwrapModel(op.returnType);
-	return model ? restModelName(model) : op.fieldName;
+	return model ? restTypeName(model) : op.fieldName;
 }
 
 function unwrapModel(type: Type): Model | undefined {
@@ -87,33 +89,9 @@ function unwrapModel(type: Type): Model | undefined {
 	return type.name ? type : undefined;
 }
 
-/**
- * Distinct GraphQL type name for a model. Plain (non-template) models keep
- * their bare name, unchanged from before — this is what keeps default output
- * byte-identical. A template instantiation (e.g. `ResultList<TaskDefinition>`)
- * shares its template's `.name` ("ResultList") across every instantiation, so
- * without this every `ResultList<T>` collapsed onto one GraphQL type and
- * silently kept whichever `T` registered first (issue #148). When every
- * template argument is itself a named model, the instantiation is
- * disambiguated as `<Arg1><Arg2>...<TemplateName>` (`TaskDefinitionResultList`);
- * anything else (unresolvable/unnamed args) falls back to the bare name.
- */
-function restModelName(model: Model): string {
-	const args = model.templateMapper?.args;
-	if (!args || args.length === 0) return model.name;
-
-	const argNames = args.map((arg) =>
-		typeof arg === "object" && "kind" in arg && arg.kind === "Model" && arg.name
-			? arg.name
-			: undefined,
-	);
-	if (argNames.some((name) => !name)) return model.name;
-
-	return `${argNames.join("")}${model.name}`;
-}
-
 interface TypeRegistry {
 	objects: Map<string, Model>;
+	unions: Map<string, Union>;
 	inputs: Map<string, Model>;
 	enums: Map<string, Enum>;
 	objectDirectives: Map<string, string[]>;
@@ -125,6 +103,7 @@ function renderGroup(
 ): string {
 	const registry: TypeRegistry = {
 		objects: new Map(),
+		unions: new Map(),
 		inputs: new Map(),
 		enums: new Map(),
 		objectDirectives: new Map(),
@@ -140,6 +119,9 @@ function renderGroup(
 	const blocks: string[] = [];
 	for (const model of registry.objects.values()) {
 		blocks.push(renderModelBlock(program, model, "type", registry));
+	}
+	for (const union of registry.unions.values()) {
+		blocks.push(renderUnionBlock(union));
 	}
 	for (const enumType of registry.enums.values()) {
 		blocks.push(renderEnumBlock(enumType));
@@ -202,12 +184,19 @@ function attachObjectDirectives(
 	registry: TypeRegistry,
 	visited: Set<string>,
 ): void {
-	if (directives.length === 0 || type.kind !== "Model") return;
+	if (directives.length === 0) return;
+	if (isModelUnion(type)) {
+		for (const variant of type.variants.values()) {
+			attachObjectDirectives(variant.type, directives, registry, visited);
+		}
+		return;
+	}
+	if (type.kind !== "Model") return;
 	if (type.name === "Array" && type.indexer?.value) {
 		attachObjectDirectives(type.indexer.value, directives, registry, visited);
 		return;
 	}
-	const name = restModelName(type);
+	const name = restTypeName(type);
 	if (!type.name || !registry.objects.has(name) || visited.has(name)) return;
 	visited.add(name);
 	const merged = registry.objectDirectives.get(name) ?? [];
@@ -270,9 +259,13 @@ function restTypeRef(
 	) {
 		return "AWSJSON";
 	}
+	if (position === "object" && isModelUnion(type)) {
+		registerUnion(program, type, registry);
+		return restTypeName(type);
+	}
 	if (type.kind === "Model" && type.name) {
 		registerModel(program, type, registry, position);
-		return restModelName(type);
+		return restTypeName(type);
 	}
 	return toGraphQLType(program, type, undefined, "rest");
 }
@@ -284,13 +277,34 @@ function registerModel(
 	position: "object" | "input",
 ): void {
 	const target = position === "input" ? registry.inputs : registry.objects;
-	const name = restModelName(model);
+	const name = restTypeName(model);
 	if (target.has(name)) return;
 	target.set(name, model);
 	// Walk properties so referenced models/enums are registered too.
 	for (const property of model.properties.values()) {
 		restTypeRef(program, property.type, registry, position);
 	}
+}
+
+function registerUnion(
+	program: Program,
+	union: Union,
+	registry: TypeRegistry,
+): void {
+	const name = restTypeName(union);
+	if (registry.unions.has(name)) return;
+	registry.unions.set(name, union);
+	for (const variant of union.variants.values()) {
+		restTypeRef(program, variant.type, registry, "object");
+	}
+}
+
+function renderUnionBlock(union: Union): string {
+	const members = [...union.variants.values()]
+		.map((variant) => variant.type)
+		.filter(isObjectModel)
+		.map(restTypeName);
+	return `union ${restTypeName(union)} = ${members.join(" | ")}`;
 }
 
 function renderModelBlock(
@@ -305,7 +319,7 @@ function renderModelBlock(
 		const nullable = property.optional ? "" : "!";
 		return `  ${property.name}: ${gqlType}${nullable}`;
 	});
-	const name = restModelName(model);
+	const name = restTypeName(model);
 	const directives =
 		keyword === "type" ? (registry.objectDirectives.get(name) ?? []) : [];
 	return `${keyword} ${name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
@@ -324,5 +338,5 @@ export const __test = {
 	renderField,
 	restPropertyRef,
 	restTypeRef,
-	restModelName,
+	restTypeName,
 };

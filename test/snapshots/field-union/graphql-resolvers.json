@@ -1,0 +1,24 @@
+{
+  "resolvers": [
+    {
+      "typeName": "Query",
+      "fieldName": "getQuote",
+      "dataSource": "HTTP",
+      "httpMethod": "GET",
+      "resourcePath": "/quotes/{quoteId}",
+      "mode": "monolithic",
+      "resolverFile": "Query.getQuote.js",
+      "sdlFile": "quote.graphql"
+    },
+    {
+      "typeName": "Query",
+      "fieldName": "listQuotes",
+      "dataSource": "HTTP",
+      "httpMethod": "GET",
+      "resourcePath": "/quotes",
+      "mode": "monolithic",
+      "resolverFile": "Query.listQuotes.js",
+      "sdlFile": "quote.graphql"
+    }
+  ]
+}

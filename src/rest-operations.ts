@@ -14,6 +14,7 @@ import {
 	toResolvableByManifestEntry,
 	unwrapReadModel,
 } from "./joins.js";
+import { planTypenames, type TypenamePlan } from "./rest-typenames.js";
 
 /**
  * Discovery + resolution for `@restResolver` operations (issue #134). This is
@@ -62,6 +63,8 @@ export interface RestOperationShape {
 	queryParams: RestQueryParam[];
 	/** Name of the `@body` parameter (the GraphQL `input` arg), if present. */
 	bodyParamName?: string;
+	/** Response paths carrying a model union, tagged with `__typename`. */
+	typenames?: TypenamePlan;
 }
 
 export interface ResolvedRestOperation extends RestOperationShape {
@@ -149,6 +152,7 @@ export function resolveRestOperation(
 
 	const typeName = toRestGraphQLTypeName(httpOperation.verb);
 	const resolvableBy = resolveJoinRead(program, operation);
+	const typenames = planTypenames(operation.returnType);
 
 	return {
 		fieldName: operation.name,
@@ -161,6 +165,7 @@ export function resolveRestOperation(
 		bodyModel,
 		returnType: operation.returnType,
 		...(resolvableBy ? { resolvableBy } : {}),
+		...(typenames ? { typenames } : {}),
 		operation,
 	};
 }

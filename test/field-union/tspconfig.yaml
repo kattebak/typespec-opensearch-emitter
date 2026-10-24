@@ -1,0 +1,9 @@
+emit:
+  - "@kattebak/typespec-opensearch-emitter"
+options:
+  "@kattebak/typespec-opensearch-emitter":
+    emitter-output-dir: "{cwd}/build/field-union-emit"
+    graphql:
+      emit: true
+    rest:
+      dataSourceName: "HTTP"
