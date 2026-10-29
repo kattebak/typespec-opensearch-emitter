@@ -806,6 +806,16 @@ union Field<T> { FieldValue<T>, FieldNoData }
 union DecimalAmountField = DecimalAmountFieldValue | FieldNoData
 ```
 
+### Query-string serialization
+
+Emitted query-building code follows WHATWG `URLSearchParams` semantics. It produces byte for byte what `URLSearchParams.toString()` produces:
+
+- An absent key is left out of the string. Dropping the key is the only correct encoding for an unset optional parameter; no sentinel, no empty pair.
+- An empty value keeps its key and renders as `key=`.
+- Reserved characters are percent-encoded, so a joined array separator renders as `%2C`.
+
+APPSYNC_JS has no `URLSearchParams`, so the emitted helpers build the string by hand. Their output must still match it exactly. Issue #209 covers an unset optional parameter reaching the backend as an invalid value.
+
 ## Cross-domain view joins
 
 `SearchProjection<T>` resolves fields from one source model, so a field owned by another spec cannot enter the document and no manifest key says a write over there should re-index anything here. `@resolvableBy` and `@dependsOn` declare that join.
