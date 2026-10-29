@@ -56,10 +56,13 @@ test("resolver: mutation sends JSON body", async () => {
 	assert.ok(resolver.includes("body: JSON.stringify(ctx.args.input)"));
 });
 
-test("resolver: query params land in params.query", async () => {
+test("resolver: an optional query param goes through the resourcePath", async () => {
 	const resolver = await readFile(`${EMIT_DIR}/Query.listPets.js`, "utf8");
 
-	assert.ok(resolver.includes('"status": ctx.args.status'));
+	assert.ok(!resolver.includes("query: {"));
+	assert.ok(resolver.includes("resourcePath: `/pets${queryString(ctx)}`"));
+	assert.ok(resolver.includes('append(parts, "status", ctx.args.status);'));
+	assert.ok(!resolver.includes("function appendEach"));
 });
 
 test("resolver: an exploded array param repeats its key in the resourcePath", async () => {

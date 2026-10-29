@@ -94,23 +94,36 @@ describe("emitRestResolver request rendering", () => {
 		assert.ok(content.includes("body: JSON.stringify(ctx.args.input)"));
 	});
 
-	it("places query params in params.query", () => {
-		const { content } = emitRestResolver(listPets);
-		assert.ok(content.includes('"status": ctx.args.status'));
-		assert.ok(content.includes("query: {"));
+	it("routes every query param through the resourcePath query string", () => {
+		for (const op of [listPets, listPetsByStatuses, listPetsByCsvStatuses]) {
+			const { content } = emitRestResolver(op);
+			assert.ok(!content.includes("query: {"));
+			assert.ok(content.includes("params: { headers: BASE_HEADERS(ctx) }"));
+			assert.ok(content.includes("resourcePath: `/pets${queryString(ctx)}`"));
+		}
 	});
 
-	it("keeps an exploded array param out of params.query", () => {
-		const { content } = emitRestResolver(listPetsByStatuses);
-		assert.ok(!content.includes("query: {"));
-		assert.ok(content.includes("params: { headers: BASE_HEADERS(ctx) }"));
-		assert.ok(content.includes("resourcePath: `/pets${queryString(ctx)}`"));
-	});
-
-	it("joins a non-exploded array param into a single params.query value", () => {
+	it("joins a non-exploded array param into a single append call", () => {
 		const { content } = emitRestResolver(listPetsByCsvStatuses);
-		assert.ok(content.includes('"status": ctx.args.status?.join(",")'));
-		assert.ok(!content.includes("queryString(ctx)"));
+		assert.ok(
+			content.includes('append(parts, "status", ctx.args.status?.join(","))'),
+		);
+	});
+
+	it("emits appendEach only for an exploded array param", () => {
+		assert.ok(
+			!emitRestResolver(listPets).content.includes("function appendEach"),
+		);
+		assert.ok(
+			!emitRestResolver(listPetsByCsvStatuses).content.includes(
+				"function appendEach",
+			),
+		);
+		assert.ok(
+			emitRestResolver(listPetsByStatuses).content.includes(
+				"function appendEach",
+			),
+		);
 	});
 
 	it("appends the query string after interpolated path params", () => {
@@ -126,10 +139,10 @@ describe("emitRestResolver request rendering", () => {
 		);
 	});
 
-	it("omits query and body blocks when neither is present", () => {
+	it("omits the query string helper and body when neither is present", () => {
 		const { content } = emitRestResolver(getPet);
 		assert.ok(content.includes("params: { headers: BASE_HEADERS(ctx) }"));
-		assert.ok(!content.includes("query: {"));
+		assert.ok(!content.includes("queryString(ctx)"));
 		assert.ok(!content.includes("JSON.stringify"));
 	});
 
@@ -164,7 +177,7 @@ interface AppSyncUtil {
 interface HttpRequest {
 	method: string;
 	resourcePath: string;
-	params: { headers: Record<string, string>; query?: Record<string, unknown> };
+	params: { headers: Record<string, string> };
 }
 
 type RequestFactory = (
@@ -192,19 +205,66 @@ function evaluateRequest(
 	);
 }
 
-describe("emitRestResolver array query params", () => {
+function expectedPath(path: string, pairs: string[][]): string {
+	const search = new URLSearchParams(pairs).toString();
+	return search === "" ? path : `${path}?${search}`;
+}
+
+describe("emitRestResolver query string serialization", () => {
+	it("percent-encodes a reserved character the way URLSearchParams does", () => {
+		const { resourcePath } = evaluateRequest(listPetsByCsvStatuses, {
+			status: ["Available", "Pending"],
+		});
+		assert.equal(
+			resourcePath,
+			expectedPath("/pets", [["status", "Available,Pending"]]),
+		);
+	});
+
+	it("form-encodes a space as a plus", () => {
+		const { resourcePath } = evaluateRequest(listPets, {
+			status: "up for adoption",
+		});
+		assert.equal(
+			resourcePath,
+			expectedPath("/pets", [["status", "up for adoption"]]),
+		);
+	});
+
+	it("keeps an empty value as a bare key", () => {
+		const { resourcePath } = evaluateRequest(listPets, { status: "" });
+		assert.equal(resourcePath, expectedPath("/pets", [["status", ""]]));
+	});
+
+	it("drops an absent key and emits no lone question mark", () => {
+		const { resourcePath } = evaluateRequest(listPets, {});
+		assert.equal(resourcePath, expectedPath("/pets", []));
+	});
+
 	it("repeats the key once per element of an exploded array", () => {
 		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
 			status: ["Available", "Pending"],
 		});
-		assert.equal(resourcePath, "/pets?status=Available&status=Pending");
+		assert.equal(
+			resourcePath,
+			expectedPath("/pets", [
+				["status", "Available"],
+				["status", "Pending"],
+			]),
+		);
 	});
 
-	it("url-encodes each element", () => {
+	it("encodes each element of a repeated key", () => {
 		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
 			status: ["a/b", "c d"],
 		});
-		assert.equal(resourcePath, "/pets?status=a%2Fb&status=c+d");
+		assert.equal(
+			resourcePath,
+			expectedPath("/pets", [
+				["status", "a/b"],
+				["status", "c d"],
+			]),
+		);
 	});
 
 	it("carries scalar params alongside the repeated key", () => {
@@ -212,37 +272,39 @@ describe("emitRestResolver array query params", () => {
 			continuationToken: "abc",
 			status: ["Sold"],
 		});
-		assert.equal(resourcePath, "/pets?continuationToken=abc&status=Sold");
-	});
-
-	it("drops absent optional params and emits no lone question mark", () => {
-		const request = evaluateRequest(listPetsByStatuses, {});
-		assert.equal(request.resourcePath, "/pets");
-		assert.equal(request.params.query, undefined);
+		assert.equal(
+			resourcePath,
+			expectedPath("/pets", [
+				["continuationToken", "abc"],
+				["status", "Sold"],
+			]),
+		);
 	});
 
 	it("emits nothing for an empty array", () => {
 		const { resourcePath } = evaluateRequest(listPetsByStatuses, {
 			status: [],
 		});
-		assert.equal(resourcePath, "/pets");
+		assert.equal(resourcePath, expectedPath("/pets", []));
 	});
 
-	it("comma-joins a non-exploded array into params.query", () => {
-		const { params, resourcePath } = evaluateRequest(listPetsByCsvStatuses, {
-			status: ["Available", "Pending"],
-		});
-		assert.equal(resourcePath, "/pets");
-		assert.deepEqual(params.query, { status: "Available,Pending" });
+	it("drops an unset optional scalar next to a set required one", () => {
+		const { resourcePath } = evaluateRequest(
+			{
+				...listPets,
+				queryParams: [
+					{ name: "from", optional: false, array: false, explode: true },
+					{ name: "status", optional: true, array: false, explode: true },
+				],
+			},
+			{ from: "2026-10-01" },
+		);
+		assert.equal(resourcePath, expectedPath("/pets", [["from", "2026-10-01"]]));
 	});
 
-	it("never puts an array into params.query", () => {
-		for (const op of [listPetsByStatuses, listPetsByCsvStatuses]) {
-			const { params } = evaluateRequest(op, { status: ["Available"] });
-			for (const value of Object.values(params.query ?? {})) {
-				assert.equal(typeof value, "string");
-			}
-		}
+	it("sends a set optional scalar", () => {
+		const { resourcePath } = evaluateRequest(listPets, { status: "Sold" });
+		assert.equal(resourcePath, expectedPath("/pets", [["status", "Sold"]]));
 	});
 });
 
