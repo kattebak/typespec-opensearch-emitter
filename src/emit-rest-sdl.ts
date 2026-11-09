@@ -7,6 +7,11 @@ import type {
 	Union,
 } from "@typespec/compiler";
 import { getGraphqlDirectives, isGraphqlId } from "./decorators.js";
+import {
+	renderDescription,
+	resolveDescription,
+	withDescription,
+} from "./descriptions.js";
 import { toGraphQLType } from "./graphql-types.js";
 import { isModelUnion, isObjectModel, restTypeName } from "./rest-names.js";
 import type { ResolvedRestOperation } from "./rest-operations.js";
@@ -121,10 +126,10 @@ function renderGroup(
 		blocks.push(renderModelBlock(program, model, "type", registry));
 	}
 	for (const union of registry.unions.values()) {
-		blocks.push(renderUnionBlock(union));
+		blocks.push(renderUnionBlock(program, union));
 	}
 	for (const enumType of registry.enums.values()) {
-		blocks.push(renderEnumBlock(enumType));
+		blocks.push(renderEnumBlock(program, enumType));
 	}
 	for (const model of registry.inputs.values()) {
 		blocks.push(renderModelBlock(program, model, "input", registry));
@@ -139,34 +144,75 @@ function renderGroup(
 	return `${blocks.join("\n\n")}\n`;
 }
 
+interface RenderedArg {
+	name: string;
+	type: string;
+	description?: string;
+}
+
 function renderField(
 	program: Program,
 	op: ResolvedRestOperation,
 	registry: TypeRegistry,
 ): string {
-	const args: string[] = [];
+	const args: RenderedArg[] = [];
 	for (const param of op.pathParams) {
 		const gqlType = param.property
 			? restPropertyRef(program, param.property, registry, "object")
 			: "String";
-		args.push(`${param.name}: ${gqlType}!`);
+		args.push({
+			name: param.name,
+			type: `${gqlType}!`,
+			description: resolveDescription(program, param.property),
+		});
 	}
 	for (const param of op.queryParams) {
 		const gqlType = param.property
 			? restPropertyRef(program, param.property, registry, "object")
 			: "String";
-		args.push(`${param.name}: ${gqlType}${param.optional ? "" : "!"}`);
+		args.push({
+			name: param.name,
+			type: `${gqlType}${param.optional ? "" : "!"}`,
+			description: resolveDescription(program, param.property),
+		});
 	}
 	if (op.bodyParamName && op.bodyModel) {
 		const inputType = restTypeRef(program, op.bodyModel, registry, "input");
-		args.push(`${op.bodyParamName}: ${inputType}!`);
+		args.push({
+			name: op.bodyParamName,
+			type: `${inputType}!`,
+			description: resolveDescription(
+				program,
+				op.operation.parameters.properties.get(op.bodyParamName),
+			),
+		});
 	}
 
 	const returnRef = restTypeRef(program, op.returnType, registry, "object");
 	const directives = getGraphqlDirectives(program, op.operation) ?? [];
 	attachObjectDirectives(op.returnType, directives, registry, new Set());
-	const argList = args.length > 0 ? `(${args.join(", ")})` : "";
-	return `  ${op.fieldName}${argList}: ${returnRef}${directiveSuffix(directives)}`;
+	return withDescription(
+		renderDescription(resolveDescription(program, op.operation), "  "),
+		`  ${op.fieldName}${renderArgList(args)}: ${returnRef}${directiveSuffix(directives)}`,
+	);
+}
+
+/**
+ * An argument description only parses on its own line, so a field with one
+ * described argument breaks its whole argument list across lines.
+ */
+function renderArgList(args: RenderedArg[]): string {
+	if (args.length === 0) return "";
+	if (!args.some((arg) => arg.description)) {
+		return `(${args.map((arg) => `${arg.name}: ${arg.type}`).join(", ")})`;
+	}
+	const lines = args.map((arg) =>
+		withDescription(
+			renderDescription(arg.description, "    "),
+			`    ${arg.name}: ${arg.type}`,
+		),
+	);
+	return `(\n${lines.join("\n")}\n  )`;
 }
 
 function directiveSuffix(directives: string[]): string {
@@ -299,12 +345,15 @@ function registerUnion(
 	}
 }
 
-function renderUnionBlock(union: Union): string {
+function renderUnionBlock(program: Program, union: Union): string {
 	const members = [...union.variants.values()]
 		.map((variant) => variant.type)
 		.filter(isObjectModel)
 		.map(restTypeName);
-	return `union ${restTypeName(union)} = ${members.join(" | ")}`;
+	return withDescription(
+		renderDescription(resolveDescription(program, union)),
+		`union ${restTypeName(union)} = ${members.join(" | ")}`,
+	);
 }
 
 function renderModelBlock(
@@ -317,19 +366,28 @@ function renderModelBlock(
 	const fieldLines = [...model.properties.values()].map((property) => {
 		const gqlType = restPropertyRef(program, property, registry, position);
 		const nullable = property.optional ? "" : "!";
-		return `  ${property.name}: ${gqlType}${nullable}`;
+		return withDescription(
+			renderDescription(resolveDescription(program, property), "  "),
+			`  ${property.name}: ${gqlType}${nullable}`,
+		);
 	});
 	const name = restTypeName(model);
 	const directives =
 		keyword === "type" ? (registry.objectDirectives.get(name) ?? []) : [];
-	return `${keyword} ${name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
+	return withDescription(
+		renderDescription(resolveDescription(program, model)),
+		`${keyword} ${name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`,
+	);
 }
 
-function renderEnumBlock(enumType: Enum): string {
+function renderEnumBlock(program: Program, enumType: Enum): string {
 	const memberLines = [...enumType.members.values()].map(
 		(member) => `  ${member.name}`,
 	);
-	return `enum ${enumType.name} {\n${memberLines.join("\n")}\n}`;
+	return withDescription(
+		renderDescription(resolveDescription(program, enumType)),
+		`enum ${enumType.name} {\n${memberLines.join("\n")}\n}`,
+	);
 }
 
 export const __test = {

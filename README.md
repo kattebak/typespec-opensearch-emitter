@@ -494,6 +494,7 @@ Each fragment contains:
 - **Object type** — derived 1:1 from the search-doc TypeScript interface. Field types map from TypeSpec scalars to GraphQL scalars (`string` → `String`, `int32` → `Int`, `float64` → `Float`, `boolean` → `Boolean`).
 - **Filter input** — one optional `String` argument per `@keyword` field for term matching. Omitted if the projection has no keyword fields.
 - **Connection envelope** — `*Connection`, `*Edge`, and `PageInfo` types implementing opaque cursor pagination via `search_after`.
+- **Descriptions** — the `@doc` text of each emitted type and field, as a block string. See [Descriptions](#descriptions-doc).
 
 Example output for `PetSearchDoc`:
 
@@ -528,6 +529,56 @@ type PageInfo {
   endCursor: String
 }
 ```
+
+### Descriptions (`@doc`)
+
+`@doc` text, and the text of a `/** */` doc comment, becomes a GraphQL description on the type, field or argument it documents. The text is emitted verbatim as a block string; a literal `"""` inside it is escaped. A type, field or argument without `@doc` gets no description, and the emitter never writes one of its own.
+
+A `SearchProjection<T>` declares no properties, so a projection reads its descriptions from the source model and its properties. Declaring `@doc` on the projection or on a redeclared property overrides that, the same way `@analyzer` and `@searchAs` do.
+
+```typespec
+@doc("A pet in the clinic.")
+model Pet {
+  @doc("The pet's name.")
+  @searchable name: string;
+
+  @searchable species: string;
+}
+
+@indexName("pets_v1")
+model PetSearchDoc is SearchProjection<Pet> {}
+```
+
+```graphql
+"""
+A pet in the clinic.
+"""
+type PetSearchDoc {
+  """
+  The pet's name.
+  """
+  name: String!
+  species: String!
+}
+```
+
+The `@restResolver` SDL carries descriptions too: a documented operation describes its `Query` or `Mutation` field, and a documented parameter describes its argument. An argument description breaks that field's argument list across lines, because SDL only parses a description on a line of its own.
+
+```graphql
+type Query {
+  """
+  Read one pet.
+  """
+  getPet(
+    """
+    Which pet to read.
+    """
+    petId: String!
+  ): Pet
+}
+```
+
+The filter, sort, aggregation and connection types the emitter invents carry no description.
 
 ### APPSYNC_JS resolver (`.js`)
 

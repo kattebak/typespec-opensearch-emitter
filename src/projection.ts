@@ -20,6 +20,7 @@ import {
 	isSearchSkip,
 	isSortable,
 } from "./decorators.js";
+import { resolveDescription } from "./descriptions.js";
 
 function isReachable(
 	program: Program,
@@ -61,6 +62,8 @@ export { getProjectionSourceModel, isSearchProjectionModel };
 export interface ResolvedProjectionField {
 	name: string;
 	projectedName?: string;
+	/** `@doc` text for the field, from the projection or the source property. */
+	doc?: string;
 	type: Type;
 	optional: boolean;
 	sourceProperty: ModelProperty;
@@ -382,6 +385,8 @@ function resolveProjectionField(
 		(projectionProperty && getSearchAs(program, projectionProperty)) ??
 		getSearchAs(program, sourceProperty);
 
+	const doc = resolveDescription(program, projectionProperty, sourceProperty);
+
 	const explicitAggregations =
 		(projectionProperty &&
 			getAggregatableDirectives(program, projectionProperty)) ??
@@ -425,6 +430,7 @@ function resolveProjectionField(
 	return {
 		name: sourceProperty.name,
 		projectedName: searchAs,
+		doc,
 		type: fieldType,
 		optional: projectionProperty?.optional ?? sourceProperty.optional,
 		sourceProperty,
