@@ -18,6 +18,11 @@ import {
 	isSearchable,
 } from "./decorators.js";
 import {
+	renderDescription,
+	resolveDescription,
+	withDescription,
+} from "./descriptions.js";
+import {
 	buildSearchFilterShape,
 	type FilterSpecNode,
 	type SearchFilterShape,
@@ -180,10 +185,32 @@ function renderObjectType(
 			const gqlName = field.projectedName ?? field.name;
 			const gqlType = responseFieldType(program, field);
 			const nullable = field.optional ? "" : "!";
-			return `  ${gqlName}: ${gqlType}${nullable}`;
+			return withDescription(
+				renderDescription(field.doc, "  "),
+				`  ${gqlName}: ${gqlType}${nullable}`,
+			);
 		});
 
-	return `type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
+	return withDescription(
+		renderDescription(projectionDescription(program, projection)),
+		`type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`,
+	);
+}
+
+/**
+ * A `SearchProjection<T>` model declares no properties of its own, so the
+ * description a reader wants lives on the source model. The projection's own
+ * `@doc` still wins when it has one.
+ */
+function projectionDescription(
+	program: Program,
+	projection: ResolvedProjection,
+): string | undefined {
+	return resolveDescription(
+		program,
+		projection.projectionModel,
+		projection.sourceModel,
+	);
 }
 
 /**
@@ -315,14 +342,22 @@ function collectRawStructType(
 		const gqlName = getSearchAs(program, prop) ?? prop.name;
 		const gqlType = rawPropType(program, prop);
 		const nullable = prop.optional ? "" : "!";
-		fieldLines.push(`  ${gqlName}: ${gqlType}${nullable}`);
+		fieldLines.push(
+			withDescription(
+				renderDescription(resolveDescription(program, prop), "  "),
+				`  ${gqlName}: ${gqlType}${nullable}`,
+			),
+		);
 		const child = structModelOf(prop.type);
 		if (child) children.push(child);
 	}
 
 	const directives = resolveDirectives(program, model, defaults);
 	out.push(
-		`type ${model.name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`,
+		withDescription(
+			renderDescription(resolveDescription(program, model)),
+			`type ${model.name}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`,
+		),
 	);
 
 	for (const child of children) {
@@ -354,9 +389,15 @@ function renderVirtualStructType(
 		const gqlName = field.projectedName ?? field.name;
 		const gqlType = toGraphQLType(program, field.type, field);
 		const nullable = field.optional ? "" : "!";
-		return `  ${gqlName}: ${gqlType}${nullable}`;
+		return withDescription(
+			renderDescription(field.doc, "  "),
+			`  ${gqlName}: ${gqlType}${nullable}`,
+		);
 	});
-	return `type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`;
+	return withDescription(
+		renderDescription(projectionDescription(program, sub)),
+		`type ${typeName}${directiveSuffix(directives)} {\n${fieldLines.join("\n")}\n}`,
+	);
 }
 
 function renderFilterInput(projection: ResolvedProjection): string | undefined {

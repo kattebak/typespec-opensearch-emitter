@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Scalar, Type, Union } from "@typespec/compiler";
+import { createTestHost, createTestWrapper } from "@typespec/compiler/testing";
 import {
 	__test,
 	emitGraphQLSdl,
 	toGraphQLQueryFieldName,
 } from "./emit-graphql-sdl.js";
-import type { ResolvedProjection } from "./projection.js";
+import {
+	type ResolvedProjection,
+	resolveProjectionModel,
+} from "./projection.js";
+import { OpenSearchEmitterTestLibrary } from "./testing/index.js";
 
 function makeProjection(
 	overrides: Partial<{
@@ -1441,5 +1446,164 @@ describe("resolveDirectives (issue #121)", () => {
 		} as never;
 		const result = __test.resolveDirectives(program, model, undefined);
 		assert.deepEqual(result, []);
+	});
+});
+
+async function emitFixtureSdl(code: string, projectionName: string) {
+	const host = await createTestHost({
+		libraries: [OpenSearchEmitterTestLibrary],
+	});
+	const runner = createTestWrapper(host, {
+		autoImports: ["@kattebak/typespec-opensearch-emitter"],
+		autoUsings: ["Kattebak.OpenSearch"],
+	});
+	const diagnostics = await runner.diagnose(code);
+	assert.deepEqual(
+		diagnostics.filter((d) => d.severity === "error"),
+		[],
+	);
+	const projectionModel = runner.program
+		.getGlobalNamespaceType()
+		.models.get(projectionName);
+	assert.ok(projectionModel);
+	const projection = resolveProjectionModel(runner.program, projectionModel);
+	assert.ok(projection);
+	return emitGraphQLSdl(runner.program, projection, defaultOptions).content;
+}
+
+describe("@doc descriptions (issue #212)", () => {
+	const PETS = String.raw`
+      @doc("A postal address.")
+      model Address {
+        @doc("Street and number.")
+        @searchable street: string;
+
+        @searchable city: string;
+      }
+
+      @doc("A pet in the clinic.")
+      model Pet {
+        @doc("The pet's name.")
+        @searchable @keyword name: string;
+
+        @searchable species: string;
+
+        @doc("Where the pet lives.")
+        @searchable home: Address;
+      }
+
+      @indexName("pets_v1")
+      model PetSearchDoc is SearchProjection<Pet> {
+        @doc("The name, as indexed.")
+        name: string;
+      }
+	`;
+
+	it("describes the object type from the source model's @doc", async () => {
+		const content = await emitFixtureSdl(PETS, "PetSearchDoc");
+
+		assert.ok(
+			content.startsWith('"""\nA pet in the clinic.\n"""\ntype PetSearchDoc {'),
+		);
+	});
+
+	it("describes a field, and leaves an undocumented field bare", async () => {
+		const content = await emitFixtureSdl(PETS, "PetSearchDoc");
+
+		assert.ok(
+			content.includes(
+				'  """\n  The name, as indexed.\n  """\n  name: String!\n  species: String!\n',
+			),
+		);
+	});
+
+	it("falls back to the source property's @doc", async () => {
+		const content = await emitFixtureSdl(
+			String.raw`
+        model Pet {
+          @doc("The pet's name.")
+          @searchable name: string;
+        }
+
+        @indexName("pets_v1")
+        model PetSearchDoc is SearchProjection<Pet> {}
+      `,
+			"PetSearchDoc",
+		);
+
+		assert.ok(
+			content.includes('  """\n  The pet\'s name.\n  """\n  name: String!'),
+		);
+	});
+
+	it("describes a nested struct type and its fields", async () => {
+		const content = await emitFixtureSdl(PETS, "PetSearchDoc");
+
+		assert.ok(
+			content.includes(
+				'"""\nA postal address.\n"""\ntype Address {\n  """\n  Street and number.\n  """\n  street: String!\n  city: String!\n}',
+			),
+		);
+	});
+
+	it("emits no description for a projection without @doc", async () => {
+		const content = await emitFixtureSdl(
+			String.raw`
+        model Pet {
+          @searchable @keyword name: string;
+        }
+
+        @indexName("pets_v1")
+        model PetSearchDoc is SearchProjection<Pet> {}
+      `,
+			"PetSearchDoc",
+		);
+
+		assert.ok(!content.includes('"""'));
+	});
+
+	it("carries the text verbatim, escaping a triple quote", async () => {
+		const content = await emitFixtureSdl(
+			String.raw`
+        model Pet {
+          @doc("A \"\"\" block, a trailing backslash \\ and a \"quote\".")
+          @searchable name: string;
+        }
+
+        @indexName("pets_v1")
+        model PetSearchDoc is SearchProjection<Pet> {}
+      `,
+			"PetSearchDoc",
+		);
+
+		assert.ok(
+			content.includes(
+				'  """\n  A \\""" block, a trailing backslash \\ and a "quote".\n  """\n  name: String!',
+			),
+		);
+	});
+
+	it("keeps the line breaks of a multi-line description", async () => {
+		const content = await emitFixtureSdl(
+			String.raw`
+        model Pet {
+          @doc("""
+            The pet's name.
+            Free text, so it is analyzed.
+            """)
+          @searchable name: string;
+        }
+
+        @indexName("pets_v1")
+        model PetSearchDoc is SearchProjection<Pet> {}
+      `,
+			"PetSearchDoc",
+		);
+
+		assert.ok(
+			content.includes(
+				'  """\n  The pet\'s name.\n  Free text, so it is analyzed.\n  """\n  name: String!',
+			),
+		);
 	});
 });

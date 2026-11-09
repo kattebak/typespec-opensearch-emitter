@@ -450,3 +450,130 @@ describe("emitRestSdl", () => {
 		assert.equal((content.match(/type PetResultList \{/g) ?? []).length, 1);
 	});
 });
+
+describe("@doc descriptions (issue #212)", () => {
+	const DOCUMENTED = String.raw`
+      @doc("A pet in the clinic.")
+      model Pet {
+        @doc("Stable identifier.")
+        petId: string;
+        name: string;
+      }
+
+      @doc("What to create.")
+      model CreatePetInput {
+        @doc("The pet's name.")
+        name: string;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @doc("Read one pet.")
+        @restResolver @get op getPet(@doc("Which pet to read.") @path petId: string): Pet;
+
+        @restResolver @get op listPets(@query status?: string): Pet[];
+
+        @restResolver @post op createPet(@doc("The pet to create.") @body input: CreatePetInput): Pet;
+      }
+	`;
+
+	it("describes an object type and its documented fields", async () => {
+		const { runner, resolved } = await resolveFixture(DOCUMENTED);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				'"""\nA pet in the clinic.\n"""\ntype Pet {\n  """\n  Stable identifier.\n  """\n  petId: String!\n  name: String!\n}',
+			),
+		);
+	});
+
+	it("describes a generated input type and its fields", async () => {
+		const { runner, resolved } = await resolveFixture(DOCUMENTED);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				'"""\nWhat to create.\n"""\ninput CreatePetInput {\n  """\n  The pet\'s name.\n  """\n  name: String!\n}',
+			),
+		);
+	});
+
+	it("describes the operation's field and breaks its args across lines", async () => {
+		const { runner, resolved } = await resolveFixture(DOCUMENTED);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				'  """\n  Read one pet.\n  """\n  getPet(\n    """\n    Which pet to read.\n    """\n    petId: String!\n  ): Pet',
+			),
+		);
+	});
+
+	it("describes a @body argument", async () => {
+		const { runner, resolved } = await resolveFixture(DOCUMENTED);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				'  createPet(\n    """\n    The pet to create.\n    """\n    input: CreatePetInput!\n  ): Pet',
+			),
+		);
+	});
+
+	it("keeps an undocumented field's args on one line", async () => {
+		const { runner, resolved } = await resolveFixture(DOCUMENTED);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(content.includes("  listPets(status: String): [Pet!]"));
+	});
+
+	it("describes an enum type", async () => {
+		const { runner, resolved } = await resolveFixture(String.raw`
+      @doc("How far along the visit is.")
+      enum PetStatus { Available, Pending, Sold }
+
+      model Pet { petId: string; status: PetStatus; }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				'"""\nHow far along the visit is.\n"""\nenum PetStatus {\n  Available\n',
+			),
+		);
+	});
+
+	it("emits no description for an undocumented schema", async () => {
+		const { runner, resolved } = await resolveFixture(PETSTORE);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(!content.includes('"""'));
+	});
+
+	it("carries the text verbatim, escaping a triple quote", async () => {
+		const { runner, resolved } = await resolveFixture(String.raw`
+      model Pet {
+        @doc("A \"\"\" block and a trailing backslash \\")
+        petId: string;
+      }
+
+      @route("/pets")
+      namespace Pets {
+        @restResolver @get op getPet(@path petId: string): Pet;
+      }
+    `);
+		const [{ content }] = emitRestSdl(runner.program, resolved);
+
+		assert.ok(
+			content.includes(
+				'  """\n  A \\""" block and a trailing backslash \\\n  """\n  petId: String!',
+			),
+		);
+	});
+});
