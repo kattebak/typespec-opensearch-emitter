@@ -203,7 +203,7 @@ function renderMapResponse(errorMap?: Record<string, string>): string {
 		.sort(([a], [b]) => Number(b) - Number(a))
 		.map(
 			([status, errorType]) =>
-				`\tif (statusCode === ${Number(status)}) util.error(parsed?.message ?? body, "${errorType}");`,
+				`\tif (statusCode === ${Number(status)}) util.error(parsed?.message ?? body, "${errorType}", null, parsed);`,
 		);
 
 	return [
@@ -212,7 +212,7 @@ function renderMapResponse(errorMap?: Record<string, string>): string {
 		"\tconst parsed = body ? JSON.parse(body) : null;",
 		"\tif (statusCode >= 200 && statusCode < 300) return parsed;",
 		...statusLines,
-		"\tutil.error(parsed?.message ?? body, `Http${statusCode}`, parsed);",
+		"\tutil.error(parsed?.message ?? body, `Http${statusCode}`, parsed, parsed);",
 		"}",
 	].join("\n");
 }
