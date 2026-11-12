@@ -339,22 +339,62 @@ describe("emitRestResolver header injection", () => {
 	});
 });
 
+interface AppSyncError {
+	message: string;
+	errorType: string;
+	data: unknown;
+	errorInfo: unknown;
+}
+
+type ResponseFactory = (
+	util: { error: (...args: unknown[]) => never },
+	ctx: { result: { statusCode: number; body: string } },
+) => unknown;
+
+function evaluateResponse(
+	op: RestOperationShape,
+	result: { statusCode: number; body: string },
+): AppSyncError {
+	const { content } = emitRestResolver(op);
+	const body = content
+		.replace('import { util } from "@aws-appsync/utils";', "")
+		.replaceAll("export function", "function");
+	const factory = new Function(
+		"util",
+		"ctx",
+		`${body}\nreturn response(ctx);`,
+	) as ResponseFactory;
+	const util = {
+		error: (...args: unknown[]): never => {
+			const [message, errorType, data, errorInfo] = args;
+			throw { message, errorType, data, errorInfo };
+		},
+	};
+
+	try {
+		factory(util, { result });
+	} catch (error) {
+		return error as AppSyncError;
+	}
+	throw new Error("response did not call util.error");
+}
+
 describe("emitRestResolver error mapping", () => {
 	it("maps 409/403 by default and falls through to Http<status>", () => {
 		const { content } = emitRestResolver(getPet);
 		assert.ok(
 			content.includes(
-				'if (statusCode === 409) util.error(parsed?.message ?? body, "ConflictError");',
+				'if (statusCode === 409) util.error(parsed?.message ?? body, "ConflictError", null, parsed);',
 			),
 		);
 		assert.ok(
 			content.includes(
-				'if (statusCode === 403) util.error(parsed?.message ?? body, "ForbiddenError");',
+				'if (statusCode === 403) util.error(parsed?.message ?? body, "ForbiddenError", null, parsed);',
 			),
 		);
 		assert.ok(
 			content.includes(
-				"util.error(parsed?.message ?? body, `Http${statusCode}`, parsed);",
+				"util.error(parsed?.message ?? body, `Http${statusCode}`, parsed, parsed);",
 			),
 		);
 	});
@@ -374,18 +414,49 @@ describe("emitRestResolver error mapping", () => {
 		});
 		assert.ok(
 			content.includes(
-				'if (statusCode === 404) util.error(parsed?.message ?? body, "NotFoundError");',
+				'if (statusCode === 404) util.error(parsed?.message ?? body, "NotFoundError", null, parsed);',
 			),
 		);
 		// Overridden status wins...
 		assert.ok(
 			content.includes(
-				'if (statusCode === 409) util.error(parsed?.message ?? body, "PetConflict");',
+				'if (statusCode === 409) util.error(parsed?.message ?? body, "PetConflict", null, parsed);',
 			),
 		);
 		// ...while untouched defaults survive.
 		assert.ok(content.includes('"ForbiddenError"'));
 		assert.ok(!content.includes('"ConflictError"'));
+	});
+
+	it("passes the parsed body as errorInfo on a mapped status", () => {
+		const errorBody = {
+			message: "Invalid pet",
+			fields: [{ name: "petId", reason: "unknown" }],
+		};
+		const error = evaluateResponse(getPet, {
+			statusCode: 409,
+			body: JSON.stringify(errorBody),
+		});
+		assert.deepEqual(error, {
+			message: "Invalid pet",
+			errorType: "ConflictError",
+			data: null,
+			errorInfo: errorBody,
+		});
+	});
+
+	it("passes the parsed body as data and errorInfo on an unmapped status", () => {
+		const errorBody = { message: "Teapot", detail: "short and stout" };
+		const error = evaluateResponse(getPet, {
+			statusCode: 418,
+			body: JSON.stringify(errorBody),
+		});
+		assert.deepEqual(error, {
+			message: "Teapot",
+			errorType: "Http418",
+			data: errorBody,
+			errorInfo: errorBody,
+		});
 	});
 
 	it("ships the documented default map", () => {

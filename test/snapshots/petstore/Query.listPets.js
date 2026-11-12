@@ -32,7 +32,7 @@ function mapResponse(ctx) {
 	const { statusCode, body } = ctx.result;
 	const parsed = body ? JSON.parse(body) : null;
 	if (statusCode >= 200 && statusCode < 300) return parsed;
-	if (statusCode === 409) util.error(parsed?.message ?? body, "ConflictError");
-	if (statusCode === 403) util.error(parsed?.message ?? body, "ForbiddenError");
-	util.error(parsed?.message ?? body, `Http${statusCode}`, parsed);
+	if (statusCode === 409) util.error(parsed?.message ?? body, "ConflictError", null, parsed);
+	if (statusCode === 403) util.error(parsed?.message ?? body, "ForbiddenError", null, parsed);
+	util.error(parsed?.message ?? body, `Http${statusCode}`, parsed, parsed);
 }
