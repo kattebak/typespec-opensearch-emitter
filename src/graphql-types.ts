@@ -1,5 +1,6 @@
 import type { Model, Program, Scalar, Type, Union } from "@typespec/compiler";
 import type { ResolvedProjectionField } from "./projection.js";
+import { isRecordModel } from "./utils.js";
 
 /**
  * Shared TypeSpec-type → GraphQL-type mapping, extracted verbatim from
@@ -102,6 +103,9 @@ function modelToGraphQL(
 			context,
 		);
 		return `[${elementType}!]`;
+	}
+	if (isRecordModel(model)) {
+		return "AWSJSON";
 	}
 
 	return "String";

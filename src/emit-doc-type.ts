@@ -12,7 +12,7 @@ import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
 } from "./projection.js";
-import { toKebabCase } from "./utils.js";
+import { isRecordModel, toKebabCase } from "./utils.js";
 
 export interface EmittedDocTypeFile {
 	fileName: string;
@@ -227,7 +227,7 @@ function renderModel(program: Program, model: Model, depth = 0): string {
 		return rendersAsUnion(element) ? `(${rendered})[]` : `${rendered}[]`;
 	}
 
-	if (model.name === "Record" && model.indexer?.value) {
+	if (isRecordModel(model) && model.indexer) {
 		return `Record<string, ${renderType(program, model.indexer.value, depth)}>`;
 	}
 

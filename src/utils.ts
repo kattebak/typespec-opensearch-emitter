@@ -1,4 +1,14 @@
+import type { Type } from "@typespec/compiler";
+
 const DATE_SCALAR_NAMES = ["plainDate", "utcDateTime", "offsetDateTime"];
+
+export function isRecordModel(type: Type): boolean {
+	return (
+		type.kind === "Model" &&
+		type.indexer?.key.name === "string" &&
+		type.properties.size === 0
+	);
+}
 
 export function isDateScalarName(name: string | undefined): boolean {
 	if (!name) return false;

@@ -65,6 +65,39 @@ describe("decorators", () => {
 		assert.equal(isSearchable(runner.program, description), false);
 	});
 
+	it("reports a filter, sort or aggregation on a Record field, also as an array", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Item {
+        @searchable @filterable("exists") attributes: Record<unknown>;
+        @searchable @sortable @aggregatable("terms") revisions: Record<string>[];
+      }
+    `);
+
+		assert.deepEqual(
+			diagnostics.map((d) => d.code),
+			Array(3).fill(
+				"@kattebak/typespec-opensearch-emitter/record-field-not-indexed",
+			),
+		);
+	});
+
+	it("rejects @nested on an array of Records", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Item {
+        @searchable @nested revisions: Record<string>[];
+      }
+    `);
+
+		assert.ok(
+			hasDiagnosticCode(
+				diagnostics.map((d) => d.code),
+				"nested-array-model-required",
+			),
+		);
+	});
+
 	it("stores values for decorators and resolves explicit index name", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

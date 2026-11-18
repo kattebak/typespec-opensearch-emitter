@@ -311,6 +311,45 @@ describe("mapping emitter", () => {
 		assert.equal(runner.program.diagnostics.length, 0);
 	});
 
+	it("maps a Record as an object it stores without indexing", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Settings is Record<string>;
+
+      model Item {
+        @searchable attributes: Record<unknown>;
+        @searchable revisions: Record<string>[];
+        @searchable settings: Settings;
+      }
+
+      model ItemSearchDoc is SearchProjection<Item> {}
+    `);
+		assert.equal(diagnostics.length, 0);
+
+		const projection = runner.program
+			.getGlobalNamespaceType()
+			.models.get("ItemSearchDoc");
+		assert.ok(projection);
+
+		const resolved = resolveProjectionModel(runner.program, projection);
+		assert.ok(resolved);
+		const parsed = JSON.parse(emitMapping(runner.program, resolved).content);
+
+		assert.deepEqual(parsed.mappings.properties.attributes, {
+			type: "object",
+			enabled: false,
+		});
+		assert.deepEqual(parsed.mappings.properties.revisions, {
+			type: "object",
+			enabled: false,
+		});
+		assert.deepEqual(parsed.mappings.properties.settings, {
+			type: "object",
+			enabled: false,
+		});
+		assert.equal(runner.program.diagnostics.length, 0);
+	});
+
 	it("reports a field whose type kind has no mapping", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

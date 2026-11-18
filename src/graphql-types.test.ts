@@ -40,3 +40,15 @@ describe("scalarToGraphQL 64-bit integer mapping", () => {
 		assert.equal(map("int32", "rest"), "Int");
 	});
 });
+
+describe("modelToGraphQL", () => {
+	it("maps a Record to AWSJSON", () => {
+		const record = {
+			kind: "Model",
+			name: "Record",
+			indexer: { key: scalar("string"), value: scalar("unknown") },
+			properties: new Map(),
+		} as unknown as Type;
+		assert.equal(toGraphQLType(dummyProgram, record), "AWSJSON");
+	});
+});

@@ -206,6 +206,12 @@ export const $lib = createTypeSpecLibrary({
 				default: paramMessage`Projection "${"name"}" needs ${"count"} pipeline functions after the resolver split, over AppSync's limit of 10 functions per pipeline resolver. Reduce the @filterable/@aggregatable surface, or split the projection into narrower documents.`,
 			},
 		},
+		"record-field-not-indexed": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Field "${"field"}" is a Record, which the mapping stores without indexing, so it cannot be filtered, sorted or aggregated. Remove the decorator, or declare the keys the search needs as model properties.`,
+			},
+		},
 		"unsupported-scalar-type": {
 			severity: "error",
 			messages: {

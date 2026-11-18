@@ -418,6 +418,12 @@ In the example above:
 | `bytes` | `binary` |
 | `Model` | `object` (with nested properties) |
 | `Model[]` + `@nested` | `nested` (with nested properties) |
+| `Record<T>` | `object` with `enabled: false` |
+
+A `Record<T>` stays in `_source` and returns as `AWSJSON`, but is not indexed:
+its keys are data, and indexing them would add a mapping field per key. A
+filter, sort or aggregation on it fails the compile with
+`record-field-not-indexed`.
 
 `plainTime` and `duration` are keyword rather than `date`: OpenSearch has no
 time-of-day or duration type, and `date` anchors both to an instant — it rejects

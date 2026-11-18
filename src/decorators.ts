@@ -11,6 +11,7 @@ import type {
 	ResolvableByDeclaration,
 } from "./joins.js";
 import { reportDiagnostic, StateKeys } from "./lib.js";
+import { isRecordModel } from "./utils.js";
 
 export const namespace = "Kattebak.OpenSearch";
 
@@ -48,6 +49,7 @@ export function $sortable(
 	context: DecoratorContext,
 	target: ModelProperty,
 ): void {
+	if (rejectsRecord(context, target)) return;
 	context.program.stateSet(StateKeys.sortable).add(target);
 }
 
@@ -412,7 +414,25 @@ function isArrayOfModelType(type: Type): boolean {
 	}
 
 	const elementType = type.indexer?.value;
-	return elementType?.kind === "Model";
+	return elementType?.kind === "Model" && !isRecordModel(elementType);
+}
+
+function rejectsRecord(
+	context: DecoratorContext,
+	target: ModelProperty,
+): boolean {
+	const type = target.type;
+	const element =
+		type.kind === "Model" && type.name === "Array"
+			? type.indexer?.value
+			: undefined;
+	if (!isRecordModel(element ?? type)) return false;
+	reportDiagnostic(context.program, {
+		code: "record-field-not-indexed",
+		format: { field: target.name },
+		target,
+	});
+	return true;
 }
 
 export const AGGREGATION_KINDS = [
@@ -755,6 +775,7 @@ export function $aggregatable(
 	target: ModelProperty,
 	...args: unknown[]
 ): void {
+	if (rejectsRecord(context, target)) return;
 	if (args.length === 0) {
 		reportDiagnostic(context.program, {
 			code: "aggregatable-requires-kind",
@@ -884,6 +905,7 @@ export function $filterable(
 	target: ModelProperty,
 	...kinds: string[]
 ): void {
+	if (rejectsRecord(context, target)) return;
 	if (kinds.length === 0) {
 		reportDiagnostic(context.program, {
 			code: "filterable-requires-kind",

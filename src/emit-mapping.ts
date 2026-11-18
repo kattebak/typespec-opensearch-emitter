@@ -21,7 +21,7 @@ import type {
 	ResolvedProjection,
 	ResolvedProjectionField,
 } from "./projection.js";
-import { toKebabCase } from "./utils.js";
+import { isRecordModel, toKebabCase } from "./utils.js";
 
 export interface EmittedMappingFile {
 	fileName: string;
@@ -254,9 +254,13 @@ function mapModel(
 	override?: MappingOverride,
 	defaultIgnoreAbove?: number,
 ): MappingProperty {
+	// A record's keys are data, so indexing them would add a mapping field per key.
+	if (isRecordModel(model)) {
+		return { type: "object", enabled: false };
+	}
 	if (model.name === "Array" && model.indexer?.value) {
 		const elementType = model.indexer.value;
-		if (elementType.kind === "Model") {
+		if (elementType.kind === "Model" && !isRecordModel(elementType)) {
 			return {
 				type: override?.nested ? "nested" : "object",
 				properties: mapModelProperties(
